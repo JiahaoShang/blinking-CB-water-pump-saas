@@ -1,0 +1,22 @@
+# Local environment and dependency output
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+dist/
+build/
+coverage/
+
+# Local databases and uploaded/generated assets
+*.db
+*.db-shm
+*.db-wal
+storage/
+uploads/
+
+# Operating system and editor files
+.DS_Store
+.idea/
+.vscode/
+
