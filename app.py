@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, quote, urlparse
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "data" / "app.db"
 UPLOAD_DIR = ROOT / "data" / "uploads"
+DEMO_SEED_FILE = ROOT / "fixtures" / "demo_seed.json"
 REQUIRED_FIELDS = ("flow_range", "head_range", "media", "material")
 MATCH_REQUIRED_FIELDS = ("flow", "head", "media")
 REQUIREMENT_LABELS = {
@@ -998,6 +999,77 @@ class Database:
             created += 1
         return created
 
+    def seed_demo_workspace(self, tenant_id: str, actor: str = "demo-admin") -> dict[str, int]:
+        """Load the tracked fixture into a tenant without duplicating RFQs."""
+        if not DEMO_SEED_FILE.is_file():
+            raise ValueError("项目缺少 fixtures/demo_seed.json")
+        self.seed_demo_products(tenant_id, actor)
+        for product in self.list_products(tenant_id):
+            if product["model"] in {"CB-80A", "CB-120C"} and product["status"] in {"draft", "pending_review", "approved"}:
+                self.approve_product(tenant_id, product["id"], actor)
+                self.publish_product(tenant_id, product["id"], actor)
+        fixture = json.loads(DEMO_SEED_FILE.read_text(encoding="utf-8"))
+        created_rfqs = 0
+        created_tasks = 0
+        for inquiry in fixture.get("inquiries", []):
+            submission_key = str(inquiry["key"])
+            if self.get_rfq_by_submission_key(tenant_id, submission_key):
+                continue
+            conversation_id = self.create_conversation(tenant_id, "demo-fixture", inquiry.get("locale", "en"))
+            question_message_id = self.save_message(tenant_id, conversation_id, "buyer", inquiry["message"], "demo-fixture")
+            values = {
+                key: {
+                    **item,
+                    "state": "confirmed",
+                    "source": "demo-fixture",
+                }
+                for key, item in inquiry.get("requirements", {}).items()
+            }
+            revision_id = self.create_requirement_revision(tenant_id, conversation_id, values, "confirmed", "demo-fixture")
+            status, results, _missing = match_products(self, tenant_id, values)
+            recommendation_id = self.save_recommendation(tenant_id, conversation_id, revision_id, status, results)
+            rfq_id, created = self.create_rfq(
+                tenant_id,
+                conversation_id,
+                submission_key,
+                inquiry["contact"],
+                inquiry.get("notes", ""),
+            )
+            if not created:
+                continue
+            created_rfqs += 1
+            self.update_lead(
+                tenant_id,
+                rfq_id,
+                inquiry.get("stage", "new"),
+                inquiry.get("owner", ""),
+                inquiry.get("next_follow_up", ""),
+                inquiry.get("lead_note", ""),
+                actor,
+            )
+            if created_tasks == 0 and fixture.get("human_task"):
+                human_task = fixture["human_task"]
+                task_message_id = self.save_message(tenant_id, conversation_id, "buyer", human_task["question"], "demo-fixture")
+                self.create_human_task(
+                    tenant_id,
+                    conversation_id,
+                    task_message_id,
+                    human_task["question"],
+                    human_task["reason"],
+                    {
+                        "confirmed_requirements": values,
+                        "recommendation_id": recommendation_id,
+                        "product_model": results[0]["model"] if results else None,
+                        "answer_so_far": human_task.get("answer_so_far", ""),
+                    },
+                    results[0]["product_id"] if results else None,
+                    results[0]["product_version_id"] if results else None,
+                    revision_id,
+                    recommendation_id,
+                )
+                created_tasks += 1
+        return {"products": len(self.list_products(tenant_id)), "rfqs": created_rfqs, "tasks": created_tasks}
+
 
 def number_from_text(value: str) -> float | None:
     match = re.search(r"-?\d+(?:[.,]\d+)?", value or "")
@@ -1278,6 +1350,8 @@ class Handler(BaseHTTPRequestHandler):
         self.user_id = user["id"]
         if path == "/admin":
             allowed = {"admin", "sales", "engineer"}
+        elif path.startswith("/admin/demo"):
+            allowed = {"admin"}
         elif path.startswith("/admin/users"):
             allowed = {"admin"}
         elif path.startswith("/admin/products"):
@@ -1433,6 +1507,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.actor,
                 )
                 self.redirect("/admin/users?notice=created")
+                return
+            if path == "/admin/demo/seed":
+                summary = self.db.seed_demo_workspace(self.tenant_id, self.actor)
+                self.redirect(f"/admin?notice=demo&rfqs={summary['rfqs']}&tasks={summary['tasks']}")
                 return
             match = re.fullmatch(r"/inquiry/([a-f0-9]+)/message", path)
             if match:
@@ -1727,6 +1805,9 @@ class Handler(BaseHTTPRequestHandler):
         summary = self.db.get_admin_summary(self.tenant_id)
         role_labels = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}
         role_label = role_labels.get(self.user_role, self.user_role)
+        demo_notice = ""
+        if query.get("notice", [""])[0] == "demo":
+            demo_notice = f"<div class='notice'>演示数据已加载：新增 RFQ {esc(query.get('rfqs', ['0'])[0])} 条、人工任务 {esc(query.get('tasks', ['0'])[0])} 条；重复加载不会复制已有记录。</div>"
         cards = "".join(
             f"<div class='card'><div class='muted'>{label}</div><div class='metric'>{value}</div><div class='field-state'>{detail}</div></div>"
             for label, value, detail in (
@@ -1758,7 +1839,8 @@ class Handler(BaseHTTPRequestHandler):
             for record in records
         ) or "<tr><td colspan='4' class='muted'>暂无销售线索。</td></tr>"
         body = f"""
-<div class='toolbar'><div><h1>管理概览</h1><div class='muted'>当前企业：示例水泵企业（演示） · 当前账号：{esc(self.actor)}（{role_label}）</div></div><a class='button secondary' href='/logout'>退出登录</a></div>
+<div class='toolbar'><div><h1>管理概览</h1><div class='muted'>当前企业：示例水泵企业（演示） · 当前账号：{esc(self.actor)}（{role_label}）</div></div><div><form method='post' action='/admin/demo/seed' class='inline'><button class='secondary'>加载演示数据</button></form> <a class='button secondary' href='/logout'>退出登录</a></div></div>
+{demo_notice}
 <section class='metric-grid'>{cards}</section>
 <section class='grid' style='margin-top:18px'>{quick_html}</section>
 <div class='grid' style='margin-top:18px'><section class='card'><h2>待处理人工任务</h2><table><thead><tr><th>问题</th><th>型号</th><th>创建时间</th></tr></thead><tbody>{task_rows}</tbody></table></section><section class='card'><h2>最近销售线索</h2><table><thead><tr><th>记录</th><th>阶段</th><th>负责人</th><th>跟进日期</th></tr></thead><tbody>{lead_rows}</tbody></table></section></div>

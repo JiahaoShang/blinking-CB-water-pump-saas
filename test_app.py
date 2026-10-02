@@ -226,6 +226,33 @@ class RfqTests(unittest.TestCase):
         self.assertIn("目的地", json.loads(rfq["missing_json"]))
 
 
+class DemoFixtureTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.temp_dir.name) / "app.db")
+
+    def tearDown(self):
+        self.db.conn.close()
+        self.temp_dir.cleanup()
+
+    def test_demo_workspace_is_complete_and_idempotent(self):
+        first = self.db.seed_demo_workspace("demo-tenant")
+        self.assertEqual(first["products"], 2)
+        self.assertEqual(first["rfqs"], 2)
+        self.assertEqual(first["tasks"], 1)
+        self.assertEqual(len(self.db.list_rfqs("demo-tenant")), 2)
+        self.assertEqual(len(self.db.list_human_tasks("demo-tenant", "pending")), 1)
+        self.assertEqual({item["stage"] for item in self.db.list_sales_records("demo-tenant")}, {"technical_review", "needs_info"})
+        published = self.db.conn.execute("SELECT COUNT(*) FROM products WHERE tenant_id=? AND status='published'", ("demo-tenant",)).fetchone()[0]
+        self.assertEqual(published, 2)
+
+        second = self.db.seed_demo_workspace("demo-tenant")
+        self.assertEqual(second["rfqs"], 0)
+        self.assertEqual(second["tasks"], 0)
+        self.assertEqual(len(self.db.list_rfqs("demo-tenant")), 2)
+        self.assertEqual(len(self.db.list_human_tasks("demo-tenant", "pending")), 1)
+
+
 class SalesWorkspaceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
