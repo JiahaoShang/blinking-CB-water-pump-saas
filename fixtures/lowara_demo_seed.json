@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "description": "Internal Growave demo fixture extracted from the user-provided B2B_Pump_Demo_Research/Lowara folder.",
+  "source_root": "/Users/achain.xing/Downloads/B2B_Pump_Demo_Research/Lowara",
+  "authorization_note": "Lowara/Xylem source files are registered as metadata only. External redistribution permission is not confirmed.",
+  "products": [
+    {
+      "model": "3SV08NL007T",
+      "name": "Lowara e-SV 3SV08NL007T 立式多级离心泵",
+      "use_case": "楼宇和工厂供水增压、RO/超滤/软化等水处理、清洗、消防、制药食品、灌溉以及 HVAC 循环；最终用途需按介质和系统工况确认。",
+      "sources": [
+        {
+          "filename": "_数据详情.md",
+          "file_type": "MARKDOWN",
+          "source_location": "用户资料 B2B_Pump_Demo_Research/Lowara/_数据详情.md：产品用途、型号配置和授权说明"
+        },
+        {
+          "filename": "Lowara_e-SV_技术手册_50Hz_镜像brownbros_revB.pdf",
+          "file_type": "PDF",
+          "source_location": "Rev. B Ed.06/2012，第 24 页：1/3/5SV 50 Hz、2 poles 性能表，3SV08 行"
+        },
+        {
+          "filename": "LOWARA_CAD与官方手册说明.md",
+          "file_type": "MARKDOWN",
+          "source_location": "用户资料 Lowara/LOWARA_CAD与官方手册说明.md：CAD 型号映射、版本和再发布限制"
+        }
+      ],
+      "fields": {
+        "flow_range": {
+          "value": "0-4.4",
+          "unit": "m³/h",
+          "source_index": 1,
+          "source_location": "Rev. B 第 24 页 3SV08 行：目录点覆盖 Q=0 至 4.4 m³/h；不是独立的矩形选型范围"
+        },
+        "head_range": {
+          "value": "27.5-60",
+          "unit": "m",
+          "source_index": 1,
+          "source_location": "Rev. B 第 24 页 3SV08 行：目录点扬程约 60 至 27.5 m，随流量变化"
+        },
+        "performance_points": {
+          "value": "0:60;1.2:59.1;1.5:58.2;1.8:57;2.1:55.4;2.4:53.4;2.7:51;3:48.1;3.6:40.7;4.4:27.5",
+          "unit": "Q m³/h : H m",
+          "source_index": 1,
+          "source_location": "Rev. B 第 24 页 3SV08 行；系统用线性插值做演示初筛，最终工作点必须由工程师确认"
+        },
+        "media": {
+          "value": "不锈钢 e-SV 系列；清水和多种水处理/工艺水场景，具体介质兼容性需工程确认",
+          "unit": "",
+          "source_index": 0,
+          "source_location": "_数据详情.md：产品用途 / 适用场景；兼容性不得由 Demo 规则替代"
+        },
+        "material": {
+          "value": "本配置 AISI 316，圆法兰 PN25；系列资料同时覆盖 AISI 304/316",
+          "unit": "",
+          "source_index": 0,
+          "source_location": "_数据详情.md：3SV08NL007T 配置说明"
+        },
+        "power": {
+          "value": "0.75",
+          "unit": "kW",
+          "source_index": 0,
+          "source_location": "_数据详情.md：型号编码 007 = 0.75 kW；Rev. B 第 24 页 3SV08 行额定功率"
+        }
+      }
+    }
+  ]
+}

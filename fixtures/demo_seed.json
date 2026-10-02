@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "description": "Growave MVP demo workspace: one complete RFQ, one lead waiting for buyer information, and one pending engineering task.",
+  "inquiries": [
+    {
+      "key": "growave-demo-complete-rfq-v1",
+      "locale": "en",
+      "message": "We need a water pump for cooling water, flow 50 m3/h, head 30 m, clean water.",
+      "requirements": {
+        "category": {"value": "water pump", "unit": "", "label": "品类"},
+        "use_case": {"value": "factory cooling water", "unit": "", "label": "用途"},
+        "flow": {"value": "50", "unit": "m3/h", "label": "流量"},
+        "head": {"value": "30", "unit": "m", "label": "扬程"},
+        "media": {"value": "clean water", "unit": "", "label": "介质"},
+        "quantity": {"value": "2", "unit": "", "label": "数量"},
+        "region": {"value": "Germany", "unit": "", "label": "目的地"},
+        "delivery": {"value": "8 weeks", "unit": "", "label": "期望交期"}
+      },
+      "contact": {
+        "contact_name": "Maya Becker",
+        "company": "Nordstern Cooling GmbH",
+        "contact_email": "maya.becker@example.invalid",
+        "contact_phone": "+49 30 555 0102",
+        "quantity": "2",
+        "region": "Germany",
+        "delivery": "8 weeks"
+      },
+      "notes": "Please confirm the final operating point with an engineer.",
+      "stage": "technical_review",
+      "owner": "Alex",
+      "next_follow_up": "2030-01-15",
+      "lead_note": "Confirm the clean-water operating point with engineering before quoting."
+    },
+    {
+      "key": "growave-demo-needs-info-rfq-v1",
+      "locale": "zh",
+      "message": "我们需要用于工厂冷却水的水泵，流量 50 m3/h，扬程 30 m，清水。",
+      "requirements": {
+        "category": {"value": "水泵", "unit": "", "label": "品类"},
+        "use_case": {"value": "工厂冷却水", "unit": "", "label": "用途"},
+        "flow": {"value": "50", "unit": "m3/h", "label": "流量"},
+        "head": {"value": "30", "unit": "m", "label": "扬程"},
+        "media": {"value": "清水", "unit": "", "label": "介质"}
+      },
+      "contact": {
+        "contact_name": "李工",
+        "company": "华东设备有限公司",
+        "contact_email": "li.gong@example.invalid",
+        "contact_phone": "+86 21 5555 0103"
+      },
+      "notes": "客户还在确认数量、目的地和期望交期。",
+      "stage": "needs_info",
+      "owner": "",
+      "next_follow_up": "2030-01-20",
+      "lead_note": "等待买方补充数量、目的地和期望交期。"
+    }
+  ],
+  "human_task": {
+    "question": "Can this pump be used for a project with a guaranteed delivery date?",
+    "reason": "交期属于当前核准产品资料之外的商业承诺，需要销售和工程师确认。",
+    "answer_so_far": "当前资料没有交期承诺，系统不会猜测。",
+    "stage": "technical_review"
+  }
+}
