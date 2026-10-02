@@ -1,0 +1,656 @@
+#!/usr/bin/env python3
+"""Small, dependency-free MVP application for product approval and publishing.
+
+The first slice deliberately keeps the business modules in one process while
+persisting all state in SQLite. It is intended for local development and demo
+data, not production authentication or file storage.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import html
+import json
+import mimetypes
+import os
+import re
+import secrets
+import sqlite3
+import tempfile
+from datetime import datetime, timezone
+from email.parser import BytesParser
+from email.policy import default
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, quote, urlparse
+
+
+ROOT = Path(__file__).resolve().parent
+DEFAULT_DB = ROOT / "data" / "app.db"
+UPLOAD_DIR = ROOT / "data" / "uploads"
+REQUIRED_FIELDS = ("flow_range", "head_range", "media", "material")
+FIELD_LABELS = {
+    "flow_range": "流量范围",
+    "head_range": "扬程范围",
+    "media": "介质适用条件",
+    "material": "材质",
+    "power": "功率",
+    "temperature": "介质温度",
+}
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def esc(value: object) -> str:
+    return html.escape("" if value is None else str(value), quote=True)
+
+
+def slugify(model: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", model.lower()).strip("-")
+    return slug or secrets.token_hex(4)
+
+
+def parse_float(value: str | None) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+class Database:
+    def __init__(self, path: str | os.PathLike[str]):
+        self.path = str(path)
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self.init_schema()
+
+    def init_schema(self) -> None:
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS tenants (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS products (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                model TEXT NOT NULL,
+                name TEXT NOT NULL,
+                use_case TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                slug TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (tenant_id, model),
+                UNIQUE (tenant_id, slug)
+            );
+            CREATE TABLE IF NOT EXISTS source_documents (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                product_id TEXT NOT NULL REFERENCES products(id),
+                filename TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                source_location TEXT NOT NULL,
+                sha256 TEXT,
+                storage_path TEXT,
+                processing_status TEXT NOT NULL DEFAULT 'registered',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS product_fields (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                product_id TEXT NOT NULL REFERENCES products(id),
+                field_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                value TEXT NOT NULL DEFAULT '',
+                unit TEXT NOT NULL DEFAULT '',
+                source_document_id TEXT REFERENCES source_documents(id),
+                source_location TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'candidate',
+                approved_by TEXT,
+                approved_at TEXT,
+                updated_at TEXT NOT NULL,
+                UNIQUE (product_id, field_key)
+            );
+            CREATE TABLE IF NOT EXISTS product_versions (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                product_id TEXT NOT NULL REFERENCES products(id),
+                version INTEGER NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                published_at TEXT,
+                UNIQUE (product_id, version)
+            );
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                details TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tenants(id, name, created_at) VALUES (?, ?, ?)",
+            ("demo-tenant", "示例水泵企业（演示）", now_iso()),
+        )
+        self.conn.commit()
+
+    def _audit(self, tenant_id: str, entity_type: str, entity_id: str, action: str, actor: str, details: str = "") -> None:
+        self.conn.execute(
+            "INSERT INTO audit_log(tenant_id, entity_type, entity_id, action, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (tenant_id, entity_type, entity_id, action, actor, details, now_iso()),
+        )
+
+    def ensure_tenant(self, tenant_id: str, name: str | None = None) -> None:
+        """Create a tenant only for local fixtures; production auth owns this boundary."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tenants(id, name, created_at) VALUES (?, ?, ?)",
+            (tenant_id, name or tenant_id, now_iso()),
+        )
+        self.conn.commit()
+
+    def list_products(self, tenant_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT p.*, (SELECT COUNT(*) FROM source_documents s WHERE s.product_id=p.id) AS source_count, "
+            "(SELECT COUNT(*) FROM product_fields f WHERE f.product_id=p.id AND f.state='approved') AS approved_count "
+            "FROM products p WHERE p.tenant_id=? ORDER BY p.updated_at DESC",
+            (tenant_id,),
+        ).fetchall()
+
+    def get_product(self, tenant_id: str, product_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM products WHERE tenant_id=? AND id=?", (tenant_id, product_id)
+        ).fetchone()
+
+    def get_product_by_slug(self, tenant_id: str, slug: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM products WHERE tenant_id=? AND slug=?", (tenant_id, slug)
+        ).fetchone()
+
+    def get_sources(self, tenant_id: str, product_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM source_documents WHERE tenant_id=? AND product_id=? ORDER BY created_at DESC",
+            (tenant_id, product_id),
+        ).fetchall()
+
+    def get_fields(self, tenant_id: str, product_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT f.*, s.filename AS source_filename FROM product_fields f "
+            "LEFT JOIN source_documents s ON s.id=f.source_document_id "
+            "WHERE f.tenant_id=? AND f.product_id=? ORDER BY f.field_key",
+            (tenant_id, product_id),
+        ).fetchall()
+
+    def get_published_version(self, tenant_id: str, product_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM product_versions WHERE tenant_id=? AND product_id=? AND status='published' "
+            "ORDER BY version DESC LIMIT 1",
+            (tenant_id, product_id),
+        ).fetchone()
+
+    def create_product(self, tenant_id: str, model: str, name: str, use_case: str, actor: str = "demo-admin") -> str:
+        self.ensure_tenant(tenant_id)
+        model = model.strip()
+        name = name.strip() or model
+        if not model:
+            raise ValueError("型号不能为空")
+        product_id = secrets.token_hex(12)
+        slug = slugify(model)
+        timestamp = now_iso()
+        try:
+            self.conn.execute(
+                "INSERT INTO products(id, tenant_id, model, name, use_case, status, slug, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?)",
+                (product_id, tenant_id, model, name, use_case.strip(), slug, timestamp, timestamp),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("该企业下已有相同型号") from exc
+        self._audit(tenant_id, "product", product_id, "created", actor, model)
+        self.conn.commit()
+        return product_id
+
+    def add_source(
+        self,
+        tenant_id: str,
+        product_id: str,
+        filename: str,
+        file_type: str,
+        source_location: str,
+        content: bytes | None = None,
+        actor: str = "demo-admin",
+    ) -> str:
+        if not self.get_product(tenant_id, product_id):
+            raise ValueError("产品不存在")
+        source_id = secrets.token_hex(12)
+        sha256 = hashlib.sha256(content).hexdigest() if content else None
+        storage_path = None
+        status = "registered"
+        if content:
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", Path(filename).name) or "source.bin"
+            target = UPLOAD_DIR / f"{source_id}-{safe_name}"
+            target.write_bytes(content)
+            storage_path = str(target.relative_to(ROOT))
+            status = "stored"
+        self.conn.execute(
+            "INSERT INTO source_documents(id, tenant_id, product_id, filename, file_type, source_location, sha256, storage_path, processing_status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (source_id, tenant_id, product_id, filename.strip(), file_type.strip() or "other", source_location.strip(), sha256, storage_path, status, now_iso()),
+        )
+        self._audit(tenant_id, "source_document", source_id, "registered", actor, filename)
+        self.conn.commit()
+        return source_id
+
+    def save_field(
+        self,
+        tenant_id: str,
+        product_id: str,
+        field_key: str,
+        value: str,
+        unit: str,
+        source_document_id: str | None,
+        source_location: str,
+        actor: str = "demo-admin",
+    ) -> None:
+        if field_key not in FIELD_LABELS:
+            raise ValueError("不支持的字段")
+        product = self.get_product(tenant_id, product_id)
+        if not product:
+            raise ValueError("产品不存在")
+        if source_document_id:
+            source = self.conn.execute(
+                "SELECT id FROM source_documents WHERE id=? AND tenant_id=? AND product_id=?",
+                (source_document_id, tenant_id, product_id),
+            ).fetchone()
+            if not source:
+                raise ValueError("来源文件不属于当前产品")
+        self.conn.execute(
+            "INSERT INTO product_fields(id, tenant_id, product_id, field_key, label, value, unit, source_document_id, source_location, state, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?) "
+            "ON CONFLICT(product_id, field_key) DO UPDATE SET value=excluded.value, unit=excluded.unit, source_document_id=excluded.source_document_id, source_location=excluded.source_location, state='candidate', approved_by=NULL, approved_at=NULL, updated_at=excluded.updated_at",
+            (secrets.token_hex(12), tenant_id, product_id, field_key, FIELD_LABELS[field_key], value.strip(), unit.strip(), source_document_id or None, source_location.strip(), now_iso()),
+        )
+        self.conn.execute("UPDATE products SET status='pending_review', updated_at=? WHERE id=? AND tenant_id=?", (now_iso(), product_id, tenant_id))
+        self._audit(tenant_id, "product_field", product_id, "updated_candidate", actor, field_key)
+        self.conn.commit()
+
+    def approve_product(self, tenant_id: str, product_id: str, actor: str = "demo-admin") -> None:
+        product = self.get_product(tenant_id, product_id)
+        if not product:
+            raise ValueError("产品不存在")
+        fields = {row["field_key"]: row for row in self.get_fields(tenant_id, product_id)}
+        missing = [FIELD_LABELS[key] for key in REQUIRED_FIELDS if key not in fields or not fields[key]["value"].strip() or not fields[key]["source_document_id"]]
+        if missing:
+            raise ValueError("必须先补齐有来源的字段：" + "、".join(missing))
+        self.conn.execute(
+            "UPDATE product_fields SET state='approved', approved_by=?, approved_at=? WHERE tenant_id=? AND product_id=? AND value <> ''",
+            (actor, now_iso(), tenant_id, product_id),
+        )
+        self.conn.execute("UPDATE products SET status='approved', updated_at=? WHERE tenant_id=? AND id=?", (now_iso(), tenant_id, product_id))
+        self._audit(tenant_id, "product", product_id, "approved", actor)
+        self.conn.commit()
+
+    def publish_product(self, tenant_id: str, product_id: str, actor: str = "demo-admin") -> int:
+        product = self.get_product(tenant_id, product_id)
+        if not product:
+            raise ValueError("产品不存在")
+        if product["status"] not in ("approved", "published"):
+            raise ValueError("只有已核准产品才能发布")
+        fields = self.get_fields(tenant_id, product_id)
+        missing = [FIELD_LABELS[key] for key in REQUIRED_FIELDS if not any(f["field_key"] == key and f["state"] == "approved" and f["value"].strip() for f in fields)]
+        if missing:
+            raise ValueError("还有未核准字段：" + "、".join(missing))
+        previous = self.get_published_version(tenant_id, product_id)
+        version = (previous["version"] if previous else 0) + 1
+        snapshot = {
+            "product": {"model": product["model"], "name": product["name"], "use_case": product["use_case"], "slug": product["slug"]},
+            "fields": [dict(field) for field in fields if field["state"] == "approved"],
+            "published_at": now_iso(),
+        }
+        if previous:
+            self.conn.execute("UPDATE product_versions SET status='withdrawn' WHERE id=?", (previous["id"],))
+        self.conn.execute(
+            "INSERT INTO product_versions(id, tenant_id, product_id, version, snapshot_json, status, created_by, created_at, published_at) VALUES (?, ?, ?, ?, ?, 'published', ?, ?, ?)",
+            (secrets.token_hex(12), tenant_id, product_id, version, json.dumps(snapshot, ensure_ascii=False), actor, now_iso(), snapshot["published_at"]),
+        )
+        self.conn.execute("UPDATE products SET status='published', updated_at=? WHERE tenant_id=? AND id=?", (now_iso(), tenant_id, product_id))
+        self._audit(tenant_id, "product", product_id, "published", actor, f"version={version}")
+        self.conn.commit()
+        return version
+
+    def withdraw_product(self, tenant_id: str, product_id: str, actor: str = "demo-admin") -> None:
+        product = self.get_product(tenant_id, product_id)
+        if not product:
+            raise ValueError("产品不存在")
+        self.conn.execute("UPDATE product_versions SET status='withdrawn' WHERE tenant_id=? AND product_id=? AND status='published'", (tenant_id, product_id))
+        self.conn.execute("UPDATE products SET status='withdrawn', updated_at=? WHERE tenant_id=? AND id=?", (now_iso(), tenant_id, product_id))
+        self._audit(tenant_id, "product", product_id, "withdrawn", actor)
+        self.conn.commit()
+
+    def seed_demo_products(self, tenant_id: str, actor: str = "demo-admin") -> int:
+        samples = [
+            {
+                "model": "CB-80A",
+                "name": "CB-80A 清水离心泵",
+                "use_case": "清水循环、工厂冷却水和一般供水",
+                "fields": {
+                    "flow_range": ("20-80", "m³/h"),
+                    "head_range": ("18-42", "m"),
+                    "media": ("清水及低粘度、非腐蚀性液体", ""),
+                    "material": ("铸铁泵体，不锈钢叶轮", ""),
+                    "power": ("15", "kW"),
+                },
+            },
+            {
+                "model": "CB-120C",
+                "name": "CB-120C 耐腐蚀化工泵",
+                "use_case": "化工工艺输送和含弱腐蚀介质循环",
+                "fields": {
+                    "flow_range": ("40-120", "m³/h"),
+                    "head_range": ("28-65", "m"),
+                    "media": ("弱酸碱、低浓度化工液体；需工程确认", ""),
+                    "material": ("316L 不锈钢过流部件", ""),
+                    "temperature": ("-10 至 90", "°C"),
+                },
+            },
+        ]
+        created = 0
+        for sample in samples:
+            if self.conn.execute("SELECT 1 FROM products WHERE tenant_id=? AND model=?", (tenant_id, sample["model"])).fetchone():
+                continue
+            product_id = self.create_product(tenant_id, sample["model"], sample["name"], sample["use_case"], actor)
+            source_id = self.add_source(tenant_id, product_id, f"{sample['model']}-模拟产品手册.pdf", "PDF", "第 1 页：规格参数表", actor=actor)
+            for key, (value, unit) in sample["fields"].items():
+                self.save_field(tenant_id, product_id, key, value, unit, source_id, "第 1 页：规格参数表", actor)
+            created += 1
+        return created
+
+
+def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh") -> str:
+    return f"""<!doctype html>
+<html lang='{ 'en' if lang == 'en' else 'zh-CN' }'>
+<head>
+<meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>{esc(title)} · CB Water Pump SaaS</title>
+<style>
+:root{{--ink:#102a43;--muted:#627d98;--line:#d9e2ec;--blue:#1677ff;--teal:#0e9384;--bg:#f5f8fb;--card:#fff;--warn:#b45309;--danger:#b42318;}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}}
+a{{color:var(--blue);text-decoration:none}}a:hover{{text-decoration:underline}}header{{background:#102a43;color:white;padding:18px 28px;display:flex;justify-content:space-between;align-items:center;gap:16px}}header strong{{font-size:18px}}header nav{{display:flex;gap:16px;align-items:center}}header a{{color:#d9e2ec}}main{{max-width:1180px;margin:30px auto;padding:0 20px}}h1{{font-size:32px;letter-spacing:-.02em;margin:0 0 6px}}h2{{font-size:21px;margin:0 0 14px}}h3{{font-size:16px;margin:20px 0 8px}}.muted{{color:var(--muted)}}.notice{{padding:12px 14px;border-radius:10px;background:#e7f5f2;color:#086f63;margin:0 0 20px}}.error{{padding:12px 14px;border-radius:10px;background:#fff0ee;color:var(--danger);margin:0 0 20px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}}.card{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:0 5px 18px rgba(16,42,67,.05)}}.toolbar{{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:22px}}button,.button{{border:0;border-radius:9px;padding:9px 14px;background:var(--blue);color:#fff;font-weight:650;cursor:pointer;display:inline-block}}button.secondary,.button.secondary{{background:#e7eef7;color:var(--ink)}}button.warn,.button.warn{{background:#fff3d6;color:var(--warn)}}button.danger,.button.danger{{background:#fff0ee;color:var(--danger)}}form.inline{{display:inline}}label{{display:block;font-weight:650;margin:10px 0 4px}}input,select,textarea{{width:100%;padding:9px 10px;border:1px solid #bcccdc;border-radius:8px;font:inherit;background:#fff}}textarea{{min-height:76px;resize:vertical}}.form-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px}}.full{{grid-column:1/-1}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line);vertical-align:top}}th{{font-size:13px;color:var(--muted)}}.badge{{display:inline-flex;align-items:center;border-radius:999px;padding:2px 9px;font-size:12px;font-weight:700;background:#e7eef7;color:var(--ink)}}.badge.published,.badge.approved{{background:#e7f5f2;color:#086f63}}.badge.pending_review{{background:#fff3d6;color:#925c00}}.badge.withdrawn{{background:#fff0ee;color:var(--danger)}}.field-state{{font-size:12px;color:var(--muted)}}.source{{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}}.product-hero{{background:linear-gradient(135deg,#102a43,#0e9384);color:white;border-radius:20px;padding:32px;margin-bottom:20px}}.product-hero .eyebrow{{text-transform:uppercase;letter-spacing:.12em;font-size:12px;opacity:.8}}.product-hero h1{{font-size:38px;margin:4px 0 8px}}.kv{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:20px}}.kv div{{background:rgba(255,255,255,.12);padding:12px;border-radius:10px}}.kv b{{display:block;font-size:12px;opacity:.8}}.kv span{{font-size:18px;font-weight:700}}.footer-note{{margin-top:28px;padding:13px;border-left:3px solid #f0b429;background:#fffaf0;color:#7c5b10}}@media(max-width:700px){{header{{padding:15px 18px;align-items:flex-start;flex-direction:column}}main{{margin:20px auto;padding:0 14px}}.form-grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}h1{{font-size:27px}}.product-hero h1{{font-size:31px}}table{{font-size:13px}}th:nth-child(3),td:nth-child(3){{display:none}}}}
+</style></head><body>
+<header><strong>CB Water Pump SaaS</strong><nav><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>
+<main>{body}</main></body></html>"""
+
+
+def status_badge(status: str) -> str:
+    labels = {"draft": "草稿", "pending_review": "待核准", "approved": "已核准", "published": "已发布", "withdrawn": "已撤回"}
+    return f"<span class='badge {esc(status)}'>{esc(labels.get(status, status))}</span>"
+
+
+def parse_multipart(handler: BaseHTTPRequestHandler) -> dict[str, str | bytes]:
+    content_type = handler.headers.get("Content-Type", "")
+    length = int(handler.headers.get("Content-Length", "0"))
+    payload = handler.rfile.read(length)
+    if not content_type.startswith("multipart/form-data"):
+        values = parse_qs(payload.decode("utf-8"), keep_blank_values=True)
+        return {key: vals[-1] for key, vals in values.items()}
+    message = BytesParser(policy=default).parsebytes(b"Content-Type: " + content_type.encode() + b"\r\nMIME-Version: 1.0\r\n\r\n" + payload)
+    result: dict[str, str | bytes] = {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        filename = part.get_filename()
+        content = part.get_payload(decode=True) or b""
+        result[name] = content if filename else content.decode(part.get_content_charset() or "utf-8", errors="replace")
+        if filename:
+            result[f"{name}__filename"] = filename
+    return result
+
+
+class Handler(BaseHTTPRequestHandler):
+    db: Database
+    tenant_id = "demo-tenant"
+    actor = "demo-admin"
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def redirect(self, location: str) -> None:
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", location)
+        self.end_headers()
+
+    def send_html(self, content: str, status: int = 200) -> None:
+        data = content.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_bytes(self, content: bytes, content_type: str, filename: str, status: int = 200) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(filename)}")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        query = parse_qs(parsed.query)
+        if path == "/":
+            self.redirect("/admin/products")
+            return
+        if path == "/admin/products":
+            self.admin_products(query)
+            return
+        match = re.fullmatch(r"/admin/products/([a-f0-9]+)/?", path)
+        if match:
+            self.admin_product(match.group(1), query)
+            return
+        match = re.fullmatch(r"/products/([a-zA-Z0-9-]+)/?", path)
+        if match:
+            self.public_product(match.group(1), query)
+            return
+        match = re.fullmatch(r"/products/([a-zA-Z0-9-]+)/sources/([a-f0-9]+)/?", path)
+        if match:
+            self.public_source(match.group(1), match.group(2))
+            return
+        if path.startswith("/files/"):
+            self.send_html(layout("文件下载", "<div class='error'>演示环境不提供公开文件直链，请从企业后台下载或补充对象存储权限。</div>"), 404)
+            return
+        self.send_html(layout("未找到", "<div class='error'>页面不存在</div>"), 404)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        try:
+            form = parse_multipart(self)
+            if path == "/admin/products":
+                self.db.create_product(self.tenant_id, str(form.get("model", "")), str(form.get("name", "")), str(form.get("use_case", "")), self.actor)
+                self.redirect("/admin/products")
+                return
+            if path == "/admin/products/seed":
+                self.db.seed_demo_products(self.tenant_id, self.actor)
+                self.redirect("/admin/products?notice=demo")
+                return
+            match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources", path)
+            if match:
+                product_id = match.group(1)
+                content = form.get("source_file") if isinstance(form.get("source_file"), bytes) else None
+                filename = str(form.get("source_file__filename", "")) or str(form.get("filename", ""))
+                self.db.add_source(self.tenant_id, product_id, filename or "未命名资料", str(form.get("file_type", "other")), str(form.get("source_location", "")), content, self.actor)
+                self.redirect(f"/admin/products/{product_id}?notice=source")
+                return
+            match = re.fullmatch(r"/admin/products/([a-f0-9]+)/fields", path)
+            if match:
+                product_id = match.group(1)
+                self.db.save_field(self.tenant_id, product_id, str(form.get("field_key", "")), str(form.get("value", "")), str(form.get("unit", "")), str(form.get("source_document_id", "")) or None, str(form.get("source_location", "")), self.actor)
+                self.redirect(f"/admin/products/{product_id}?notice=field")
+                return
+            match = re.fullmatch(r"/admin/products/([a-f0-9]+)/(approve|publish|withdraw)", path)
+            if match:
+                product_id, action = match.groups()
+                if action == "approve":
+                    self.db.approve_product(self.tenant_id, product_id, self.actor)
+                elif action == "publish":
+                    self.db.publish_product(self.tenant_id, product_id, self.actor)
+                else:
+                    self.db.withdraw_product(self.tenant_id, product_id, self.actor)
+                self.redirect(f"/admin/products/{product_id}?notice={action}")
+                return
+        except (ValueError, sqlite3.Error) as exc:
+            self.send_html(layout("操作未完成", f"<div class='error'>{esc(exc)}</div><p><a href='/admin/products'>返回产品列表</a></p>"), 400)
+            return
+        self.send_html(layout("未找到", "<div class='error'>操作不存在</div>"), 404)
+
+    def admin_products(self, query: dict[str, list[str]]) -> None:
+        lang = query.get("lang", ["zh"])[0]
+        products = self.db.list_products(self.tenant_id)
+        notice = query.get("notice", [""])[0]
+        notice_html = "<div class='notice'>示例资料已登记为候选值，请逐个核对后核准，再发布到买方产品页。</div>" if notice == "demo" else ""
+        row_parts = []
+        for product in products:
+            public_link = (
+                f"<a class='button secondary' href='/products/{esc(product['slug'])}' target='_blank'>打开买方页</a>"
+                if product["status"] == "published"
+                else "<span class='muted'>未公开</span>"
+            )
+            row_parts.append(
+                f"<tr><td><a href='/admin/products/{product['id']}'>{esc(product['model'])}</a><br><span class='muted'>{esc(product['name'])}</span></td>"
+                f"<td>{status_badge(product['status'])}</td><td>{product['approved_count']} 个字段已核准 / {product['source_count']} 份来源</td>"
+                f"<td>{public_link}</td></tr>"
+            )
+        rows = "".join(row_parts) or "<tr><td colspan='4' class='muted'>还没有产品，请先导入示例或新建型号。</td></tr>"
+        body = f"""
+<div class='toolbar'><div><h1>{'产品资料与发布' if lang == 'zh' else 'Products & publishing'}</h1><div class='muted'>企业：示例水泵企业（演示） · 当前操作员：管理员</div></div><form method='post' action='/admin/products/seed' class='inline'><button class='secondary'>导入两款示例水泵</button></form></div>
+{notice_html}
+<div class='grid'>
+<section class='card'><h2>新建产品型号</h2><form method='post' action='/admin/products'><label>型号 *</label><input name='model' placeholder='例如 CB-80A' required><label>产品名称</label><input name='name' placeholder='买方页面显示名称'><label>主要用途</label><textarea name='use_case' placeholder='例如清水循环、化工介质输送'></textarea><p><button>创建草稿</button></p></form></section>
+<section class='card'><h2>当前切片</h2><p>产品资料登记 → 来源文件 → 字段候选值 → 人工核准 → 版本发布 → 固定买方页面。</p><p class='muted'>未核准字段不会进入公开页；重新编辑已发布字段会回到待核准状态。</p></section>
+</div>
+<section class='card' style='margin-top:18px'><h2>产品列表</h2><table><thead><tr><th>型号</th><th>状态</th><th>资料完整度</th><th>买方页面</th></tr></thead><tbody>{rows}</tbody></table></section>
+"""
+        self.send_html(layout("产品资料与发布", body, lang=lang), 200)
+
+    def admin_product(self, product_id: str, query: dict[str, list[str]]) -> None:
+        product = self.db.get_product(self.tenant_id, product_id)
+        if not product:
+            self.send_html(layout("未找到", "<div class='error'>产品不存在或不属于当前企业。</div>"), 404)
+            return
+        sources = self.db.get_sources(self.tenant_id, product_id)
+        fields = self.db.get_fields(self.tenant_id, product_id)
+        notice = query.get("notice", [""])[0]
+        notice_text = {"source": "来源资料已保存。", "field": "字段已保存为候选值，需重新核准。", "approve": "产品字段已核准。", "publish": "产品版本已发布。", "withdraw": "公开版本已撤回。"}.get(notice, "")
+        field_rows = "".join(
+            f"<tr><td><b>{esc(field['label'])}</b><br><span class='field-state'>{esc(field['field_key'])}</span></td><td>{esc(field['value'])} {esc(field['unit'])}</td><td>{status_badge(field['state'])}<br><span class='field-state'>{esc(field['source_filename'] or '未关联来源')} · {esc(field['source_location'])}</span></td></tr>"
+            for field in fields
+        ) or "<tr><td colspan='3' class='muted'>尚未登记字段。</td></tr>"
+        source_options = "<option value=''>请选择来源</option>" + "".join(f"<option value='{esc(source['id'])}'>{esc(source['filename'])} · {esc(source['source_location'])}</option>" for source in sources)
+        source_rows = "".join(f"<div class='source'><span><b>{esc(source['filename'])}</b><br><span class='muted'>{esc(source['file_type'])} · {esc(source['source_location'])}</span></span><span class='field-state'>{esc(source['processing_status'])}</span></div>" for source in sources) or "<p class='muted'>还没有来源资料。</p>"
+        field_options = "".join(f"<option value='{key}'>{esc(label)}</option>" for key, label in FIELD_LABELS.items())
+        action_buttons = f"<form method='post' action='/admin/products/{product_id}/approve' class='inline'><button>核准字段</button></form> <form method='post' action='/admin/products/{product_id}/publish' class='inline'><button class='secondary'>发布新版本</button></form>" + (f" <form method='post' action='/admin/products/{product_id}/withdraw' class='inline'><button class='danger'>撤回公开页</button></form>" if product['status'] == 'published' else "")
+        notice_banner = f"<div class='notice'>{esc(notice_text)}</div>" if notice_text else ""
+        body = f"""
+<div class='toolbar'><div><a href='/admin/products'>← 返回产品列表</a><h1>{esc(product['model'])}</h1><div class='muted'>{esc(product['name'])} · {status_badge(product['status'])}</div></div><div>{action_buttons}</div></div>
+{notice_banner}
+<div class='grid'><section class='card'><h2>产品基本信息</h2><p><b>主要用途：</b>{esc(product['use_case']) or '未填写'}</p><p><b>固定买方链接：</b>{('/products/' + esc(product['slug'])) if product['status'] == 'published' else '发布后生成'}</p><p class='muted'>型号是产品通用事实；买方本次工况将在后续会话中单独保存，不写回这里。</p></section><section class='card'><h2>登记来源资料</h2>{source_rows}<hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>IMAGE</option><option>CAD</option><option>OTHER</option></select></div><div><label>原文位置</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section></div>
+<section class='card' style='margin-top:18px'><h2>字段核对</h2><p class='muted'>关键字段必须有来源且核准后，才能进入产品版本和公开页面。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th></tr></thead><tbody>{field_rows}</tbody></table><hr><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></section>
+"""
+        self.send_html(layout(f"{product['model']} · 字段核对", body), 200)
+
+    def public_product(self, slug: str, query: dict[str, list[str]]) -> None:
+        product = self.db.get_product_by_slug(self.tenant_id, slug)
+        if not product or product["status"] != "published":
+            self.send_html(layout("产品不可用", "<div class='error'>该产品页尚未发布，或已被撤回。</div><p><a href='/admin/products'>返回企业后台</a></p>"), 404)
+            return
+        version = self.db.get_published_version(self.tenant_id, product["id"])
+        if not version:
+            self.send_html(layout("产品不可用", "<div class='error'>找不到已发布版本。</div>"), 404)
+            return
+        snapshot = json.loads(version["snapshot_json"])
+        sources = self.db.get_sources(self.tenant_id, product["id"])
+        lang = query.get("lang", ["en"])[0]
+        field_cards = "".join(f"<div><b>{esc(field['label'])}</b><span>{esc(field['value'])} {esc(field['unit'])}</span></div>" for field in snapshot["fields"])
+        source_links = "".join(
+            f"<li>{esc(source['filename'])} · {esc(source['source_location'])} "
+            + (f"<a href='/products/{esc(product['slug'])}/sources/{esc(source['id'])}'>下载资料</a>" if source["storage_path"] else "<span class='muted'>仅登记元数据</span>")
+            + "</li>"
+            for source in sources
+        ) or "<li class='muted'>暂无公开资料附件</li>"
+        title = f"{product['model']} | Industrial Pump"
+        body = f"""
+<div class='product-hero'><div class='eyebrow'>Published product version {version['version']}</div><h1>{esc(product['model'])}</h1><p>{esc(product['name'])}</p><div class='kv'>{field_cards}</div></div>
+<div class='grid'><section class='card'><h2>{'Application' if lang == 'en' else '适用场景'}</h2><p>{esc(product['use_case'])}</p><p class='muted'>{'The values above come from the approved product record and its cited source. Please confirm final sizing with an engineer.' if lang == 'en' else '以上参数来自已核准产品版本及其引用资料。正式选型前请与工程师确认。'}</p></section><section class='card'><h2>{'Source documents' if lang == 'en' else '来源资料'}</h2><ul>{source_links}</ul></section><section class='card'><h2>{'Next step' if lang == 'en' else '继续沟通'}</h2><p>{'Need help checking flow, head or medium compatibility?' if lang == 'en' else '需要核对流量、扬程或介质适用条件？'}</p><a class='button' href='mailto:sales@example.invalid?subject={quote(product['model'])}'>Ask sales / 询价</a></section></div>
+<div class='footer-note'>{'This is an initial technical display, not a price, stock, delivery or engineering-fit commitment.' if lang == 'en' else '这是初步技术展示，不代表价格、库存、交期或正式工程适配承诺。'} · <a href='/products/{esc(product['slug'])}?lang={'zh' if lang == 'en' else 'en'}'>{'切换中文' if lang == 'en' else 'Switch to English'}</a></div>
+"""
+        page = layout(title, body, lang=lang)
+        json_ld = json.dumps({'@context': 'https://schema.org', '@type': 'Product', 'name': product['name'], 'model': product['model']}, ensure_ascii=False).replace("</", "<\\/")
+        page = page.replace("</head>", f"<meta name='description' content='{esc(product['name'])} - approved industrial pump specifications'><script type='application/ld+json'>{json_ld}</script></head>")
+        self.send_html(page, 200)
+
+    def public_source(self, slug: str, source_id: str) -> None:
+        product = self.db.get_product_by_slug(self.tenant_id, slug)
+        if not product or product["status"] != "published":
+            self.send_html(layout("资料不可用", "<div class='error'>产品未公开。</div>"), 404)
+            return
+        source = self.db.conn.execute(
+            "SELECT * FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
+            (self.tenant_id, product["id"], source_id),
+        ).fetchone()
+        if not source or not source["storage_path"]:
+            self.send_html(layout("资料不可用", "<div class='error'>该来源资料没有可下载文件。</div>"), 404)
+            return
+        target = ROOT / source["storage_path"]
+        if not target.is_file():
+            self.send_html(layout("资料不可用", "<div class='error'>文件存储不可用，请联系管理员。</div>"), 404)
+            return
+        content_type = mimetypes.guess_type(source["filename"])[0] or "application/octet-stream"
+        self.send_bytes(target.read_bytes(), content_type, source["filename"])
+
+
+def make_server(db_path: str | os.PathLike[str], host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:
+    database = Database(db_path)
+
+    class AppHandler(Handler):
+        db = database
+
+    return ThreadingHTTPServer((host, port), AppHandler)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="CB Water Pump SaaS MVP")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--db", default=str(DEFAULT_DB))
+    args = parser.parse_args()
+    server = make_server(args.db, args.host, args.port)
+    print(f"CB Water Pump SaaS running at http://{args.host}:{args.port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
