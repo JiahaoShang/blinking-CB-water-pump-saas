@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import Database, Handler, confirm_requirement_values, extract_requirement_values, match_products
+from app import Database, Handler, answer_from_approved_material, confirm_requirement_values, extract_requirement_values, match_products
 
 
 class ProductApprovalTests(unittest.TestCase):
@@ -130,6 +130,45 @@ class RequirementMatchingTests(unittest.TestCase):
         self.assertEqual([revision["revision"] for revision in revisions], [1, 2])
         self.assertEqual(sum(item["status"] == "invalidated" for item in recommendations), 1)
         self.assertEqual(sum(item["status"] == changed_status for item in recommendations), 1)
+
+
+class GroundedAnswerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.temp_dir.name) / "app.db")
+        self.db.seed_demo_products("demo-tenant")
+        for product in self.db.list_products("demo-tenant"):
+            self.db.approve_product("demo-tenant", product["id"])
+            self.db.publish_product("demo-tenant", product["id"])
+        self.product = self.db.conn.execute("SELECT * FROM products WHERE tenant_id=? AND model=?", ("demo-tenant", "CB-80A")).fetchone()
+
+    def tearDown(self):
+        self.db.conn.close()
+        self.temp_dir.cleanup()
+
+    def test_known_question_returns_answer_and_citation(self):
+        result = answer_from_approved_material(self.db, "demo-tenant", "What is the flow range?", self.product["id"])
+        status, answer, product_id, version_id, citations, reason = result
+        self.assertEqual(status, "grounded")
+        self.assertIn("20-80", answer)
+        self.assertEqual(product_id, self.product["id"])
+        self.assertTrue(version_id)
+        self.assertEqual(citations[0]["filename"], "CB-80A-模拟产品手册.pdf")
+        self.assertEqual(reason, "")
+
+    def test_unknown_question_creates_resolvable_task_without_changing_product_facts(self):
+        conversation_id = self.db.create_conversation("demo-tenant")
+        question_id = self.db.save_message("demo-tenant", conversation_id, "buyer", "What is the price and delivery time?")
+        status, answer, product_id, version_id, citations, reason = answer_from_approved_material(self.db, "demo-tenant", "What is the price and delivery time?", self.product["id"])
+        self.assertEqual(status, "needs_human")
+        self.assertIn("无法", answer)
+        task_id = self.db.create_human_task("demo-tenant", conversation_id, question_id, "What is the price and delivery time?", reason, {"answer_so_far": answer}, product_id, version_id)
+        self.db.resolve_human_task("demo-tenant", task_id, "工程师需要根据当前项目条件确认价格和交期。")
+        task = self.db.get_human_task("demo-tenant", task_id)
+        self.assertEqual(task["status"], "resolved")
+        self.assertIn("工程师", task["response"])
+        field = self.db.get_fields("demo-tenant", self.product["id"])[0]
+        self.assertNotEqual(field["value"], "工程师需要根据当前项目条件确认价格和交期。")
 
 
 if __name__ == "__main__":
