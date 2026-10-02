@@ -1,0 +1,23 @@
+﻿厂商,完整型号或系列名称,资料类型,原始网址,下载日期,文件名(相对路径),参数单位,是否为具体型号资料,使用条件核查状态,文件字节数
+Lowara,e-SV / 3SV08NL007T,入口说明与获取状态,https://cadcenter.lowara.com/en/series.php?cf=35,2026-09-27,Lowara/LOWARA_CAD与官方手册说明.md,—,是,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,2257
+Lowara,3SV08NL007T(e-SV / 3SV / 2 极 / 三相 / 0.75 kW),2D CAD 图纸 DXF(官方 CAD 中心),https://cad.lowara.com/dxf/e-SV/2-Pole/Dxf/3Sv/3SV-FL/3sv08fl007t-d_a_dd.zip,2026-09-27,Lowara/LOWARA_e-SV_3SV08NL007T_2D_DXF.zip,mm,是,"未核查 — 厂商版权资料,对外再发布须先确认授权",86467
+Lowara,3SV08NL007T,2D 图纸矢量图(自厂商 DXF 解析生成),https://cad.lowara.com/dxf/e-SV/2-Pole/Dxf/3Sv/3SV-FL/3sv08fl007t-d_a_dd.zip,2026-09-27,Lowara/LOWARA_e-SV_3SV08NL007T_2D图纸_矢量.svg,mm,是,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,183860
+Lowara,3SV08NL007T,2D 图纸预览图,https://cadcenter.lowara.com/png/3sv08fl007t_d_a_dd.png,2026-09-27,Lowara/LOWARA_e-SV_3SV08NL007T_2D预览.png,mm,是,"未核查 — 厂商版权资料,对外再发布须先确认授权",142627
+Lowara,3SV08NL007T,3D CAD 模型 STEP(官方 CAD 中心),https://cad.lowara.com/dxf/e-SV/2-Pole/Step/3Sv/3SV-FL/3sv08fl007t-d_a_3d.zip,2026-09-27,Lowara/LOWARA_e-SV_3SV08NL007T_3D_STEP.zip,mm,是,"未核查 — 厂商版权资料,对外再发布须先确认授权",830945
+Lowara,3SV08NL007T,3D 预览(网页),https://cadcenter.lowara.com/3d/3dm-3sv08nl007t.html.gz,2026-09-27,Lowara/LOWARA_e-SV_3SV08NL007T_3D预览.html.gz,—,是,"未核查 — 厂商版权资料,对外再发布须先确认授权",1180889
+Lowara,e-SV 系列(1SV~125SV),英文技术目录(Rev. B 版镜像),https://brownbros.co.nz/files/Technical_Data/TECHNICAL_Lowara_eSV-Series_e-sv-new-td-en.pdf,2026-09-27,Lowara/Lowara_e-SV_技术手册_50Hz_镜像brownbros_revB.pdf,"m³/h, m, kW, bar, °C",否(系列级),"未核查 — 厂商版权资料,对外再发布须先确认授权",5325249
+Lowara,e-SV 系列,英文技术目录(旧版镜像),https://lenntech.com/Data-sheets/Lowara-eSV-50Hz-EN-L.pdf,2026-09-27,Lowara/Lowara_e-SV_技术手册_50Hz_镜像lenntech.pdf,"m³/h, m, kW, bar, °C",否(系列级),"未核查 — 厂商版权资料,对外再发布须先确认授权",2207598
+Lowara,e-SV,过程记录(CAD 下载控件),https://cadcenter.lowara.com/en/series.php?cf=35,2026-09-27,Lowara/_cadcenter_widgets.json,—,是,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,1409
+Lowara,e-SV,过程记录(页面快照),https://cadcenter.lowara.com/en/series.php?cf=35,2026-09-27,Lowara/_snapshot_cadcenter.html,—,否,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,13153
+Lowara,e-SV 系列,产品页文本抓取,https://www.xylem.com/en-uk/products--services/pumps-packaged-pump-systems/pumps/multi-stage-pumps/vertical-horizontal/e-sv-stainless-steel-vertical-multi-stage-pumps/,2026-09-27,Lowara/_xylem_productpage_text.txt,—,否,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,7431
+Lowara,e-SV 产品页,被拦截证据(403),https://www.xylem.com/en-uk/products--services/pumps-packaged-pump-systems/pumps/multi-stage-pumps/vertical-horizontal/e-sv-stainless-steel-vertical-multi-stage-pumps/,2026-09-27,Lowara/_证据_产品页被拦截403.html,—,否,不适用(非资料),6436
+Lowara,e-SV 技术目录 Rev.M 2024,被拦截证据(403),https://www.xylem.com/siteassets/brand/lowara/resources/technical-brochure/191002071_m_01-2024_esv-50hz_en.pdf,2026-09-27,Lowara/_证据_官方PDF被Cloudflare拦截403.html,—,否,不适用(非资料),6180
+Lowara,3SV08NL007T,"2D 交互查看器(自厂商 DXF 生成,可平移缩放;自备白底配色,不依赖宿主主题)",https://cad.lowara.com/dxf/e-SV/2-Pole/Dxf/3Sv/3SV-FL/3sv08fl007t-d_a_dd.zip,2026-09-27,Lowara/lowara_esv_2d_viewer.html,mm,是,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,166566
+Lowara,3SV08NL007T,"3D 实体查看器(WebGL,基于厂商 CAD 中心网格;自备白底配色)",https://cadcenter.lowara.com/3d/3dm-3sv08nl007t.html.gz,2026-09-27,Lowara/lowara_esv_3d_viewer.html,mm,是,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,2584225
+Lowara,3SV08NL007T,2D 图纸渲染图(全幅),https://cad.lowara.com/dxf/e-SV/2-Pole/Dxf/3Sv/3SV-FL/3sv08fl007t-d_a_dd.zip,2026-09-27,Lowara/预览图/2D_全图_A0.png,mm,是,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,426730
+Lowara,3SV08NL007T,2D 图纸渲染图(三视图放大),https://cad.lowara.com/dxf/e-SV/2-Pole/Dxf/3Sv/3SV-FL/3sv08fl007t-d_a_dd.zip,2026-09-27,Lowara/预览图/2D_放大_三视图.png,mm,是,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,365738
+Lowara,3SV08NL007T,3D 渲染图(侧视),https://cadcenter.lowara.com/3d/3dm-3sv08nl007t.html.gz,2026-09-27,Lowara/预览图/3D_侧视.png,mm,是,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,169271
+Lowara,3SV08NL007T,3D 渲染图(俯视),https://cadcenter.lowara.com/3d/3dm-3sv08nl007t.html.gz,2026-09-27,Lowara/预览图/3D_俯视.png,mm,是,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,62733
+Lowara,3SV08NL007T,3D 渲染拼图(等轴/正视/侧视/俯视),https://cadcenter.lowara.com/3d/3dm-3sv08nl007t.html.gz,2026-09-27,Lowara/预览图/3D_四视角.png,mm,是,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,536262
+Lowara,3SV08NL007T,3D 渲染图(正视),https://cadcenter.lowara.com/3d/3dm-3sv08nl007t.html.gz,2026-09-27,Lowara/预览图/3D_正视.png,mm,是,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,186357
+Lowara,3SV08NL007T,3D 渲染图(等轴),https://cadcenter.lowara.com/3d/3dm-3sv08nl007t.html.gz,2026-09-27,Lowara/预览图/3D_等轴.png,mm,是,未核查 — 自采过程文件;含厂商内容部分对外发布同样需确认,213552
