@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """Small, dependency-free MVP application for product approval and publishing.
 
 The first slice deliberately keeps the business modules in one process while
@@ -596,6 +597,52 @@ class Database:
         self.conn.commit()
         return rfq_id, True
 
+    def get_lead_for_rfq(self, tenant_id: str, rfq_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM leads WHERE tenant_id=? AND rfq_id=?", (tenant_id, rfq_id)
+        ).fetchone()
+
+    def list_sales_records(self, tenant_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT r.*, p.model, l.id AS lead_id, l.stage, l.owner, l.next_follow_up, l.note, l.updated_at AS lead_updated_at "
+            "FROM rfqs r LEFT JOIN products p ON p.id=r.product_id LEFT JOIN leads l ON l.rfq_id=r.id AND l.tenant_id=r.tenant_id "
+            "WHERE r.tenant_id=? ORDER BY CASE l.stage WHEN 'new' THEN 0 WHEN 'needs_info' THEN 1 WHEN 'technical_review' THEN 2 WHEN 'quote_ready' THEN 3 WHEN 'paused' THEN 4 ELSE 5 END, l.next_follow_up, r.created_at DESC",
+            (tenant_id,),
+        ).fetchall()
+
+    def update_lead(
+        self,
+        tenant_id: str,
+        rfq_id: str,
+        stage: str,
+        owner: str,
+        next_follow_up: str,
+        note: str,
+        actor: str = "demo-sales",
+    ) -> None:
+        allowed = {"new", "needs_info", "technical_review", "quote_ready", "paused", "closed"}
+        if stage not in allowed:
+            raise ValueError("不支持的线索阶段")
+        lead = self.get_lead_for_rfq(tenant_id, rfq_id)
+        if not lead:
+            raise ValueError("线索不存在")
+        timestamp = now_iso()
+        self.conn.execute(
+            "UPDATE leads SET stage=?, owner=?, next_follow_up=?, note=?, updated_at=? WHERE tenant_id=? AND rfq_id=?",
+            (stage, owner.strip() or None, next_follow_up.strip() or None, note.strip(), timestamp, tenant_id, rfq_id),
+        )
+        self._audit(tenant_id, "lead", lead["id"], "updated", actor, f"rfq={rfq_id};stage={stage};owner={owner};next_follow_up={next_follow_up}")
+        self.conn.commit()
+
+    def list_entity_audit(self, tenant_id: str, entity_ids: list[str]) -> list[sqlite3.Row]:
+        if not entity_ids:
+            return []
+        placeholders = ",".join("?" for _ in entity_ids)
+        return self.conn.execute(
+            f"SELECT * FROM audit_log WHERE tenant_id=? AND entity_id IN ({placeholders}) ORDER BY created_at DESC",
+            [tenant_id, *entity_ids],
+        ).fetchall()
+
     def create_product(self, tenant_id: str, model: str, name: str, use_case: str, actor: str = "demo-admin") -> str:
         self.ensure_tenant(tenant_id)
         model = model.strip()
@@ -984,7 +1031,7 @@ def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh"
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}}
 a{{color:var(--blue);text-decoration:none}}a:hover{{text-decoration:underline}}header{{background:#102a43;color:white;padding:18px 28px;display:flex;justify-content:space-between;align-items:center;gap:16px}}header strong{{font-size:18px}}header nav{{display:flex;gap:16px;align-items:center}}header a{{color:#d9e2ec}}main{{max-width:1180px;margin:30px auto;padding:0 20px}}h1{{font-size:32px;letter-spacing:-.02em;margin:0 0 6px}}h2{{font-size:21px;margin:0 0 14px}}h3{{font-size:16px;margin:20px 0 8px}}.muted{{color:var(--muted)}}.notice{{padding:12px 14px;border-radius:10px;background:#e7f5f2;color:#086f63;margin:0 0 20px}}.error{{padding:12px 14px;border-radius:10px;background:#fff0ee;color:var(--danger);margin:0 0 20px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}}.card{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:0 5px 18px rgba(16,42,67,.05)}}.toolbar{{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:22px}}button,.button{{border:0;border-radius:9px;padding:9px 14px;background:var(--blue);color:#fff;font-weight:650;cursor:pointer;display:inline-block}}button.secondary,.button.secondary{{background:#e7eef7;color:var(--ink)}}button.warn,.button.warn{{background:#fff3d6;color:var(--warn)}}button.danger,.button.danger{{background:#fff0ee;color:var(--danger)}}form.inline{{display:inline}}label{{display:block;font-weight:650;margin:10px 0 4px}}input,select,textarea{{width:100%;padding:9px 10px;border:1px solid #bcccdc;border-radius:8px;font:inherit;background:#fff}}textarea{{min-height:76px;resize:vertical}}.form-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px}}.full{{grid-column:1/-1}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line);vertical-align:top}}th{{font-size:13px;color:var(--muted)}}.badge{{display:inline-flex;align-items:center;border-radius:999px;padding:2px 9px;font-size:12px;font-weight:700;background:#e7eef7;color:var(--ink)}}.badge.published,.badge.approved{{background:#e7f5f2;color:#086f63}}.badge.pending_review{{background:#fff3d6;color:#925c00}}.badge.withdrawn{{background:#fff0ee;color:var(--danger)}}.field-state{{font-size:12px;color:var(--muted)}}.source{{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}}.product-hero{{background:linear-gradient(135deg,#102a43,#0e9384);color:white;border-radius:20px;padding:32px;margin-bottom:20px}}.product-hero .eyebrow{{text-transform:uppercase;letter-spacing:.12em;font-size:12px;opacity:.8}}.product-hero h1{{font-size:38px;margin:4px 0 8px}}.kv{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:20px}}.kv div{{background:rgba(255,255,255,.12);padding:12px;border-radius:10px}}.kv b{{display:block;font-size:12px;opacity:.8}}.kv span{{font-size:18px;font-weight:700}}.footer-note{{margin-top:28px;padding:13px;border-left:3px solid #f0b429;background:#fffaf0;color:#7c5b10}}@media(max-width:700px){{header{{padding:15px 18px;align-items:flex-start;flex-direction:column}}main{{margin:20px auto;padding:0 14px}}.form-grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}h1{{font-size:27px}}.product-hero h1{{font-size:31px}}table{{font-size:13px}}th:nth-child(3),td:nth-child(3){{display:none}}}}
 </style></head><body>
-<header><strong>CB Water Pump SaaS</strong><nav><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>
+<header><strong>CB Water Pump SaaS</strong><nav><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/admin/sales'>{'销售工作台' if lang == 'zh' else 'Sales desk'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>
 <main>{body}</main></body></html>"""
 
 
@@ -1059,6 +1106,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/rfqs":
             self.admin_rfqs(query)
             return
+        if path == "/admin/sales":
+            self.admin_sales(query)
+            return
         if path == "/inquiry":
             conversation_id = self.db.create_conversation(self.tenant_id, "web", query.get("lang", ["en"])[0])
             self.redirect(f"/inquiry/{conversation_id}?lang={query.get('lang', ['en'])[0]}")
@@ -1078,6 +1128,10 @@ class Handler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/admin/rfqs/([a-f0-9]+)/?", path)
         if match:
             self.admin_rfq(match.group(1), query)
+            return
+        match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/?", path)
+        if match:
+            self.admin_sales_detail(match.group(1), query)
             return
         match = re.fullmatch(r"/products/([a-zA-Z0-9-]+)/?", path)
         if match:
@@ -1197,6 +1251,11 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 self.db.resolve_human_task(self.tenant_id, match.group(1), str(form.get("response", "")), self.actor)
                 self.redirect(f"/admin/tasks/{match.group(1)}?notice=resolved")
+                return
+            match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/update", path)
+            if match:
+                self.db.update_lead(self.tenant_id, match.group(1), str(form.get("stage", "new")), str(form.get("owner", "")), str(form.get("next_follow_up", "")), str(form.get("note", "")), self.actor)
+                self.redirect(f"/admin/sales/{match.group(1)}?notice=updated")
                 return
             match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources", path)
             if match:
@@ -1435,6 +1494,58 @@ class Handler(BaseHTTPRequestHandler):
 <div class='footer-note'>该 RFQ 保存了提交时的需求、推荐和产品版本快照；后续产品更新不会静默改写这条历史询价。</div>
 """
         self.send_html(layout("RFQ 详情", body), 200)
+
+    def admin_sales(self, query: dict[str, list[str]]) -> None:
+        records = self.db.list_sales_records(self.tenant_id)
+        today = datetime.now(timezone.utc).date().isoformat()
+        stage_labels = {"new": "新线索", "needs_info": "待补充", "technical_review": "技术确认中", "quote_ready": "可进入报价", "paused": "暂缓", "closed": "已关闭"}
+        rows = []
+        for record in records:
+            overdue = bool(record["next_follow_up"] and record["next_follow_up"] < today and record["stage"] not in ("closed", "paused"))
+            follow_up = f"<span class='badge withdrawn'>逾期 {esc(record['next_follow_up'])}</span>" if overdue else esc(record["next_follow_up"] or "未安排")
+            rows.append(
+                f"<tr><td><a href='/admin/sales/{record['id']}'>{esc(record['id'])}</a><br><span class='muted'>{esc(record['company'] or record['contact_email'] or '未提供联系人')}</span></td>"
+                f"<td>{esc(record['model'] or '未指定型号')}</td><td><span class='badge'>{esc(stage_labels.get(record['stage'], record['stage'] or '未分配'))}</span></td>"
+                f"<td>{esc(record['owner'] or '未分配')}</td><td>{follow_up}</td><td>{esc(record['status'])}</td></tr>"
+            )
+        table = "".join(rows) or "<tr><td colspan='6' class='muted'>暂无销售线索。买方提交 RFQ 后会进入这里。</td></tr>"
+        body = f"""
+<div class='toolbar'><div><h1>销售工作台</h1><div class='muted'>统一查看 RFQ、需求、推荐、问答和人工任务；当前企业：示例水泵企业（演示）</div></div><a class='button secondary' href='/admin/rfqs'>RFQ 原始记录</a></div>
+<section class='card'><table><thead><tr><th>线索 / 联系人</th><th>型号</th><th>阶段</th><th>负责人</th><th>跟进日期</th><th>RFQ 状态</th></tr></thead><tbody>{table}</tbody></table></section>
+"""
+        self.send_html(layout("销售工作台", body), 200)
+
+    def admin_sales_detail(self, rfq_id: str, query: dict[str, list[str]]) -> None:
+        rfq = self.db.get_rfq(self.tenant_id, rfq_id)
+        lead = self.db.get_lead_for_rfq(self.tenant_id, rfq_id)
+        if not rfq or not lead:
+            self.send_html(layout("线索不存在", "<div class='error'>线索不存在或不属于当前企业。</div>"), 404)
+            return
+        snapshot = json.loads(rfq["snapshot_json"])
+        requirements = snapshot.get("requirements", {})
+        recommendation = snapshot.get("recommendation") or {}
+        requirement_rows = "".join(f"<tr><td>{esc(item.get('label', key))}</td><td>{esc(item.get('value', ''))} {esc(item.get('unit', ''))}</td><td>{esc(item.get('state', ''))}</td></tr>" for key, item in requirements.items()) or "<tr><td colspan='3' class='muted'>暂无需求快照</td></tr>"
+        answers = self.db.list_answers(self.tenant_id, rfq["conversation_id"])
+        answer_rows = "".join(f"<div class='source'><span><b>{'有据回答' if answer['answer_status'] == 'grounded' else '人工接管'}</b><br>{esc(answer['answer_text'])}</span><span class='field-state'>{esc(answer['created_at'])}</span></div>" for answer in answers) or "<p class='muted'>暂无问答记录。</p>"
+        tasks = [task for task in self.db.list_human_tasks(self.tenant_id) if task["conversation_id"] == rfq["conversation_id"]]
+        task_rows = "".join(f"<div class='source'><span><b>{esc(task['status'])}</b><br>{esc(task['question'])}<br><span class='field-state'>{esc(task['reason'])}</span></span><a href='/admin/tasks/{task['id']}'>处理</a></div>" for task in tasks) or "<p class='muted'>暂无人工任务。</p>"
+        audit_rows = self.db.list_entity_audit(self.tenant_id, [rfq["id"], lead["id"]])
+        audit_html = "".join(f"<div class='field-state'>{esc(item['created_at'])} · {esc(item['action'])} · {esc(item['actor'])} · {esc(item['details'])}</div>" for item in audit_rows) or "<p class='muted'>暂无操作记录。</p>"
+        stage_options = "".join(f"<option value='{key}' {'selected' if lead['stage'] == key else ''}>{label}</option>" for key, label in {"new": "新线索", "needs_info": "待补充", "technical_review": "技术确认中", "quote_ready": "可进入报价", "paused": "暂缓", "closed": "已关闭"}.items())
+        notice = "<div class='notice'>销售状态已保存，刷新后仍会保留。</div>" if query.get("notice", [""])[0] == "updated" else ""
+        if recommendation:
+            recommendation_html = f"<p><b>推荐型号：</b>{esc(recommendation.get('model'))}</p><p><b>产品版本：</b>v{esc(recommendation.get('product_version'))}</p><p><b>满足项：</b>{esc('；'.join(recommendation.get('satisfies', [])) or '—')}</p><p><b>冲突项：</b>{esc('；'.join(recommendation.get('conflicts', [])) or '—')}</p><a href='{esc(recommendation.get('detail_url', '#'))}' target='_blank'>打开产品页</a>"
+        else:
+            recommendation_html = "<p class='muted'>暂无推荐快照。</p>"
+        body = f"""
+<div class='toolbar'><div><a href='/admin/sales'>← 返回销售工作台</a><h1>销售线索 {esc(rfq['id'])}</h1><div class='muted'>RFQ 状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])}</div></div></div>
+{notice}
+<div class='grid'><section class='card'><h2>线索处理</h2><form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>负责人</label><input name='owner' value='{esc(lead['owner'] or '')}' placeholder='例如 Alex / 售前工程师'><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}'><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p></section></div>
+<section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>
+<div class='grid' style='margin-top:18px'><section class='card'><h2>推荐快照</h2>{recommendation_html}</section><section class='card'><h2>问答与人工任务</h2>{answer_rows}{task_rows}</section></div>
+<section class='card' style='margin-top:18px'><h2>操作记录</h2>{audit_html}</section>
+"""
+        self.send_html(layout("销售线索详情", body), 200)
 
     def public_product(self, slug: str, query: dict[str, list[str]]) -> None:
         product = self.db.get_product_by_slug(self.tenant_id, slug)

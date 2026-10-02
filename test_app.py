@@ -226,5 +226,40 @@ class RfqTests(unittest.TestCase):
         self.assertIn("目的地", json.loads(rfq["missing_json"]))
 
 
+class SalesWorkspaceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.temp_dir.name) / "app.db")
+        self.db.seed_demo_products("demo-tenant")
+        for product in self.db.list_products("demo-tenant"):
+            self.db.approve_product("demo-tenant", product["id"])
+            self.db.publish_product("demo-tenant", product["id"])
+        conversation_id = self.db.create_conversation("demo-tenant")
+        values = confirm_requirement_values(extract_requirement_values("flow 50, head 30, clean water", {}, None))
+        revision_id = self.db.create_requirement_revision("demo-tenant", conversation_id, values, "confirmed")
+        status, results, _ = match_products(self.db, "demo-tenant", values)
+        self.db.save_recommendation("demo-tenant", conversation_id, revision_id, status, results)
+        self.rfq_id, _ = self.db.create_rfq("demo-tenant", conversation_id, "sales-token", {"contact_email": "buyer@example.com", "quantity": "2", "region": "Germany", "delivery": "8 weeks"}, "Sales handoff")
+
+    def tearDown(self):
+        self.db.conn.close()
+        self.temp_dir.cleanup()
+
+    def test_sales_update_persists_and_records_operator(self):
+        self.db.update_lead("demo-tenant", self.rfq_id, "technical_review", "Alex", "2026-10-01", "Ask engineer to confirm medium compatibility", "demo-sales")
+        lead = self.db.get_lead_for_rfq("demo-tenant", self.rfq_id)
+        self.assertEqual(lead["stage"], "technical_review")
+        self.assertEqual(lead["owner"], "Alex")
+        self.assertEqual(lead["next_follow_up"], "2026-10-01")
+        self.assertIn("engineer", lead["note"])
+        audit = self.db.list_entity_audit("demo-tenant", [lead["id"]])
+        self.assertTrue(any(item["action"] == "updated" and item["actor"] == "demo-sales" for item in audit))
+
+    def test_sales_records_are_tenant_scoped(self):
+        self.db.ensure_tenant("other-tenant")
+        self.assertEqual(len(self.db.list_sales_records("other-tenant")), 0)
+        self.assertEqual(len(self.db.list_sales_records("demo-tenant")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
