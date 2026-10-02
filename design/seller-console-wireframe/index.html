@@ -43,6 +43,29 @@
     @media(max-width:850px){.app{grid-template-columns:1fr}.sidebar{position:fixed;left:0;width:240px;transform:translateX(-100%);transition:.2s}.sidebar.open{transform:translateX(0);box-shadow:8px 0 30px #1118}.menu{display:block}.topbar{padding:0 14px}main{padding:21px 15px}.cols-main,.cols-half,.cols-triple{grid-template-columns:1fr}.context{grid-column:auto}}
     @media(max-width:530px){.head{align-items:start;flex-direction:column}.search-button{min-width:32px;width:32px;font-size:0;padding:6px}.search-button kbd,.mode{display:none}.cols-4{grid-template-columns:repeat(2,minmax(0,1fr))}.metric{min-height:80px;padding:11px}.metric strong{font-size:21px}}
     .row-link{border:0;background:none;text-align:left;color:var(--blue);font-weight:650;padding:0;cursor:pointer}.stack{display:grid;gap:10px}.inline{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.selected-row{background:#f3f6fb}.btn:disabled{opacity:.45;cursor:not-allowed}.explain{font-size:10px;color:#7c6260;margin-top:6px}.banner{padding:9px 12px;border:1px solid #d7e1e6;background:#f8fbfd;border-radius:5px;font-size:11px;margin-bottom:14px}.data-row{padding:9px 0;border-bottom:1px solid #e7eded;font-size:11px}.data-row:last-child{border-bottom:0}.data-row small{color:var(--muted)}.data-row strong{display:block}.role-select{border:1px solid var(--line);background:white;border-radius:5px;padding:6px;font-size:11px}.subnav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}.subnav .btn.active{border-color:var(--blue);color:var(--blue);background:#f2f5fc}.message{padding:9px 11px;border:1px solid var(--line);border-radius:5px;margin:8px 0;font-size:11px}.message small{display:block;color:var(--muted)}.message.human{border-left:3px solid #486bab}.message.buyer{border-left:3px solid #83949b}.guide{font-size:10px;color:var(--muted);margin-top:7px}.audit{max-height:210px;overflow:auto}
+    /* Usability pass: primary task first, evidence and history on demand. */
+    :root{--bg:#f6f7f6;--line:#dce3e4;--blue:#31559e}
+    body{font-size:14px;line-height:1.55}
+    main{max-width:1370px;padding:34px 38px 70px}
+    .head{margin-bottom:25px;align-items:center}.head h1{font-size:28px;margin:7px 0 5px}.subtitle{font-size:13px;max-width:720px}
+    .nav{font-size:13px;padding:10px 11px}.nav-heading{margin-top:22px}.nav .symbol{font-size:14px}
+    .panel-head{padding:15px 18px}.panel-body{padding:18px}.panel h2{font-size:14px}
+    .btn{font-size:12px;padding:8px 12px;min-height:36px}.link{font-size:12px}
+    .note,.guide,.fineprint{font-size:11px}.badge{font-size:11px;padding:3px 7px}
+    .data-row{font-size:13px;padding:12px 0}.data-row small{font-size:11px;display:block}.kv{font-size:12px}
+    .focus{background:#fff;border:1px solid #cbd7df;border-left:4px solid var(--blue);border-radius:7px;padding:19px 22px;margin-bottom:17px;display:flex;justify-content:space-between;gap:18px;align-items:center}
+    .focus-copy{min-width:0}.focus-label{color:var(--blue);font-size:11px;font-weight:700;letter-spacing:.06em}.focus strong{display:block;font-size:18px;line-height:1.35;margin:5px 0}.focus p{font-size:12px;color:#627176;margin:0;max-width:640px}.focus .actions{justify-content:flex-end}
+    .simple-list{display:grid;gap:0}.simple-item{display:flex;gap:16px;justify-content:space-between;align-items:center;border-bottom:1px solid #e9eeee;padding:15px 0}.simple-item:first-child{padding-top:0}.simple-item:last-child{border-bottom:0;padding-bottom:0}.simple-item strong{display:block;font-size:13px}.simple-item small{display:block;color:var(--muted);font-size:11px;margin-top:3px}.simple-item .actions{flex-shrink:0}
+    .detail-toggle{border-top:1px solid #e6ebeb;margin-top:16px;padding-top:11px;font-size:12px}.detail-toggle summary{cursor:pointer;color:var(--blue);font-weight:650;list-style:none}.detail-toggle summary:after{content:'⌄';float:right;color:#7b8c92}.detail-toggle[open] summary:after{content:'⌃'}.detail-toggle>div{padding-top:14px}.detail-toggle summary::-webkit-details-marker{display:none}
+    .record-switch{border:1px solid var(--line);border-radius:7px;background:#fff;overflow:hidden}.record-switch button{display:block;width:100%;border:0;border-bottom:1px solid #e8eeee;background:#fff;padding:13px 15px;text-align:left;cursor:pointer}.record-switch button:last-child{border-bottom:0}.record-switch button:hover,.record-switch button.selected{background:#f2f5fa}.record-switch button.selected{box-shadow:inset 3px 0 var(--blue)}.record-switch strong{display:block;font-size:12px}.record-switch small{display:block;color:var(--muted);font-size:11px;margin-top:3px}
+    .workspace-grid{display:grid;grid-template-columns:245px minmax(0,1fr);gap:16px;align-items:start}.workspace-grid>.panel{min-width:0}.section-title{font-size:12px;font-weight:700;color:#44545a;margin:0 0 10px}.summary-strip{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 18px}.summary-strip span{font-size:11px;background:#f3f6f7;border:1px solid #e2e9e9;border-radius:4px;padding:5px 8px;color:#5b696f}
+    .primary-task{border:1px solid #d9e4ee;background:#f8fafc;border-radius:6px;padding:14px 16px;margin-bottom:16px}.primary-task strong{font-size:14px;display:block}.primary-task p{font-size:12px;color:var(--muted);margin:4px 0 10px}
+    .provenance{color:#60747b;font-size:11px;margin:4px 0}.muted-block{background:#fafbfb;border:1px solid #e6ebeb;border-radius:5px;padding:12px;font-size:12px;color:var(--muted)}
+    .compact-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.compact-facts>div{padding:12px;border:1px solid #e3e9e9;border-radius:5px}.compact-facts small{display:block;color:var(--muted);font-size:11px}.compact-facts strong{font-size:13px}
+    .message{font-size:12px}.callout{font-size:12px}.role-select{font-size:12px}
+    @media(max-width:1050px){.workspace-grid{grid-template-columns:210px minmax(0,1fr)}}
+    @media(max-width:850px){main{padding:22px 16px 50px}.workspace-grid{grid-template-columns:1fr}.record-switch{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.record-switch button{border-right:1px solid #e8eeee}.focus{align-items:flex-start;flex-direction:column}.focus .actions{justify-content:flex-start}}
+    @media(max-width:530px){.compact-facts,.record-switch{grid-template-columns:1fr}.simple-item{align-items:flex-start;flex-direction:column;gap:8px}.head h1{font-size:24px}.focus strong{font-size:17px}}
   </style>
 </head>
 <body>
@@ -83,8 +106,8 @@
   var app={
     role:'admin', page:'home', id:null, timer:null,
     products:[
-      {id:'P-001',name:'Lowara 3SV08NL007T',version:2,pageVersion:1,published:true,previewed:false,approved:[{key:'型号',value:'3SV08NL007T',source:'型号资料 · 第 2 页'},{key:'额定功率',value:'0.75 kW',source:'技术手册 Rev. B · 第 8 页'}],draft:[{key:'材料',value:'配置待核对',source:'系列资料 · 第 12 页'}],gaps:['本型号性能曲线','介质适用性']},
-      {id:'P-002',name:'示例型号 B',version:1,pageVersion:0,published:false,previewed:false,approved:[{key:'型号',value:'型号 B',source:'示例资料 · 第 1 页'}],draft:[{key:'额定功率',value:'1.1 kW（演示值）',source:'示例资料 · 第 4 页'}],gaps:['材料证明','性能曲线']}
+      {id:'P-001',name:'Lowara 3SV08NL007T',version:2,pageVersion:1,publishedFactVersion:1,published:true,previewed:false,approved:[{key:'型号',value:'3SV08NL007T',source:'型号资料 · 第 2 页'},{key:'额定功率',value:'0.75 kW',source:'技术手册 Rev. B · 第 8 页'}],draft:[{key:'材料',value:'配置待核对',source:'系列资料 · 第 12 页'}],gaps:['本型号性能曲线','介质适用性']},
+      {id:'P-002',name:'示例型号 B',version:1,pageVersion:0,publishedFactVersion:0,published:false,previewed:false,approved:[{key:'型号',value:'型号 B',source:'示例资料 · 第 1 页'}],draft:[{key:'额定功率',value:'1.1 kW（演示值）',source:'示例资料 · 第 4 页'}],gaps:['材料证明','性能曲线']}
     ],
     conversations:[
       {id:'C-042',title:'楼宇供水增压',source:'网页对话',owner:null,consent:false,stop:false,confirmed:true,need:'楼宇供水增压',unknown:'流量、扬程、介质',recommendation:'P-001 v01 · 待核实候选',messages:[{who:'买家',body:'需要用于楼宇供水增压，想确认型号是否适合实际工况。'},{who:'AI 助手',body:'已确认用途为楼宇供水增压；流量、扬程与介质仍需核实。当前仅为待核实候选，不构成适用性结论。'}]},
@@ -114,86 +137,149 @@
   function audit(type,details){app.audit.unshift({type:type,details:details,time:new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})})}
   function toast(msg){var x=document.getElementById('toast');x.textContent=msg;x.classList.add('show');clearTimeout(app.timer);app.timer=setTimeout(function(){x.classList.remove('show')},3500)}
   function navigate(page,id,hash){app.page=labels[page]?page:'home';app.id=id||null;document.querySelectorAll('.nav').forEach(function(x){x.classList.toggle('active',x.dataset.page===app.page)});document.getElementById('sidebar').classList.remove('open');document.getElementById('overlay').classList.remove('open');if(hash!==false)history.replaceState(null,'','#'+app.page+(app.id?'/'+app.id:''));render();window.scrollTo(0,0)}
+  function focus(label,title,text,actions){return '<div class="focus"><div class="focus-copy"><span class="focus-label">'+esc(label)+'</span><strong>'+title+'</strong><p>'+text+'</p></div><div class="actions">'+(actions||'')+'</div></div>'}
+  function details(title,body){return '<details class="detail-toggle"><summary>'+title+'</summary><div>'+body+'</div></details>'}
+  function item(title,meta,actions){return '<div class="simple-item"><div><strong>'+title+'</strong><small>'+meta+'</small></div><div class="actions">'+(actions||'')+'</div></div>'}
+  function switcher(list,page,selected,label,meta){return '<div class="record-switch">'+list.map(function(x){return '<button class="'+(x.id===selected?'selected':'')+'" data-page="'+page+'" data-id="'+esc(x.id)+'"><strong>'+label(x)+'</strong><small>'+meta(x)+'</small></button>'}).join('')+'</div>'}
   function home(){
     var tasks=[];
-    if(can('approve')) tasks.push(['产品核准','P-002 · 示例型号 B','review','P-002','待核准']);
-    if(can('engineer')&&app.task.status!=='已答复') tasks.push(['工程任务','T-204 · '+app.task.question,'engineering','T-204',app.task.status]);
-    if(can('sales')) app.rfqs.filter(function(x){return x.status!=='已处理'}).forEach(function(x){tasks.push(['RFQ',x.id+' · '+x.intent,'rfqs',x.id,x.status])});
-    var body=tasks.length?tasks.map(function(t){return '<tr><td>'+badge(t[0])+'</td><td>'+esc(t[1])+'</td><td>'+badge(t[4])+'</td><td>'+go('打开 →',t[2],t[3])+'</td></tr>'}).join(''):'<tr><td colspan="4">当前岗位没有需要处理的示例待办。</td></tr>';
-    return heading('01 / DAILY WORK','工作台','按岗位显示待办；自助会话可检索，但不会自动成为销售任务。',go('查看全部询盘','inquiries',null,'btn'))+
-      '<div class="grid cols-4"><div class="metric"><span>待核准产品</span><strong>'+app.products.filter(function(p){return p.draft.length}).length+'</strong><small>产品岗位</small></div><div class="metric"><span>待工程师任务</span><strong>'+(app.task.status==='已答复'?0:1)+'</strong><small>买家已请求人工</small></div><div class="metric"><span>待处理 RFQ</span><strong>'+app.rfqs.filter(function(r){return r.status!=='已处理'}).length+'</strong><small>各 RFQ 独立状态</small></div><div class="metric"><span>仅自助会话</span><strong>02</strong><small>不自动进销售队列</small></div></div>'+
-      '<div class="grid cols-main gap">'+panel('我的待办','<div class="table-wrap"><table><thead><tr><th>类型</th><th>对象</th><th>状态</th><th>下一步</th></tr></thead><tbody>'+body+'</tbody></table></div>')+
-      panel('完整接力','<div class="flow"><span>上传与核准</span><b>→</b><span>内容预览与发布</span><b>→</b><span>需求与推荐</span><b>→</b><span>有据问答 / 人工任务</span><b>→</b><span>RFQ 与跟进</span></div><div class="callout">会话、工程任务、RFQ 彼此关联但身份独立；本线稿只展示卖家工作界面。</div>')+'</div>';
+    var pending=app.products.find(function(p){return p.draft.some(function(f){return !/待核对|待人工核准/.test(f.value)})});
+    if(can('approve')&&pending)tasks.push({type:'产品核准',title:pending.name,meta:'核对待审字段及出处',page:'review',id:pending.id,status:'待核准'});
+    var publishable=app.products.find(function(p){return p.approved.length&&p.version!==p.publishedFactVersion});
+    if(can('publish')&&publishable)tasks.push({type:'页面发布',title:publishable.name,meta:'核对公开事实、出处与缺项',page:'publication',id:publishable.id,status:'待发布'});
+    if(can('engineer')&&app.task.status!=='已答复')tasks.push({type:'工程任务',title:'买家请求确认实际工况',meta:'T-204 · '+app.task.status,page:'engineering',id:'T-204',status:app.task.status});
+    if(can('sales'))app.rfqs.filter(function(r){return r.status!=='已处理'}).forEach(function(r){tasks.push({type:'RFQ',title:r.intent,meta:r.id+' · '+r.gap,page:'rfqs',id:r.id,status:r.status})});
+    var first=tasks[0],primary=first?focus('优先处理 · '+first.type,esc(first.title),esc(first.meta),go('打开处理',first.page,first.id,'btn primary')):focus('当前状态','没有待处理的示例事项','可从左侧打开产品或询盘，查看已有记录。',go('查看询盘','inquiries',null,'btn'));
+    return heading('WORKSPACE','工作台','只展示当前岗位需要采取行动的事项。其他记录可从左侧导航检索。')+
+      primary+
+      '<div class="grid cols-main">'+panel('待处理事项'+(tasks.length?' · '+tasks.length:''),tasks.length?'<div class="simple-list">'+tasks.map(function(t){return item(esc(t.title),esc(t.type+' · '+t.meta)+' · '+badge(t.status),go('处理 →',t.page,t.id))}).join('')+'</div>':'<div class="muted-block">当前岗位没有待办。自助会话不会仅因产生对话就进入销售队列。</div>')+
+      panel('常用入口','<div class="simple-list">'+item('查看买家会话','需求、提问和关联记录',go('进入','inquiries'))+item('查看产品资料','核准事实与页面版本',go('进入','products'))+item('查看 RFQ','每份询价独立处理',go('进入','rfqs'))+'</div>')+'</div>'+
+      '<p class="fineprint">这是卖家系统演示线稿；待办、数字和操作不连接真实业务。</p>';
   }
   function products(){
-    return heading('02 / PRODUCT KNOWLEDGE','产品资料','按型号进入各自的核准、内容预览与发布记录。',act('＋ 模拟导入产品','add-product','primary',can('approve')))+
-      panel('本企业型号',app.products.map(function(p){return '<div class="data-row"><div class="inline"><strong>'+esc(p.id+' · '+p.name)+'</strong>'+badge(p.published?'已发布 v'+p.pageVersion:'未发布')+'</div><small>事实版本 v'+p.version+' · 已核准 '+p.approved.length+' 项 · 待核 '+p.draft.length+' 项 · 缺项 '+p.gaps.length+' 项</small><div class="actions gap">'+go('核对字段','review',p.id)+go('内容核对预览','publication',p.id)+'</div></div>'}).join(''));
+    var list=app.products.map(function(p){
+      var next=p.draft.length?'核对资料':p.version!==p.publishedFactVersion?'检查发布内容':'查看已发布内容';
+      return item(esc(p.name)+' '+badge(p.published?'已发布 v'+p.pageVersion:'未发布'),
+        esc(p.id)+' · '+(p.draft.length?'有 '+p.draft.length+' 项待核字段':'核准事实可用')+' · '+p.gaps.length+' 项缺项',
+        go(next,p.draft.length?'review':'publication',p.id,'btn'));
+    }).join('');
+    return heading('PRODUCT LIBRARY','产品资料','每个型号只显示当前状态与下一步；详细依据在型号内查看。',act('＋ 模拟导入产品','add-product','',can('approve')))+
+      panel('本企业型号','<div class="simple-list">'+list+'</div>')+
+      '<p class="fineprint">产品页面能发布有限信息，不代表该型号已经满足推荐资格。</p>';
   }
   function review(){
-    var p=current(app.products);
-    return heading('03 / FACT REVIEW','资料核准','抽取草稿与核准事实分开；只对当前型号操作。',go('返回产品资料','products',null,'btn')+go('进入发布','publication',p.id,'btn primary'))+
-      '<div class="subnav">'+app.products.map(function(x){return go(x.id+' · '+x.name,'review',x.id,'btn '+(x.id===p.id?'active':''))}).join('')+'</div>'+
-      '<div class="grid cols-half">'+panel('原文件与定位','<div class="document"><div class="doc-title">'+esc(p.name)+' · SOURCE DOCUMENT</div><p class="muted">概念线稿：每项事实的出处页码在右侧显示；正式系统需打开实际授权文件并定位原文。</p><div class="highlight">来源定位示例：'+esc((p.draft[0]||p.approved[0]).source)+'</div><div class="line"></div><div class="line mid"></div></div>')+
-      panel('提取草稿与人工判断',p.draft.map(function(f){return row(f.key,esc(f.value)+' <small>来源：'+esc(f.source)+'</small> '+badge('待核'))}).join('')+
-      (p.draft.length?'<div class="actions gap">'+act('核准当前型号的草稿事实','approve','primary',can('approve')&&p.draft.every(function(f){return !/待核对|待人工核准/.test(f.value)}),'含待核对值时须先取得可核准事实')+'</div>':'<div class="callout gap">当前型号没有待核准草稿。</div>')+
-      '<div class="rule"></div><h3>已核准事实</h3>'+p.approved.map(function(f){return row(f.key,esc(f.value)+' <small>来源：'+esc(f.source)+'</small>')}).join('')+
-      '<div class="rule"></div><div class="callout warn">缺项：'+esc(p.gaps.join('、')||'无')+'。有限信息页可发布，但展示事实和缺项都须由授权人员核对。</div>')+'</div>';
+    var p=current(app.products),draft=p.draft[0],ready=draft&&!/待核对|待人工核准/.test(draft.value),allowed=can('approve');
+    var intro=draft?(ready?
+      focus('当前任务 · '+esc(p.id),'核对 '+esc(draft.key)+' 的值与来源','确认与原文件一致后，才会进入已核准事实。',act('核准这项事实','approve','primary',allowed,'当前岗位无核准权限')):
+      focus('当前任务 · '+esc(p.id),'这项字段还不能核准','“'+esc(draft.value)+'”不是可发布的技术事实；先补充能定位到该型号的可靠来源。','')):
+      focus('当前任务 · '+esc(p.id),'字段核准已完成','可继续检查本型号准备公开的内容。',go('检查发布内容','publication',p.id,'btn primary'));
+    return heading('FACT REVIEW','资料核准','一次只处理当前型号的待审字段。已核准内容与其他缺项可按需展开。',go('返回产品列表','products',null,'btn'))+
+      '<div class="subnav">'+app.products.map(function(x){return go(x.id,'review',x.id,'btn '+(x.id===p.id?'active':''))}).join('')+'</div>'+intro+
+      panel('待核对字段',draft?'<div class="compact-facts"><div><small>字段</small><strong>'+esc(draft.key)+'</strong></div><div><small>提取值</small><strong>'+esc(draft.value)+'</strong></div></div><p class="provenance">来源：'+esc(draft.source)+'</p>':'<div class="muted-block">没有待核对字段。</div>'+
+      details('查看原文件定位示意','<div class="document"><div class="doc-title">'+esc(p.name)+' · SOURCE DOCUMENT</div><div class="highlight">'+esc(draft?draft.source:(p.approved[0]||{}).source||'尚无定位')+'</div><p class="muted">正式系统应打开授权原文件并定位页码；这里仅演示信息层级。</p></div>')+
+      details('查看已核准事实 · '+p.approved.length+' 项',p.approved.map(function(f){return row(f.key,esc(f.value)+' <small>来源：'+esc(f.source)+'</small>')}).join('')||'<div class="muted-block">暂无已核准事实。</div>')+
+      details('查看缺项 · '+p.gaps.length+' 项','<div class="muted-block">'+esc(p.gaps.join('、')||'无')+'</div>'))+
+      '<div class="actions gap">'+go('下一步：检查公开内容','publication',p.id,'btn')+'</div>';
   }
   function publication(){
-    var p=current(app.products);
-    return heading('04 / PAGE GOVERNANCE','页面发布','卖家核对将公开的事实、出处与缺项；买家详情页布局仍待调研。',go('返回字段核准','review',p.id,'btn'))+
-      '<div class="subnav">'+app.products.map(function(x){return go(x.id+' · '+x.name,'publication',x.id,'btn '+(x.id===p.id?'active':''))}).join('')+'</div>'+
-      '<div class="grid cols-main">'+panel('内容核对预览区 · '+esc(p.id),'<div class="callout">这不是买家详情页视觉预览；这里只显示准备公开的内容清单。</div>'+
-      row('型号与事实版本',esc(p.name)+' · v'+p.version)+
-      p.approved.map(function(f){return row(f.key,esc(f.value)+' <small>出处：'+esc(f.source)+'</small>')}).join('')+
-      row('未展示的草稿',esc(p.draft.map(function(f){return f.key}).join('、')||'无')+'（未核准，不进入公开页面）')+
-      row('公开缺项',esc(p.gaps.join('、')||'无'))+
-      '<div class="actions gap">'+act('确认已核对预览','preview','',can('publish'))+act('发布新页面版本','publish','primary',can('publish')&&p.previewed&&p.approved.length>0,'需有发布权限、至少一项已核准事实且先核对预览')+'</div><div class="guide">每次核准字段后须重新预览；已发布版本不会被草稿原地覆盖。</div>')+
-      '<div class="stack">'+panel('版本与授权',row('当前公开',p.published?'v'+p.pageVersion:'无')+row('编辑状态',p.previewed?'已完成内容核对':'待内容核对')+row('素材许可','演示线稿不包含对外附件发布'))+
-      panel('关联影响','<div class="callout">产品事实更新不会静默改写旧 RFQ 的依据。推荐资格需另外判断；页面能有限信息发布不代表适用性已确认。</div>')+'</div></div>';
+    var p=current(app.products),hasChanges=p.version!==p.publishedFactVersion,actionText=p.previewed?'发布页面新版本':'确认内容核对',actionName=p.previewed?'publish':'preview';
+    var allowed=can('publish')&&hasChanges&&(p.previewed?p.approved.length>0:true);
+    return heading('PAGE GOVERNANCE','页面发布','先核对将公开的内容，再发布新版本；不会更改旧版本依据。',go('返回资料核准','review',p.id,'btn'))+
+      '<div class="subnav">'+app.products.map(function(x){return go(x.id,'publication',x.id,'btn '+(x.id===p.id?'active':''))}).join('')+'</div>'+
+      focus('当前型号 · '+esc(p.id),!hasChanges?'当前公开内容已是最新核准版本':p.previewed?'内容已核对，可发布新版本':'请核对本次将公开的内容',
+        '当前公开：'+(p.published?'页面 v'+p.pageVersion:'未发布')+'；待审草稿不会进入公开页面。',
+        hasChanges?act(actionText,actionName,'primary',allowed,'需要发布权限及已核准事实'):'')+
+      '<div class="grid cols-main">'+panel('准备公开','<h3>'+esc(p.name)+' · 事实版本 v'+p.version+'</h3>'+
+        '<div class="simple-list">'+p.approved.map(function(f){return item(esc(f.key)+'：'+esc(f.value),'出处：'+esc(f.source),'')}).join('')+'</div>'+
+        '<div class="callout warn gap">已标明的缺项：'+esc(p.gaps.join('、')||'无')+'</div>')+
+      panel('发布检查',row('当前公开',p.published?'页面 v'+p.pageVersion:'无')+row('内容核对',p.previewed?badge('已核对'):badge('待核对'))+
+        '<div class="rule"></div><p class="note">这是卖家用于核对事实、出处和缺项的预览，不预定买家详情页视觉布局。</p>'+
+        details('哪些内容不会被发布',row('未核准草稿',esc(p.draft.map(function(f){return f.key}).join('、')||'无'))+row('附件','此演示未处理授权附件发布'))+
+        details('发布对其他模块的影响','<div class="muted-block">旧 RFQ 保留原依据；匹配资格另行判断，有限信息发布不代表适用性已确认。</div>'))+'</div>';
   }
   function inquiries(){
-    var c=current(app.conversations), related=app.rfqs.filter(function(r){return r.conversation===c.id}), task=app.task.conversation===c.id?app.task:null;
-    var items=app.conversations.map(function(x){return '<button class="inbox-item '+(x.id===c.id?'selected':'')+'" style="width:100%;border-left:0;border-right:0;border-top:0;text-align:left;background:'+(x.id===c.id?'#f3f6fb':'#fff')+'" data-page="inquiries" data-id="'+x.id+'"><strong>'+esc(x.id+' · '+x.title)+'</strong><small>'+esc(x.source)+' · '+(app.rfqs.some(function(r){return r.conversation===x.id})?'有关联 RFQ':'无 RFQ；不自动生成销售待办')+'</small></button>'}).join('');
-    var messages=c.messages.map(function(m){return '<div class="message '+(m.who==='买家'?'buyer':'human')+'"><small>'+esc(m.who)+'</small>'+esc(m.body)+'</div>'}).join('');
-    return heading('05 / INQUIRY DESK','询盘与线索','原始对话、需求、推荐、人工任务和 RFQ 在同一工作区查看，记录各自独立。')+
-      '<div class="grid cols-triple"><section class="panel"><div class="panel-head"><h2>会话列表</h2></div>'+items+'</section>'+
-      panel('会话 '+esc(c.id)+' · '+esc(c.title),'<div class="note">入口：'+esc(c.source)+' · 线索负责人：'+esc(c.owner||'未分配')+'</div><div class="rule"></div>'+messages+
-      '<div class="rule"></div><h3>需求与推荐</h3>'+row('需求状态',badge(c.confirmed?'已确认':'待买家确认'))+row('场景',esc(c.need))+row('未知项',esc(c.unknown))+row('推荐',esc(c.recommendation||'无可靠候选或尚未匹配'))+
-      (!c.confirmed?'<div class="guide">买家确认需求后才可展示匹配候选。此按钮仅模拟买家已在其界面完成确认。</div>'+act('模拟买家确认需求','confirm-requirement','',true):'')+
-      '<div class="rule"></div><h3>关联对象</h3>'+(task?'<div class="data-row">'+go(task.id+' · '+task.status,'engineering',task.id)+'</div>':'<div class="data-row muted">没有买家提交的人工请求，不建立工程任务。</div>')+
-      (related.length?related.map(function(r){return '<div class="data-row">'+go(r.id+' · '+r.intent,'rfqs',r.id)+' · '+badge(r.status)+'</div>'}).join(''):'<div class="data-row muted">无 RFQ；会话本身不等于 RFQ。</div>'))+
-      panel('卖家上下文',row('线索负责人',esc(c.owner||'未分配'))+row('主动联系',c.stop?'已停止':'按买家授权与业务状态')+row('产品依据',c.recommendation?go('P-001 · 查看资料','review','P-001'):'无推荐依据')+
-      '<div class="rule"></div><div class="callout">联系信息只对授权岗位显示；本演示不存真实买家联系方式。</div>')+'</div>';
+    var c=current(app.conversations),related=app.rfqs.filter(function(r){return r.conversation===c.id}),task=app.task.conversation===c.id?app.task:null;
+    var next=task&&task.status!=='已答复'?
+      focus('当前进展 · '+esc(c.id),'工程师正在处理买家的问题','原会话可继续提问；任务状态：'+esc(task.status)+'。',go('打开工程任务','engineering',task.id,'btn primary')):
+      related.length?
+      focus('当前进展 · '+esc(c.id),'已有 '+related.length+' 份 RFQ','每份采购请求保留自己的编号、状态和待补项。',go('查看 RFQ','rfqs',related[0].id,'btn primary')):
+      !c.confirmed&&c.source!=='产品页'?
+      focus('当前进展 · '+esc(c.id),'需求摘要等待买家确认','确认前不展示匹配候选；自助会话不自动进入销售待办。',act('模拟买家确认需求','confirm-requirement','primary',true)):
+      focus('当前进展 · '+esc(c.id),c.source==='产品页'?'已知型号咨询':'可继续自助沟通',c.source==='产品页'?'买家可直接查看有据答复，无须先完成选型确认。':'目前没有买家提交的人工请求或 RFQ。',c.source==='产品页'?go('查看产品事实','review','P-001','btn'):'');
+    var links=(task?item('工程任务 '+task.id,esc(task.status),go('查看','engineering',task.id)):'')+
+      related.map(function(r){return item(r.id+' · '+esc(r.intent),esc(r.status+' · '+r.gap),go('查看','rfqs',r.id))}).join('');
+    return heading('INQUIRY DESK','询盘与线索','先看当前处理进展，再查看需求和关联记录。')+
+      '<div class="workspace-grid"><div><h2 class="section-title">选择会话</h2>'+
+      switcher(app.conversations,'inquiries',c.id,function(x){return esc(x.id+' · '+x.title)},function(x){return esc(x.source)+' · '+(app.rfqs.some(function(r){return r.conversation===x.id})?'有关联 RFQ':'自助会话')})+
+      '</div><div>'+next+
+      panel('已知信息','<div class="compact-facts"><div><small>场景 / 原意</small><strong>'+esc(c.need)+'</strong></div><div><small>仍待核实</small><strong>'+esc(c.unknown)+'</strong></div></div>'+
+        '<div class="summary-strip"><span>入口：'+esc(c.source)+'</span><span>需求：'+(c.confirmed?'已确认':'待确认')+'</span><span>线索负责人：'+esc(c.owner||'未分配')+'</span></div>'+
+        '<div class="data-row"><small>推荐结论</small><strong>'+esc(c.recommendation||'尚未形成可靠候选')+'</strong></div>'+
+        details('查看原始对话 · '+c.messages.length+' 条',c.messages.map(function(m){return '<div class="message '+(m.who==='买家'?'buyer':'human')+'"><small>'+esc(m.who)+'</small>'+esc(m.body)+'</div>'}).join('')))+
+      panel('关联处理',links?'<div class="simple-list">'+links+'</div>':'<div class="muted-block">无人工任务或 RFQ。会话记录仍可按权限检索。</div>'+
+        details('查看产品与联系边界',row('产品依据',c.recommendation||c.source==='产品页'?go('P-001 · 核对资料','review','P-001'):'无推荐依据')+row('主动联系',c.stop?'已停止':'按买家授权与业务状态')+'<div class="muted-block">本演示不存真实买家联系方式；无权岗位不显示联系人数据。</div>'))+
+      '</div></div>';
   }
   function engineering(){
     var t=app.task,c=find(app.conversations,t.conversation);
-    return heading('06 / ENGINEER HANDOFF','工程任务','买家明确请求后才建任务；追问与答复回到原会话。',go('查看原会话','inquiries',c.id,'btn'))+
-      '<div class="grid cols-main">'+panel('T-204 · '+esc(t.status),row('买家原问题','“'+esc(t.question)+'”')+row('已确认条件',esc(c.need))+row('未解决原因','流量、扬程与介质未确认，现有资料不足以判断实际适用性')+row('资料依据',go('P-001 v02 · 已核准事实','review','P-001'))+
-      '<div class="rule"></div><label for="answer" class="note">工程师拟发给买家的内容</label><textarea id="answer" class="field" placeholder="输入实际追问或答复">'+esc(t.draft)+'</textarea><div class="actions gap">'+act('向买家追问条件','task-ask','',can('engineer')&&t.status!=='已答复'&&t.draft.trim().length>0,'需工程师权限并输入内容')+act('模拟买家补充条件','task-buyer-reply','',t.status==='待买家补充','仅待买家补充时可模拟')+act('发布人工答复','task-answer','primary',can('engineer')&&t.status!=='已答复'&&t.draft.trim().length>0,'需工程师权限并输入内容')+'</div>'+
-      '<div class="guide">追问/答复会作为人工消息写入原会话；草稿本身不代表买家收到。专业结论由工程师填写。</div>')+
-      '<div class="stack">'+panel('关联对象',row('原会话',go(c.id,'inquiries',c.id))+row('产品',go('P-001','review','P-001'))+row('RFQ',app.rfqs.filter(function(r){return r.conversation===c.id}).map(function(r){return go(r.id,'rfqs',r.id)}).join(' · ')))+
-      panel('任务状态',row('当前',badge(t.status))+row('人工答复',esc(t.answer||'尚未发布'))+'<div class="callout gap">一次人工答复不会自动成为产品通用知识；如需复用，转回产品事实核准流程。</div>')+'</div></div>';
+    var waiting=t.status==='待买家补充',done=t.status==='已答复';
+    var lead=done?
+      focus('任务已完成 · '+t.id,'人工答复已回到原会话','可在原会话查看实际发布的内容与人工身份。',go('查看会话','inquiries',c.id,'btn')):
+      waiting?
+      focus('当前等待 · '+t.id,'等待买家补充条件','追问已发送到原会话；买家补充后继续处理同一任务。',act('模拟买家补充条件','task-buyer-reply','primary',true)):
+      focus('当前任务 · '+t.id,'回答买家的实际问题','先阅读原问题和工况，再由工程师决定追问或答复。','');
+    return heading('ENGINEER HANDOFF','工程任务','这里只显示买家已请求人工的问题；追问和答复都回到原会话。',go('返回会话','inquiries',c.id,'btn'))+
+      lead+'<div class="grid cols-main">'+
+      panel('买家要解决的问题','<div class="quote">“'+esc(t.question)+'”</div>'+
+        '<div class="summary-strip"><span>场景：'+esc(c.need)+'</span><span>任务状态：'+esc(t.status)+'</span></div>'+
+        (waiting?'<div class="muted-block">追问已发送；等待买家补充后再继续答复。</div>':!done?'<label for="answer" class="section-title">写给买家的内容</label><textarea id="answer" class="field" placeholder="输入追问或专业答复">'+esc(t.draft)+'</textarea>'+
+        '<div class="actions gap">'+act('发送追问','task-ask','',can('engineer')&&!!t.draft.trim(),'需要工程师权限并输入内容')+
+        act('发布人工答复','task-answer','primary',can('engineer')&&!!t.draft.trim(),'需要工程师权限并输入内容')+'</div>'+
+        '<p class="guide">输入仅为草稿；点击发送后才显示在原会话。工程师自行决定专业结论。</p>':
+        '<div class="callout">已发布答复：'+esc(t.answer||'见原会话')+'</div>')+
+        details('查看判断依据与缺失条件',row('已确认',esc(c.need))+row('未确认',esc(c.unknown))+row('为何转人工','现有资料不足以判断该工况适用性')+row('资料版本',go('P-001 v02 · 已核准事实','review','P-001'))))+
+      panel('关联记录',item('原会话 '+c.id,'追问与答复在这里送达',go('查看','inquiries',c.id))+
+        item('产品 P-001','检查已核准事实与出处',go('查看','review','P-001'))+
+        details('查看同会话的 RFQ',app.rfqs.filter(function(r){return r.conversation===c.id}).map(function(r){return item(r.id,esc(r.status),go('查看','rfqs',r.id))}).join(''))+
+        '<p class="fineprint">人工答复不自动成为产品通用知识；复用前须经过资料核准。</p>')+'</div>';
   }
   function hint(r){function minutes(t){var a=t.split(':');return Number(a[0])*60+Number(a[1])}return app.rfqs.filter(function(x){return x.id!==r.id&&x.conversation===r.conversation&&x.model&&x.model===r.model&&Math.abs(minutes(x.time)-minutes(r.time))<=1440}).map(function(x){return x.id})}
   function rfqs(){
     var r=current(app.rfqs),c=find(app.conversations,r.conversation),h=hint(r);
-    var list=app.rfqs.map(function(x){return '<tr class="'+(x.id===r.id?'selected-row':'')+'"><td>'+go(x.id,'rfqs',x.id)+'</td><td>'+esc(x.model||'未选型号')+'</td><td>'+badge(x.status)+'</td><td>'+esc(x.gap)+'</td></tr>'}).join('');
-    return heading('07 / SALES DESK','RFQ 与跟进','一个会话一个线索负责人；每份 RFQ 独立保存状态、待补项和修订。',go('查看原会话','inquiries',c.id,'btn'))+
-      '<div class="grid cols-main">'+panel('共享 RFQ 队列','<div class="table-wrap"><table><thead><tr><th>编号</th><th>型号</th><th>状态</th><th>待补项</th></tr></thead><tbody>'+list+'</tbody></table></div><div class="guide">RFQ 是询价，不自动生成订单。编号分别对应独立采购请求。</div>')+
-      '<div class="stack">'+panel('当前 RFQ · '+esc(r.id),row('采购意图',esc(r.intent))+row('原会话',go(c.id,'inquiries',c.id))+row('当前型号',esc(r.model||'未选型'))+row('当前状态',badge(r.status))+row('待补项',esc(r.gap))+row('负责人',esc(c.owner||'共享队列'))+
-      row('买家联系信息',can('sales')?'演示：已确认一种可回复方式（不展示真实值）':'无权查看')+
-      '<div class="rule"></div><div class="actions">'+act('领取会话线索','claim','',can('sales')&&!c.owner,'需要销售权限且当前未分配')+act('标记已处理','rfq-complete','',can('sales')&&r.status!=='已处理')+act(c.stop?'恢复主动联系':'停止主动联系','toggle-contact','',can('sales'))+'</div>'+
-      '<div class="guide">停止主动联系与 RFQ 状态分开；已有 RFQ 及历史仍保留。</div>')+
-      panel('修订与分组',r.revisions.map(function(v,i){return '<div class="data-row"><small>'+esc(v.time)+' · 修订 '+i+'</small><strong>'+esc(v.text)+'</strong></div>'}).join('')+
-      '<div class="rule"></div><div class="callout">'+(h.length?'同一会话、24 小时内同型号可能相关：'+h.map(function(id){return go(id,'rfqs',id)}).join(' · '):'当前无同会话、24 小时内同型号的相似提示。')+' 提示不自动合并或拆分，也不跨会话按联系方式匹配。</div>'+
-      '<div class="actions gap">'+act('模拟买家在原请求补充型号 P-001','add-model','',can('sales')&&!r.model,'仅无型号 RFQ 可补充')+act('模拟买家纠正误选型号','correct-model','',can('sales')&&!!r.model,'需销售权限且当前已有型号')+act('模拟独立采购请求新建 RFQ','new-rfq','',can('sales'))+'</div><div class="guide">原请求补充或纠错沿用编号；独立采购请求才建新编号。这里模拟买家提出并确认的请求，不替买家自动判定。</div>')+'</div></div>';
+    var primary=!c.owner?
+      focus('当前任务 · '+esc(r.id),'领取这条会话线索','一个会话只有一个线索负责人，关联的 RFQ 仍各自处理。',act('领取线索','claim','primary',can('sales'),'需要销售权限')):
+      r.status==='已处理'?
+      focus('当前状态 · '+esc(r.id),'这份 RFQ 已处理','其他关联 RFQ 的状态不会因此改变。',go('查看原会话','inquiries',c.id,'btn')):
+      focus('当前任务 · '+esc(r.id),'处理这份采购请求','核对待补项并记录处理结果；负责人为 '+esc(c.owner)+'。',act('标记此 RFQ 已处理','rfq-complete','primary',can('sales'),'需要销售权限'));
+    return heading('SALES DESK','RFQ 与跟进','先选询价，再看当前任务。修订历史与规则演示按需展开。',go('查看原会话','inquiries',c.id,'btn'))+
+      '<div class="workspace-grid"><div><h2 class="section-title">选择 RFQ</h2>'+
+      switcher(app.rfqs,'rfqs',r.id,function(x){return esc(x.id+' · '+(x.model||'未选型号'))},function(x){return esc(x.status+' · '+x.intent)})+
+      '</div><div>'+primary+
+      panel('当前询价',row('采购请求',esc(r.intent))+row('型号',esc(r.model||'未选定'))+
+        '<div class="summary-strip"><span>状态：'+esc(r.status)+'</span><span>待补：'+esc(r.gap)+'</span><span>负责人：'+esc(c.owner||'共享队列')+'</span></div>'+
+        '<div class="actions">'+go('打开原会话 '+c.id,'inquiries',c.id,'btn')+'</div>'+
+        details('查看联系方式与主动联系状态',row('联系方式',can('sales')?'演示：已确认一种可回复方式（无真实值）':'无权查看')+
+          row('主动联系',c.stop?'已停止':'按买家授权与业务状态')+
+          act(c.stop?'恢复主动联系':'停止主动联系','toggle-contact','',can('sales'),'需要销售权限')+
+          '<p class="guide">停止主动联系与 RFQ 处理状态分别记录。</p>'))+
+      panel('补充与历史',h.length?'<div class="callout">同会话、24 小时内有同型号询价可能相关：'+h.map(function(id){return go(id,'rfqs',id)}).join(' · ')+'。请人工核对采购意图。</div>':
+        '<div class="muted-block">当前没有同会话、24 小时内的同型号提示。</div>'+
+        details('查看初次提交与修订 · '+r.revisions.length+' 条',r.revisions.map(function(v,i){return row('修订 '+i+' · '+v.time,esc(v.text))}).join(''))+
+        details('演示 RFQ 分组与更正规则','<p class="note">以下按钮仅模拟买家已提出并确认的行为，不是销售擅自修改买家询价。</p><div class="actions">'+
+          act('模拟原请求补充型号','add-model','',can('sales')&&!r.model,'仅未选型号 RFQ 可补充')+
+          act('模拟原请求纠正型号','correct-model','',can('sales')&&!!r.model,'需要销售权限且已有型号')+
+          act('模拟新采购请求','new-rfq','',can('sales'),'需要销售权限')+'</div><p class="guide">补充或纠错沿用原编号；独立请求新建编号。相似提示不自动合并，也不跨会话匹配。</p>'))+
+      '</div></div>';
   }
   function team(){
-    return heading('08 / ACCESS GOVERNANCE','成员与权限','共用系统框架，按岗位呈现任务；这里仅模拟权限效果。')+
-      panel('演示岗位','<div class="callout">右上角切换岗位：管理员、产品负责人、销售、工程师。无权操作保留可理解的只读上下文并解释原因；真实系统还需要服务端鉴权、企业隔离和审计。</div><div class="rule"></div>'+
-      row('产品负责人','核准事实、核对发布内容')+row('工程师','处理买家提交的人工请求')+row('销售','处理会话负责人、RFQ 状态和修订')+row('管理员','查看与操作本示例企业全部功能')+
-      '<div class="rule"></div><h3>本次演示的操作历史</h3><div class="audit">'+(app.audit.length?app.audit.map(function(a){return '<div class="data-row"><small>'+esc(a.time+' · '+a.type)+'</small><strong>'+esc(a.details)+'</strong></div>'}).join(''):'<div class="muted">尚无演示操作。</div>')+'</div>');
+    return heading('ACCESS GOVERNANCE','成员与权限','演示岗位可从右上角切换；这里只呈现与日常任务有关的权限。')+
+      panel('岗位与可处理事项','<div class="simple-list">'+
+        item('产品负责人','核准产品事实、核对并发布页面','')+
+        item('工程师','处理买家明确提交的人工问题','')+
+        item('销售','领取会话线索、处理各份 RFQ','')+
+        item('管理员','查看和操作本示例企业的演示功能','')+'</div>'+
+        details('查看演示操作记录',app.audit.length?app.audit.map(function(a){return row(a.time+' · '+a.type,esc(a.details))}).join(''):'<div class="muted-block">尚无操作记录。</div>')+
+        '<div class="callout gap">这里的岗位切换只是线稿模拟。正式产品仍需服务端权限校验、企业隔离和审计。</div>');
   }
   function v1(title,desc){return heading('09 / V1 CONNECTION',title+' '+badge('V1 规划'),desc)+
     '<div class="empty"><strong>与现有 MVP 模块连接的位置</strong><p>'+(title==='企业模板'?'产品核准事实 → 企业模板草稿 → 预览 → 授权核准 → 页面版本。完整 DIY 编辑器留在 V1。':'会话、推荐、人工任务、RFQ 的可追溯事件 → 流程分析。指标须从真实数据计算，不在此线稿虚构转化率。')+'</p></div>'}
@@ -206,15 +292,15 @@
   }
   function action(name){
     var p=current(app.products),r=current(app.rfqs),c=find(app.conversations,r.conversation),t=app.task;
-    if(name==='add-product'&&can('approve')){var id='P-'+String(app.products.length+1).padStart(3,'0');app.products.push({id:id,name:'新导入示例产品',version:1,pageVersion:0,published:false,previewed:false,approved:[],draft:[{key:'型号',value:'示例型号 C（演示）',source:'新上传示例文件 · 第 1 页'}],gaps:['技术参数','曲线']});audit('产品导入',id+' 抽取草稿待核');navigate('review',id);return}
+    if(name==='add-product'&&can('approve')){var id='P-'+String(app.products.length+1).padStart(3,'0');app.products.push({id:id,name:'新导入示例产品',version:1,pageVersion:0,publishedFactVersion:0,published:false,previewed:false,approved:[],draft:[{key:'型号',value:'示例型号 C（演示）',source:'新上传示例文件 · 第 1 页'}],gaps:['技术参数','曲线']});audit('产品导入',id+' 抽取草稿待核');navigate('review',id);return}
     if(name==='approve'&&can('approve')&&p.draft.length&&p.draft.every(function(f){return !/待核对|待人工核准/.test(f.value)})){p.approved=p.approved.concat(p.draft);p.draft=[];p.version++;p.previewed=false;audit('事实核准',p.id+' 事实版本 v'+p.version);toast('已核准草稿事实；发布前须重新核对内容')}
-    else if(name==='preview'&&can('publish')){p.previewed=true;audit('内容核对',p.id+' · 事实、出处与缺项');toast('已记录内容核对')}
-    else if(name==='publish'&&can('publish')&&p.previewed&&p.approved.length){p.pageVersion++;p.published=true;p.previewed=false;audit('页面发布',p.id+' 页面 v'+p.pageVersion);toast('已发布演示页面版本 v'+p.pageVersion)}
+    else if(name==='preview'&&can('publish')&&p.version!==p.publishedFactVersion){p.previewed=true;audit('内容核对',p.id+' · 事实、出处与缺项');toast('已记录内容核对')}
+    else if(name==='publish'&&can('publish')&&p.previewed&&p.approved.length&&p.version!==p.publishedFactVersion){p.pageVersion++;p.publishedFactVersion=p.version;p.published=true;p.previewed=false;audit('页面发布',p.id+' 页面 v'+p.pageVersion);toast('已发布演示页面版本 v'+p.pageVersion)}
     else if(name==='confirm-requirement'){var q=current(app.conversations);q.confirmed=true;q.recommendation='条件不足：需进一步核对流量、扬程、介质';q.messages.push({who:'系统事件',body:'买家确认了需求摘要；因关键参数缺失，尚无可靠推荐。'});audit('需求确认',q.id+' 仍有未知项');toast('需求已确认；当前条件不足，未推荐产品')}
     else if(name==='task-ask'&&can('engineer')&&t.draft.trim()){t.status='待买家补充';find(app.conversations,t.conversation).messages.push({who:'售前工程师',body:t.draft.trim()});audit('人工追问',t.id+' → 原会话');t.draft='';toast('追问已回到原会话')}
     else if(name==='task-buyer-reply'&&t.status==='待买家补充'){t.status='待工程师处理';find(app.conversations,t.conversation).messages.push({who:'买家',body:'补充：正在确认楼宇实际流量和扬程，稍后提供。'});audit('买家补充',t.id+' 保留原任务');toast('买家补充已记录；原任务继续处理')}
     else if(name==='task-answer'&&can('engineer')&&t.draft.trim()){t.status='已答复';t.answer=t.draft.trim();find(app.conversations,t.conversation).messages.push({who:'售前工程师',body:t.answer});audit('工程答复',t.id+' → 原会话');t.draft='';toast('人工答复已显示在原会话')}
-    else if(name==='claim'&&can('sales')&&!c.owner){c.owner='示例销售';audit('线索领取',c.id+' · 一个会话一个负责人');toast('已领取会话线索')}
+    else if(name==='claim'&&can('sales')&&!c.owner){c.owner='示例销售';r.status='处理中';audit('线索领取',c.id+' · 一个会话一个负责人；'+r.id+' → 处理中');toast('已领取线索；当前 RFQ 进入处理中')}
     else if(name==='rfq-complete'&&can('sales')){r.status='已处理';audit('RFQ 状态',r.id+' → 已处理');toast(r.id+' 已标记处理')}
     else if(name==='toggle-contact'&&can('sales')){c.stop=!c.stop;audit('主动联系',c.id+(c.stop?' · 已停止':' · 已恢复'));toast('主动联系状态已更新；RFQ 状态未变')}
     else if(name==='add-model'&&can('sales')&&!r.model){r.model='P-001';r.gap='流量、扬程待补';r.revisions.push({text:'原采购请求补充型号 P-001；编号不变',time:'现在'});audit('买家 RFQ 修订模拟',r.id+' 补充型号');toast('已在原 RFQ 补充型号')}
