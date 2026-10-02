@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import Database, Handler
+from app import Database, Handler, confirm_requirement_values, extract_requirement_values, match_products
 
 
 class ProductApprovalTests(unittest.TestCase):
@@ -70,6 +70,66 @@ class PublicPageTests(unittest.TestCase):
             self.assertEqual(fake.captured[1], 404)
             self.assertIn("尚未发布", fake.captured[0])
             fake.db.conn.close()
+
+
+class RequirementMatchingTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.temp_dir.name) / "app.db")
+        self.db.seed_demo_products("demo-tenant")
+        for product in self.db.list_products("demo-tenant"):
+            self.db.approve_product("demo-tenant", product["id"])
+            self.db.publish_product("demo-tenant", product["id"])
+
+    def tearDown(self):
+        self.db.conn.close()
+        self.temp_dir.cleanup()
+
+    def test_confirmed_requirements_return_explainable_candidate(self):
+        conversation_id = self.db.create_conversation("demo-tenant")
+        message = "Need a water pump, flow 50 m3/h, head 30 m, clean water"
+        self.db.save_message("demo-tenant", conversation_id, "buyer", message)
+        values = extract_requirement_values(message, {}, None)
+        candidate_id = self.db.create_requirement_revision("demo-tenant", conversation_id, values)
+        self.assertTrue(candidate_id)
+        confirmed = confirm_requirement_values(values)
+        revision_id = self.db.create_requirement_revision("demo-tenant", conversation_id, confirmed, "confirmed")
+        status, results, missing = match_products(self.db, "demo-tenant", confirmed)
+        recommendation_id = self.db.save_recommendation("demo-tenant", conversation_id, revision_id, status, results)
+        self.assertEqual(status, "recommended")
+        self.assertEqual(missing, [])
+        self.assertEqual(results[0]["model"], "CB-80A")
+        self.assertEqual(results[0]["status"], "candidate")
+        self.assertIn("流量", "".join(results[0]["satisfies"]))
+        self.assertIn("CB-120C", [result["model"] for result in results])
+        self.assertTrue(recommendation_id)
+
+    def test_missing_condition_does_not_recommend(self):
+        values = confirm_requirement_values({"flow": {"value": "50", "unit": "m3/h", "label": "流量"}})
+        status, results, missing = match_products(self.db, "demo-tenant", values)
+        self.assertEqual(status, "insufficient")
+        self.assertEqual(results, [])
+        self.assertIn("扬程", missing)
+        self.assertIn("介质", missing)
+
+    def test_new_requirement_revision_invalidates_old_recommendation(self):
+        conversation_id = self.db.create_conversation("demo-tenant")
+        first = confirm_requirement_values(extract_requirement_values("flow 50, head 30, clean water", {}, None))
+        first_revision = self.db.create_requirement_revision("demo-tenant", conversation_id, first, "confirmed")
+        first_status, first_results, _ = match_products(self.db, "demo-tenant", first)
+        self.db.save_recommendation("demo-tenant", conversation_id, first_revision, first_status, first_results)
+
+        changed = dict(first)
+        changed["flow"] = {"value": "100", "unit": "m3/h", "state": "confirmed", "source": "buyer_confirmation", "label": "流量"}
+        changed_revision = self.db.create_requirement_revision("demo-tenant", conversation_id, changed, "confirmed")
+        changed_status, changed_results, _ = match_products(self.db, "demo-tenant", changed)
+        self.db.save_recommendation("demo-tenant", conversation_id, changed_revision, changed_status, changed_results)
+
+        revisions = self.db.get_revisions("demo-tenant", conversation_id)
+        recommendations = self.db.get_recommendations("demo-tenant", conversation_id)
+        self.assertEqual([revision["revision"] for revision in revisions], [1, 2])
+        self.assertEqual(sum(item["status"] == "invalidated" for item in recommendations), 1)
+        self.assertEqual(sum(item["status"] == changed_status for item in recommendations), 1)
 
 
 if __name__ == "__main__":

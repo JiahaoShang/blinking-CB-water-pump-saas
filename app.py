@@ -31,6 +31,18 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "data" / "app.db"
 UPLOAD_DIR = ROOT / "data" / "uploads"
 REQUIRED_FIELDS = ("flow_range", "head_range", "media", "material")
+MATCH_REQUIRED_FIELDS = ("flow", "head", "media")
+REQUIREMENT_LABELS = {
+    "category": "品类",
+    "use_case": "用途",
+    "flow": "流量",
+    "head": "扬程",
+    "media": "介质",
+    "temperature": "介质温度",
+    "quantity": "数量",
+    "region": "目的地",
+    "delivery": "期望交期",
+}
 FIELD_LABELS = {
     "flow_range": "流量范围",
     "head_range": "扬程范围",
@@ -143,6 +155,48 @@ class Database:
                 details TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                source TEXT NOT NULL DEFAULT 'web',
+                locale TEXT NOT NULL DEFAULT 'en',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'buyer_web',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS requirement_revisions (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                revision INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'candidate',
+                values_json TEXT NOT NULL,
+                missing_json TEXT NOT NULL DEFAULT '[]',
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                confirmed_at TEXT,
+                UNIQUE (conversation_id, revision)
+            );
+            CREATE TABLE IF NOT EXISTS recommendations (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                requirement_revision_id TEXT NOT NULL REFERENCES requirement_revisions(id),
+                status TEXT NOT NULL,
+                rule_version TEXT NOT NULL,
+                results_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                invalidated_at TEXT
+            );
             """
         )
         self.conn.execute(
@@ -203,6 +257,108 @@ class Database:
             "ORDER BY version DESC LIMIT 1",
             (tenant_id, product_id),
         ).fetchone()
+
+    def create_conversation(self, tenant_id: str, source: str = "web", locale: str = "en") -> str:
+        self.ensure_tenant(tenant_id)
+        conversation_id = secrets.token_hex(12)
+        timestamp = now_iso()
+        self.conn.execute(
+            "INSERT INTO conversations(id, tenant_id, source, locale, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)",
+            (conversation_id, tenant_id, source, locale, timestamp, timestamp),
+        )
+        self._audit(tenant_id, "conversation", conversation_id, "created", "buyer-web", source)
+        self.conn.commit()
+        return conversation_id
+
+    def get_conversation(self, tenant_id: str, conversation_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM conversations WHERE tenant_id=? AND id=?", (tenant_id, conversation_id)
+        ).fetchone()
+
+    def list_messages(self, tenant_id: str, conversation_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM messages WHERE tenant_id=? AND conversation_id=? ORDER BY created_at, id",
+            (tenant_id, conversation_id),
+        ).fetchall()
+
+    def save_message(self, tenant_id: str, conversation_id: str, role: str, content: str, source: str = "buyer-web") -> str:
+        if not self.get_conversation(tenant_id, conversation_id):
+            raise ValueError("会话不存在")
+        content = content.strip()
+        if not content:
+            raise ValueError("消息不能为空")
+        message_id = secrets.token_hex(12)
+        self.conn.execute(
+            "INSERT INTO messages(id, tenant_id, conversation_id, role, content, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (message_id, tenant_id, conversation_id, role, content, source, now_iso()),
+        )
+        self.conn.execute("UPDATE conversations SET updated_at=? WHERE tenant_id=? AND id=?", (now_iso(), tenant_id, conversation_id))
+        self.conn.commit()
+        return message_id
+
+    def get_revisions(self, tenant_id: str, conversation_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM requirement_revisions WHERE tenant_id=? AND conversation_id=? ORDER BY revision",
+            (tenant_id, conversation_id),
+        ).fetchall()
+
+    def get_latest_revision(self, tenant_id: str, conversation_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM requirement_revisions WHERE tenant_id=? AND conversation_id=? ORDER BY revision DESC LIMIT 1",
+            (tenant_id, conversation_id),
+        ).fetchone()
+
+    def create_requirement_revision(
+        self,
+        tenant_id: str,
+        conversation_id: str,
+        values: dict[str, dict[str, str]],
+        status: str = "candidate",
+        created_by: str = "buyer-web",
+    ) -> str:
+        if not self.get_conversation(tenant_id, conversation_id):
+            raise ValueError("会话不存在")
+        previous = self.get_latest_revision(tenant_id, conversation_id)
+        revision = (previous["revision"] if previous else 0) + 1
+        missing = [key for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
+        revision_id = secrets.token_hex(12)
+        timestamp = now_iso()
+        self.conn.execute(
+            "INSERT INTO requirement_revisions(id, tenant_id, conversation_id, revision, status, values_json, missing_json, created_by, created_at, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (revision_id, tenant_id, conversation_id, revision, status, json.dumps(values, ensure_ascii=False), json.dumps(missing, ensure_ascii=False), created_by, timestamp, timestamp if status == "confirmed" else None),
+        )
+        self.conn.execute("UPDATE conversations SET updated_at=? WHERE tenant_id=? AND id=?", (timestamp, tenant_id, conversation_id))
+        self._audit(tenant_id, "requirement_revision", revision_id, "confirmed" if status == "confirmed" else "candidate_saved", created_by, f"conversation={conversation_id};revision={revision}")
+        self.conn.commit()
+        return revision_id
+
+    def get_recommendations(self, tenant_id: str, conversation_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM recommendations WHERE tenant_id=? AND conversation_id=? ORDER BY created_at DESC",
+            (tenant_id, conversation_id),
+        ).fetchall()
+
+    def save_recommendation(
+        self,
+        tenant_id: str,
+        conversation_id: str,
+        requirement_revision_id: str,
+        status: str,
+        results: list[dict[str, object]],
+        rule_version: str = "pump-demo-v1",
+    ) -> str:
+        self.conn.execute(
+            "UPDATE recommendations SET status='invalidated', invalidated_at=? WHERE tenant_id=? AND conversation_id=? AND status <> 'invalidated'",
+            (now_iso(), tenant_id, conversation_id),
+        )
+        recommendation_id = secrets.token_hex(12)
+        self.conn.execute(
+            "INSERT INTO recommendations(id, tenant_id, conversation_id, requirement_revision_id, status, rule_version, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (recommendation_id, tenant_id, conversation_id, requirement_revision_id, status, rule_version, json.dumps(results, ensure_ascii=False), now_iso()),
+        )
+        self._audit(tenant_id, "recommendation", recommendation_id, "generated", "matching-rule", f"status={status};revision={requirement_revision_id}")
+        self.conn.commit()
+        return recommendation_id
 
     def create_product(self, tenant_id: str, model: str, name: str, use_case: str, actor: str = "demo-admin") -> str:
         self.ensure_tenant(tenant_id)
@@ -382,6 +538,150 @@ class Database:
         return created
 
 
+def number_from_text(value: str) -> float | None:
+    match = re.search(r"-?\d+(?:[.,]\d+)?", value or "")
+    if not match:
+        return None
+    return parse_float(match.group(0).replace(",", "."))
+
+
+def range_from_text(value: str) -> tuple[float, float] | None:
+    match = re.search(r"(-?\d+(?:[.,]\d+)?)\s*(?:-|~|至|到|to)\s*(-?\d+(?:[.,]\d+)?)", value or "", flags=re.IGNORECASE)
+    if not match:
+        return None
+    first = parse_float(match.group(1).replace(",", "."))
+    second = parse_float(match.group(2).replace(",", "."))
+    if first is None or second is None:
+        return None
+    return (min(first, second), max(first, second))
+
+
+def field_value(values: dict[str, dict[str, str]], key: str) -> str:
+    return values.get(key, {}).get("value", "").strip()
+
+
+def extract_requirement_values(text: str, explicit: dict[str, str], previous: dict[str, dict[str, str]] | None = None) -> dict[str, dict[str, str]]:
+    """Keep buyer wording and structured candidates separate from product facts."""
+    values = {key: dict(item) for key, item in (previous or {}).items()}
+    for key, raw in explicit.items():
+        value = (raw or "").strip()
+        if key not in REQUIREMENT_LABELS or not value:
+            continue
+        values[key] = {
+            "value": value,
+            "unit": explicit.get(f"{key}_unit", ""),
+            "state": "candidate",
+            "source": "buyer_form",
+            "label": REQUIREMENT_LABELS[key],
+        }
+
+    patterns = {
+        "flow": r"(?:flow|流量)[^\d-]{0,18}(-?\d+(?:[.,]\d+)?)",
+        "head": r"(?:head|扬程)[^\d-]{0,18}(-?\d+(?:[.,]\d+)?)",
+        "temperature": r"(?:temperature|temp|温度)[^\d-]{0,18}(-?\d+(?:[.,]\d+)?)",
+        "quantity": r"(?:quantity|qty|数量)[^\d-]{0,18}(\d+(?:[.,]\d+)?)",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text or "", flags=re.IGNORECASE)
+        if match:
+            values[key] = {
+                "value": match.group(1).replace(",", "."),
+                "unit": {"flow": "m³/h", "head": "m", "temperature": "°C", "quantity": "units"}.get(key, ""),
+                "state": "candidate",
+                "source": "buyer_message",
+                "label": REQUIREMENT_LABELS[key],
+            }
+    if re.search(r"pump|water pump|水泵|泵", text or "", flags=re.IGNORECASE):
+        values.setdefault("category", {"value": "水泵", "unit": "", "state": "candidate", "source": "buyer_message", "label": REQUIREMENT_LABELS["category"]})
+    if re.search(r"清水|净水|clean\s+water|fresh\s+water", text or "", flags=re.IGNORECASE):
+        values["media"] = {"value": "清水", "unit": "", "state": "candidate", "source": "buyer_message", "label": REQUIREMENT_LABELS["media"]}
+    elif re.search(r"酸|碱|化工|chemical|acid|alkali", text or "", flags=re.IGNORECASE):
+        values["media"] = {"value": "化工介质", "unit": "", "state": "candidate", "source": "buyer_message", "label": REQUIREMENT_LABELS["media"]}
+    return values
+
+
+def confirm_requirement_values(values: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    confirmed = {}
+    for key, item in values.items():
+        copied = dict(item)
+        copied["state"] = "confirmed" if copied.get("value", "").strip() else "unknown"
+        copied["source"] = "buyer_confirmation" if copied["state"] == "confirmed" else copied.get("source", "buyer_confirmation")
+        copied.setdefault("label", REQUIREMENT_LABELS.get(key, key))
+        confirmed[key] = copied
+    return confirmed
+
+
+def match_products(db: Database, tenant_id: str, values: dict[str, dict[str, str]]) -> tuple[str, list[dict[str, object]], list[str]]:
+    """Apply deterministic demo rules to approved, published product snapshots."""
+    missing = [REQUIREMENT_LABELS[key] for key in MATCH_REQUIRED_FIELDS if not field_value(values, key)]
+    if missing:
+        return "insufficient", [], missing
+    requirements = {key: number_from_text(field_value(values, key)) for key in ("flow", "head", "temperature")}
+    requirement_media = field_value(values, "media").lower()
+    rows = db.conn.execute(
+        "SELECT p.id, p.model, p.slug, v.id AS version_id, v.version, v.snapshot_json FROM products p "
+        "JOIN product_versions v ON v.product_id=p.id AND v.tenant_id=p.tenant_id AND v.status='published' "
+        "WHERE p.tenant_id=? AND p.status='published' ORDER BY p.model",
+        (tenant_id,),
+    ).fetchall()
+    results: list[dict[str, object]] = []
+    for row in rows:
+        snapshot = json.loads(row["snapshot_json"])
+        product_fields = {item["field_key"]: item for item in snapshot.get("fields", [])}
+        satisfies: list[str] = []
+        conflicts: list[str] = []
+        unknown: list[str] = []
+
+        for requirement_key, product_key, label, unit in (("flow", "flow_range", "流量", "m³/h"), ("head", "head_range", "扬程", "m")):
+            required_number = requirements[requirement_key]
+            product_range = range_from_text(product_fields.get(product_key, {}).get("value", ""))
+            if required_number is None or product_range is None:
+                unknown.append(f"{label}规则无法解析")
+            elif product_range[0] <= required_number <= product_range[1]:
+                satisfies.append(f"{label} {required_number:g}{unit} 在产品范围内")
+            else:
+                conflicts.append(f"{label} {required_number:g}{unit} 超出产品范围")
+
+        product_media = product_fields.get("media", {}).get("value", "").lower()
+        if "清水" in requirement_media or "water" in requirement_media:
+            if "清水" in product_media or "water" in product_media:
+                satisfies.append("介质为清水，产品资料标注可用")
+            else:
+                conflicts.append("产品资料未标注清水适用")
+        elif any(token in requirement_media for token in ("酸", "碱", "化工", "chemical", "acid", "alkali")):
+            if any(token in product_media for token in ("酸", "碱", "化工", "chemical", "acid", "alkali")):
+                satisfies.append("介质属于化工场景，产品资料标注相关适用条件")
+            else:
+                conflicts.append("产品资料未标注该化工介质适用")
+        else:
+            unknown.append("介质类型尚未形成可解释规则")
+
+        if requirements["temperature"] is not None:
+            temperature_range = range_from_text(product_fields.get("temperature", {}).get("value", ""))
+            if not temperature_range:
+                unknown.append("产品资料没有可核对的介质温度范围")
+            elif temperature_range[0] <= requirements["temperature"] <= temperature_range[1]:
+                satisfies.append(f"介质温度 {requirements['temperature']:g}°C 在资料范围内")
+            else:
+                conflicts.append(f"介质温度 {requirements['temperature']:g}°C 超出资料范围")
+
+        candidate_status = "candidate" if not conflicts else "conflict"
+        results.append({
+            "product_id": row["id"],
+            "model": row["model"],
+            "product_version_id": row["version_id"],
+            "product_version": row["version"],
+            "detail_url": f"/products/{row['slug']}",
+            "status": candidate_status,
+            "satisfies": satisfies,
+            "conflicts": conflicts,
+            "unknown": unknown,
+        })
+    results.sort(key=lambda item: (0 if item["status"] == "candidate" else 1, item["model"]))
+    status = "recommended" if any(item["status"] == "candidate" for item in results) else "no_match"
+    return status, results, []
+
+
 def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh") -> str:
     return f"""<!doctype html>
 <html lang='{ 'en' if lang == 'en' else 'zh-CN' }'>
@@ -393,7 +693,7 @@ def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh"
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}}
 a{{color:var(--blue);text-decoration:none}}a:hover{{text-decoration:underline}}header{{background:#102a43;color:white;padding:18px 28px;display:flex;justify-content:space-between;align-items:center;gap:16px}}header strong{{font-size:18px}}header nav{{display:flex;gap:16px;align-items:center}}header a{{color:#d9e2ec}}main{{max-width:1180px;margin:30px auto;padding:0 20px}}h1{{font-size:32px;letter-spacing:-.02em;margin:0 0 6px}}h2{{font-size:21px;margin:0 0 14px}}h3{{font-size:16px;margin:20px 0 8px}}.muted{{color:var(--muted)}}.notice{{padding:12px 14px;border-radius:10px;background:#e7f5f2;color:#086f63;margin:0 0 20px}}.error{{padding:12px 14px;border-radius:10px;background:#fff0ee;color:var(--danger);margin:0 0 20px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}}.card{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:0 5px 18px rgba(16,42,67,.05)}}.toolbar{{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:22px}}button,.button{{border:0;border-radius:9px;padding:9px 14px;background:var(--blue);color:#fff;font-weight:650;cursor:pointer;display:inline-block}}button.secondary,.button.secondary{{background:#e7eef7;color:var(--ink)}}button.warn,.button.warn{{background:#fff3d6;color:var(--warn)}}button.danger,.button.danger{{background:#fff0ee;color:var(--danger)}}form.inline{{display:inline}}label{{display:block;font-weight:650;margin:10px 0 4px}}input,select,textarea{{width:100%;padding:9px 10px;border:1px solid #bcccdc;border-radius:8px;font:inherit;background:#fff}}textarea{{min-height:76px;resize:vertical}}.form-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px}}.full{{grid-column:1/-1}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line);vertical-align:top}}th{{font-size:13px;color:var(--muted)}}.badge{{display:inline-flex;align-items:center;border-radius:999px;padding:2px 9px;font-size:12px;font-weight:700;background:#e7eef7;color:var(--ink)}}.badge.published,.badge.approved{{background:#e7f5f2;color:#086f63}}.badge.pending_review{{background:#fff3d6;color:#925c00}}.badge.withdrawn{{background:#fff0ee;color:var(--danger)}}.field-state{{font-size:12px;color:var(--muted)}}.source{{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}}.product-hero{{background:linear-gradient(135deg,#102a43,#0e9384);color:white;border-radius:20px;padding:32px;margin-bottom:20px}}.product-hero .eyebrow{{text-transform:uppercase;letter-spacing:.12em;font-size:12px;opacity:.8}}.product-hero h1{{font-size:38px;margin:4px 0 8px}}.kv{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:20px}}.kv div{{background:rgba(255,255,255,.12);padding:12px;border-radius:10px}}.kv b{{display:block;font-size:12px;opacity:.8}}.kv span{{font-size:18px;font-weight:700}}.footer-note{{margin-top:28px;padding:13px;border-left:3px solid #f0b429;background:#fffaf0;color:#7c5b10}}@media(max-width:700px){{header{{padding:15px 18px;align-items:flex-start;flex-direction:column}}main{{margin:20px auto;padding:0 14px}}.form-grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}h1{{font-size:27px}}.product-hero h1{{font-size:31px}}table{{font-size:13px}}th:nth-child(3),td:nth-child(3){{display:none}}}}
 </style></head><body>
-<header><strong>CB Water Pump SaaS</strong><nav><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>
+<header><strong>CB Water Pump SaaS</strong><nav><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>
 <main>{body}</main></body></html>"""
 
 
@@ -462,9 +762,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/products":
             self.admin_products(query)
             return
+        if path == "/inquiry":
+            conversation_id = self.db.create_conversation(self.tenant_id, "web", query.get("lang", ["en"])[0])
+            self.redirect(f"/inquiry/{conversation_id}?lang={query.get('lang', ['en'])[0]}")
+            return
         match = re.fullmatch(r"/admin/products/([a-f0-9]+)/?", path)
         if match:
             self.admin_product(match.group(1), query)
+            return
+        match = re.fullmatch(r"/inquiry/([a-f0-9]+)/?", path)
+        if match:
+            self.buyer_inquiry(match.group(1), query)
             return
         match = re.fullmatch(r"/products/([a-zA-Z0-9-]+)/?", path)
         if match:
@@ -491,6 +799,51 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/admin/products/seed":
                 self.db.seed_demo_products(self.tenant_id, self.actor)
                 self.redirect("/admin/products?notice=demo")
+                return
+            match = re.fullmatch(r"/inquiry/([a-f0-9]+)/message", path)
+            if match:
+                conversation_id = match.group(1)
+                message = str(form.get("message", ""))
+                self.db.save_message(self.tenant_id, conversation_id, "buyer", message, "buyer_web")
+                previous = self.db.get_latest_revision(self.tenant_id, conversation_id)
+                previous_values = json.loads(previous["values_json"]) if previous else {}
+                explicit = {key: str(form.get(key, "")) for key in REQUIREMENT_LABELS}
+                for key in REQUIREMENT_LABELS:
+                    explicit[f"{key}_unit"] = str(form.get(f"{key}_unit", ""))
+                values = extract_requirement_values(message, explicit, previous_values)
+                self.db.create_requirement_revision(self.tenant_id, conversation_id, values, "candidate", "buyer-web")
+                missing = [REQUIREMENT_LABELS[key] for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
+                if missing:
+                    reply = "I captured your message. To compare products, please confirm: " + ", ".join(missing) + "."
+                else:
+                    reply = "I extracted the conditions above. Please check and confirm the summary before matching."
+                self.db.save_message(self.tenant_id, conversation_id, "assistant", reply, "rule-based-assistant")
+                self.redirect(f"/inquiry/{conversation_id}")
+                return
+            match = re.fullmatch(r"/inquiry/([a-f0-9]+)/confirm", path)
+            if match:
+                conversation_id = match.group(1)
+                previous = self.db.get_latest_revision(self.tenant_id, conversation_id)
+                if not previous:
+                    raise ValueError("请先发送一条需求消息")
+                values = json.loads(previous["values_json"])
+                for key in REQUIREMENT_LABELS:
+                    submitted = str(form.get(key, "")).strip()
+                    if submitted:
+                        values[key] = {
+                            "value": submitted,
+                            "unit": str(form.get(f"{key}_unit", values.get(key, {}).get("unit", ""))),
+                            "state": "candidate",
+                            "source": "buyer_confirmation_form",
+                            "label": REQUIREMENT_LABELS[key],
+                        }
+                    elif key in values:
+                        values[key]["value"] = values[key].get("value", "").strip()
+                confirmed_values = confirm_requirement_values(values)
+                revision_id = self.db.create_requirement_revision(self.tenant_id, conversation_id, confirmed_values, "confirmed", "buyer-web")
+                status, results, _missing = match_products(self.db, self.tenant_id, confirmed_values)
+                self.db.save_recommendation(self.tenant_id, conversation_id, revision_id, status, results)
+                self.redirect(f"/inquiry/{conversation_id}?notice=recommendation")
                 return
             match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources", path)
             if match:
@@ -576,6 +929,67 @@ class Handler(BaseHTTPRequestHandler):
 <section class='card' style='margin-top:18px'><h2>字段核对</h2><p class='muted'>关键字段必须有来源且核准后，才能进入产品版本和公开页面。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th></tr></thead><tbody>{field_rows}</tbody></table><hr><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></section>
 """
         self.send_html(layout(f"{product['model']} · 字段核对", body), 200)
+
+    def buyer_inquiry(self, conversation_id: str, query: dict[str, list[str]]) -> None:
+        conversation = self.db.get_conversation(self.tenant_id, conversation_id)
+        if not conversation:
+            self.send_html(layout("Inquiry not found", "<div class='error'>This inquiry does not exist or is not available.</div>", lang="en"), 404)
+            return
+        lang = query.get("lang", [conversation["locale"] or "en"])[0]
+        messages = self.db.list_messages(self.tenant_id, conversation_id)
+        revisions = self.db.get_revisions(self.tenant_id, conversation_id)
+        latest = revisions[-1] if revisions else None
+        values = json.loads(latest["values_json"]) if latest else {}
+        missing = json.loads(latest["missing_json"]) if latest else list(MATCH_REQUIRED_FIELDS)
+        recommendations = [row for row in self.db.get_recommendations(self.tenant_id, conversation_id) if row["status"] != "invalidated"]
+        current_recommendation = recommendations[0] if recommendations else None
+        notice = query.get("notice", [""])[0]
+        notice_html = "<div class='notice'>需求已保存，推荐结果会基于当前已确认摘要重新计算。</div>" if notice == "recommendation" else ""
+
+        message_rows = "".join(
+            f"<div class='source'><span><b>{'You' if message['role'] == 'buyer' else 'Assistant'}</b><br>{esc(message['content'])}</span><span class='field-state'>{esc(message['created_at'])}</span></div>"
+            for message in messages
+        ) or "<p class='muted'>Describe your pump application to start.</p>"
+        summary_rows = "".join(
+            f"<tr><td>{esc(item.get('label', REQUIREMENT_LABELS.get(key, key)))}</td><td>{esc(item.get('value', '')) or '—'} {esc(item.get('unit', ''))}</td><td><span class='badge'>{'Confirmed' if item.get('state') == 'confirmed' else 'Needs confirmation' if item.get('state') == 'candidate' else 'Unknown'}</span><br><span class='field-state'>{esc(item.get('source', ''))}</span></td></tr>"
+            for key, item in values.items()
+        ) or "<tr><td colspan='3' class='muted'>No structured requirements yet.</td></tr>"
+        missing_html = "" if not missing else "<div class='error'>Before matching, please confirm: " + ", ".join(esc(REQUIREMENT_LABELS.get(key, key)) for key in missing) + "</div>"
+        input_fields = "".join(
+            f"<div><label>{esc(REQUIREMENT_LABELS[key])}{' *' if key in MATCH_REQUIRED_FIELDS else ''}</label><input name='{key}' value='{esc(values.get(key, {}).get('value', ''))}' placeholder='{esc({'flow': 'e.g. 50', 'head': 'e.g. 30', 'media': 'e.g. clean water', 'temperature': 'e.g. 60', 'quantity': 'e.g. 2', 'region': 'e.g. Germany', 'delivery': 'e.g. 8 weeks', 'category': 'water pump', 'use_case': 'cooling water'} .get(key, ''))}'></div>"
+            for key in ("flow", "head", "media", "temperature", "quantity", "region", "delivery")
+        )
+
+        recommendation_html = "<p class='muted'>Send a message and confirm the structured summary to see a recommendation.</p>"
+        if current_recommendation:
+            result_status = current_recommendation["status"]
+            result_label = {"recommended": "可初步推荐 / Initial recommendation", "insufficient": "条件不足 / More information needed", "no_match": "无可靠候选 / No reliable candidate"}.get(result_status, result_status)
+            results = json.loads(current_recommendation["results_json"])
+            cards = []
+            for result in results:
+                card_class = "notice" if result["status"] == "candidate" else "error"
+                cards.append(
+                    f"<div class='card' style='margin-top:12px'><h3>{esc(result['model'])} <span class='badge'>{'Candidate' if result['status'] == 'candidate' else 'Conflict'}</span></h3>"
+                    f"<p><b>满足项 / Meets:</b> {esc('；'.join(result['satisfies']) or '—')}</p>"
+                    f"<p><b>冲突项 / Conflicts:</b> {esc('；'.join(result['conflicts']) or '—')}</p>"
+                    f"<p><b>未确认 / Unknown:</b> {esc('；'.join(result['unknown']) or '—')}</p>"
+                    f"<a class='button secondary' href='{esc(result['detail_url'])}' target='_blank'>查看产品页 / Product page</a></div>"
+                )
+            if result_status == "insufficient":
+                cards.append(f"<div class='error'>缺少影响匹配的条件：{esc(', '.join(REQUIREMENT_LABELS.get(key, key) for key in missing))}。系统不会把未知当成满足。</div>")
+            if result_status == "no_match":
+                cards.append("<div class='error'>当前已发布产品没有满足全部硬条件的可靠候选，请转人工确认；系统没有把冲突产品标为适用。</div>")
+            recommendation_html = f"<div class='notice'><b>匹配结果：</b>{esc(result_label)} · 规则版本 {esc(current_recommendation['rule_version'])}（演示规则，不能替代正式工程选型）</div>" + "".join(cards)
+
+        body = f"""
+<div class='toolbar'><div><h1>Buyer inquiry</h1><div class='muted'>Conversation {esc(conversation_id)} · 原始消息和每次需求修订都会保留</div></div><div><a class='button secondary' href='/inquiry?lang={'zh' if lang == 'en' else 'en'}'>New inquiry / 新询盘</a></div></div>
+{notice_html}
+<div class='grid'><section class='card'><h2>Describe your application</h2><p class='muted'>Tell us the pump use, flow, head and medium in your own words. Structured values are candidates until you confirm them.</p><form method='post' action='/inquiry/{conversation_id}/message'><label>Your message / 需求原话 *</label><textarea name='message' required placeholder='Example: I need a water pump for cooling water, flow 50 m³/h and head 30 m.'></textarea><p><button>Save message and extract fields</button></p></form><hr><h3>Conversation</h3>{message_rows}</section>
+<section class='card'><h2>Requirement summary</h2>{missing_html}<form method='post' action='/inquiry/{conversation_id}/confirm'><div class='form-grid'>{input_fields}</div><p><button>Confirm summary and match</button></p></form><table><thead><tr><th>Field</th><th>Value</th><th>State</th></tr></thead><tbody>{summary_rows}</tbody></table></section></div>
+<section class='card' style='margin-top:18px'><h2>Recommendations</h2>{recommendation_html}</section>
+<div class='footer-note'>产品页面、推荐和后续 chatbot 都只读取已核准并已发布的产品版本。当前规则是透明的水泵演示规则，正式阈值需由企业工程师确认。</div>
+"""
+        self.send_html(layout("Buyer inquiry", body, lang=lang), 200)
 
     def public_product(self, slug: str, query: dict[str, list[str]]) -> None:
         product = self.db.get_product_by_slug(self.tenant_id, slug)
