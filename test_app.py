@@ -171,5 +171,60 @@ class GroundedAnswerTests(unittest.TestCase):
         self.assertNotEqual(field["value"], "工程师需要根据当前项目条件确认价格和交期。")
 
 
+class RfqTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.temp_dir.name) / "app.db")
+        self.db.seed_demo_products("demo-tenant")
+        for product in self.db.list_products("demo-tenant"):
+            self.db.approve_product("demo-tenant", product["id"])
+            self.db.publish_product("demo-tenant", product["id"])
+        self.product = self.db.conn.execute("SELECT * FROM products WHERE tenant_id=? AND model=?", ("demo-tenant", "CB-80A")).fetchone()
+
+    def tearDown(self):
+        self.db.conn.close()
+        self.temp_dir.cleanup()
+
+    def _conversation_with_recommendation(self):
+        conversation_id = self.db.create_conversation("demo-tenant")
+        values = confirm_requirement_values(extract_requirement_values("flow 50, head 30, clean water", {}, None))
+        revision_id = self.db.create_requirement_revision("demo-tenant", conversation_id, values, "confirmed")
+        status, results, _ = match_products(self.db, "demo-tenant", values)
+        recommendation_id = self.db.save_recommendation("demo-tenant", conversation_id, revision_id, status, results)
+        return conversation_id, revision_id, recommendation_id
+
+    def test_rfq_saves_confirmed_snapshot_and_duplicate_submission_is_idempotent(self):
+        conversation_id, _revision_id, _recommendation_id = self._conversation_with_recommendation()
+        contact = {
+            "contact_name": "Buyer",
+            "company": "Example GmbH",
+            "contact_email": "buyer@example.com",
+            "contact_phone": "+49 1",
+            "quantity": "2",
+            "region": "Germany",
+            "delivery": "8 weeks",
+        }
+        rfq_id, created = self.db.create_rfq("demo-tenant", conversation_id, "same-token", contact, "Cooling water project", self.product["id"])
+        duplicate_id, duplicate_created = self.db.create_rfq("demo-tenant", conversation_id, "same-token", contact, "Cooling water project", self.product["id"])
+        self.assertTrue(created)
+        self.assertFalse(duplicate_created)
+        self.assertEqual(rfq_id, duplicate_id)
+        self.assertEqual(len(self.db.list_rfqs("demo-tenant")), 1)
+        rfq = self.db.get_rfq("demo-tenant", rfq_id)
+        self.assertEqual(rfq["status"], "submitted")
+        snapshot = json.loads(rfq["snapshot_json"])
+        self.assertEqual(snapshot["recommendation"]["model"], "CB-80A")
+        self.assertEqual(snapshot["requirements"]["flow"]["value"], "50")
+
+    def test_incomplete_rfq_is_saved_as_needs_info(self):
+        conversation_id, _revision_id, _recommendation_id = self._conversation_with_recommendation()
+        rfq_id, created = self.db.create_rfq("demo-tenant", conversation_id, "partial-token", {"contact_email": "buyer@example.com"}, "Need help", self.product["id"])
+        rfq = self.db.get_rfq("demo-tenant", rfq_id)
+        self.assertTrue(created)
+        self.assertEqual(rfq["status"], "needs_info")
+        self.assertIn("数量", json.loads(rfq["missing_json"]))
+        self.assertIn("目的地", json.loads(rfq["missing_json"]))
+
+
 if __name__ == "__main__":
     unittest.main()

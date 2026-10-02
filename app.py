@@ -228,6 +228,42 @@ class Database:
                 updated_at TEXT NOT NULL,
                 resolved_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS rfqs (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                requirement_revision_id TEXT REFERENCES requirement_revisions(id),
+                recommendation_id TEXT REFERENCES recommendations(id),
+                product_id TEXT REFERENCES products(id),
+                product_version_id TEXT REFERENCES product_versions(id),
+                submission_key TEXT NOT NULL,
+                contact_name TEXT NOT NULL DEFAULT '',
+                company TEXT NOT NULL DEFAULT '',
+                contact_email TEXT NOT NULL DEFAULT '',
+                contact_phone TEXT NOT NULL DEFAULT '',
+                quantity TEXT NOT NULL DEFAULT '',
+                destination TEXT NOT NULL DEFAULT '',
+                requested_delivery TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                missing_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'needs_info',
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (tenant_id, submission_key)
+            );
+            CREATE TABLE IF NOT EXISTS leads (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                rfq_id TEXT NOT NULL REFERENCES rfqs(id),
+                conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                stage TEXT NOT NULL DEFAULT 'new',
+                owner TEXT,
+                next_follow_up TEXT,
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (tenant_id, rfq_id)
+            );
             """
         )
         self.conn.execute(
@@ -479,6 +515,86 @@ class Database:
         self.save_message(tenant_id, task["conversation_id"], "assistant", f"工程师回复：{response}", "human-engineer")
         self._audit(tenant_id, "human_task", task_id, "resolved", actor)
         self.conn.commit()
+
+    def latest_confirmed_revision(self, tenant_id: str, conversation_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM requirement_revisions WHERE tenant_id=? AND conversation_id=? AND status='confirmed' ORDER BY revision DESC LIMIT 1",
+            (tenant_id, conversation_id),
+        ).fetchone()
+
+    def get_rfq_by_submission_key(self, tenant_id: str, submission_key: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM rfqs WHERE tenant_id=? AND submission_key=?", (tenant_id, submission_key)
+        ).fetchone()
+
+    def get_rfq(self, tenant_id: str, rfq_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT r.*, p.model FROM rfqs r LEFT JOIN products p ON p.id=r.product_id WHERE r.tenant_id=? AND r.id=?",
+            (tenant_id, rfq_id),
+        ).fetchone()
+
+    def list_rfqs(self, tenant_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT r.*, p.model FROM rfqs r LEFT JOIN products p ON p.id=r.product_id WHERE r.tenant_id=? ORDER BY r.created_at DESC",
+            (tenant_id,),
+        ).fetchall()
+
+    def create_rfq(
+        self,
+        tenant_id: str,
+        conversation_id: str,
+        submission_key: str,
+        contact: dict[str, str],
+        notes: str,
+        selected_product_id: str | None = None,
+    ) -> tuple[str, bool]:
+        existing = self.get_rfq_by_submission_key(tenant_id, submission_key)
+        if existing:
+            return existing["id"], False
+        conversation = self.get_conversation(tenant_id, conversation_id)
+        if not conversation:
+            raise ValueError("会话不存在")
+        revision = self.latest_confirmed_revision(tenant_id, conversation_id)
+        recommendation = self.latest_active_recommendation(tenant_id, conversation_id)
+        if not revision:
+            raise ValueError("请先确认需求摘要，再提交询价")
+        revision_values = json.loads(revision["values_json"])
+        recommendation_results = json.loads(recommendation["results_json"]) if recommendation else []
+        selected_result = None
+        if selected_product_id:
+            selected_result = next((result for result in recommendation_results if result.get("product_id") == selected_product_id), None)
+        if not selected_result:
+            selected_result = next((result for result in recommendation_results if result.get("status") == "candidate"), None)
+        product_id = selected_result.get("product_id") if selected_result else None
+        product_version_id = selected_result.get("product_version_id") if selected_result else None
+        missing = []
+        for key, label in (("quantity", "数量"), ("region", "目的地"), ("delivery", "期望交期"), ("contact_email", "联系人邮箱")):
+            value = contact.get(key, "")
+            if not value.strip():
+                missing.append(label)
+        status = "submitted" if not missing else "needs_info"
+        snapshot = {
+            "requirement_revision_id": revision["id"],
+            "requirements": revision_values,
+            "recommendation_id": recommendation["id"] if recommendation else None,
+            "recommendation": selected_result,
+            "submitted_contact": {"name": contact.get("contact_name", ""), "company": contact.get("company", ""), "email": contact.get("contact_email", ""), "phone": contact.get("contact_phone", "")},
+            "submitted_at": now_iso(),
+        }
+        rfq_id = secrets.token_hex(12)
+        timestamp = now_iso()
+        self.conn.execute(
+            "INSERT INTO rfqs(id, tenant_id, conversation_id, requirement_revision_id, recommendation_id, product_id, product_version_id, submission_key, contact_name, company, contact_email, contact_phone, quantity, destination, requested_delivery, notes, missing_json, status, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (rfq_id, tenant_id, conversation_id, revision["id"], recommendation["id"] if recommendation else None, product_id, product_version_id, submission_key, contact.get("contact_name", "").strip(), contact.get("company", "").strip(), contact.get("contact_email", "").strip(), contact.get("contact_phone", "").strip(), contact.get("quantity", "").strip(), contact.get("region", "").strip(), contact.get("delivery", "").strip(), notes.strip(), json.dumps(missing, ensure_ascii=False), status, json.dumps(snapshot, ensure_ascii=False), timestamp),
+        )
+        lead_id = secrets.token_hex(12)
+        self.conn.execute(
+            "INSERT INTO leads(id, tenant_id, rfq_id, conversation_id, stage, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (lead_id, tenant_id, rfq_id, conversation_id, "new" if status == "submitted" else "needs_info", timestamp, timestamp),
+        )
+        self._audit(tenant_id, "rfq", rfq_id, "submitted", "buyer-web", f"status={status};lead={lead_id}")
+        self.conn.commit()
+        return rfq_id, True
 
     def create_product(self, tenant_id: str, model: str, name: str, use_case: str, actor: str = "demo-admin") -> str:
         self.ensure_tenant(tenant_id)
@@ -868,7 +984,7 @@ def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh"
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}}
 a{{color:var(--blue);text-decoration:none}}a:hover{{text-decoration:underline}}header{{background:#102a43;color:white;padding:18px 28px;display:flex;justify-content:space-between;align-items:center;gap:16px}}header strong{{font-size:18px}}header nav{{display:flex;gap:16px;align-items:center}}header a{{color:#d9e2ec}}main{{max-width:1180px;margin:30px auto;padding:0 20px}}h1{{font-size:32px;letter-spacing:-.02em;margin:0 0 6px}}h2{{font-size:21px;margin:0 0 14px}}h3{{font-size:16px;margin:20px 0 8px}}.muted{{color:var(--muted)}}.notice{{padding:12px 14px;border-radius:10px;background:#e7f5f2;color:#086f63;margin:0 0 20px}}.error{{padding:12px 14px;border-radius:10px;background:#fff0ee;color:var(--danger);margin:0 0 20px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}}.card{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:0 5px 18px rgba(16,42,67,.05)}}.toolbar{{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:22px}}button,.button{{border:0;border-radius:9px;padding:9px 14px;background:var(--blue);color:#fff;font-weight:650;cursor:pointer;display:inline-block}}button.secondary,.button.secondary{{background:#e7eef7;color:var(--ink)}}button.warn,.button.warn{{background:#fff3d6;color:var(--warn)}}button.danger,.button.danger{{background:#fff0ee;color:var(--danger)}}form.inline{{display:inline}}label{{display:block;font-weight:650;margin:10px 0 4px}}input,select,textarea{{width:100%;padding:9px 10px;border:1px solid #bcccdc;border-radius:8px;font:inherit;background:#fff}}textarea{{min-height:76px;resize:vertical}}.form-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px}}.full{{grid-column:1/-1}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line);vertical-align:top}}th{{font-size:13px;color:var(--muted)}}.badge{{display:inline-flex;align-items:center;border-radius:999px;padding:2px 9px;font-size:12px;font-weight:700;background:#e7eef7;color:var(--ink)}}.badge.published,.badge.approved{{background:#e7f5f2;color:#086f63}}.badge.pending_review{{background:#fff3d6;color:#925c00}}.badge.withdrawn{{background:#fff0ee;color:var(--danger)}}.field-state{{font-size:12px;color:var(--muted)}}.source{{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}}.product-hero{{background:linear-gradient(135deg,#102a43,#0e9384);color:white;border-radius:20px;padding:32px;margin-bottom:20px}}.product-hero .eyebrow{{text-transform:uppercase;letter-spacing:.12em;font-size:12px;opacity:.8}}.product-hero h1{{font-size:38px;margin:4px 0 8px}}.kv{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:20px}}.kv div{{background:rgba(255,255,255,.12);padding:12px;border-radius:10px}}.kv b{{display:block;font-size:12px;opacity:.8}}.kv span{{font-size:18px;font-weight:700}}.footer-note{{margin-top:28px;padding:13px;border-left:3px solid #f0b429;background:#fffaf0;color:#7c5b10}}@media(max-width:700px){{header{{padding:15px 18px;align-items:flex-start;flex-direction:column}}main{{margin:20px auto;padding:0 14px}}.form-grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}h1{{font-size:27px}}.product-hero h1{{font-size:31px}}table{{font-size:13px}}th:nth-child(3),td:nth-child(3){{display:none}}}}
 </style></head><body>
-<header><strong>CB Water Pump SaaS</strong><nav><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>
+<header><strong>CB Water Pump SaaS</strong><nav><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>
 <main>{body}</main></body></html>"""
 
 
@@ -940,6 +1056,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/tasks":
             self.admin_tasks(query)
             return
+        if path == "/admin/rfqs":
+            self.admin_rfqs(query)
+            return
         if path == "/inquiry":
             conversation_id = self.db.create_conversation(self.tenant_id, "web", query.get("lang", ["en"])[0])
             self.redirect(f"/inquiry/{conversation_id}?lang={query.get('lang', ['en'])[0]}")
@@ -955,6 +1074,10 @@ class Handler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/admin/tasks/([a-f0-9]+)/?", path)
         if match:
             self.admin_task(match.group(1), query)
+            return
+        match = re.fullmatch(r"/admin/rfqs/([a-f0-9]+)/?", path)
+        if match:
+            self.admin_rfq(match.group(1), query)
             return
         match = re.fullmatch(r"/products/([a-zA-Z0-9-]+)/?", path)
         if match:
@@ -1059,6 +1182,16 @@ class Handler(BaseHTTPRequestHandler):
                     }
                     self.db.create_human_task(self.tenant_id, conversation_id, question_message_id, question, reason, context, answered_product_id, product_version_id, latest_revision["id"] if latest_revision else None, recommendation["id"] if recommendation else None)
                 self.redirect(f"/inquiry/{conversation_id}?notice=answer")
+                return
+            match = re.fullmatch(r"/inquiry/([a-f0-9]+)/rfq", path)
+            if match:
+                conversation_id = match.group(1)
+                submission_key = str(form.get("submission_key", "")).strip()
+                if not submission_key:
+                    raise ValueError("询价提交标识缺失，请刷新页面后重试")
+                contact = {key: str(form.get(key, "")) for key in ("contact_name", "company", "contact_email", "contact_phone", "quantity", "region", "delivery")}
+                rfq_id, created = self.db.create_rfq(self.tenant_id, conversation_id, submission_key, contact, str(form.get("notes", "")), str(form.get("product_id", "")) or None)
+                self.redirect(f"/inquiry/{conversation_id}?notice=rfq&rfq_id={rfq_id}&created={'1' if created else '0'}")
                 return
             match = re.fullmatch(r"/admin/tasks/([a-f0-9]+)/reply", path)
             if match:
@@ -1166,10 +1299,18 @@ class Handler(BaseHTTPRequestHandler):
         answers = self.db.list_answers(self.tenant_id, conversation_id)
         tasks = [task for task in self.db.list_human_tasks(self.tenant_id) if task["conversation_id"] == conversation_id]
         notice = query.get("notice", [""])[0]
+        rfq_id = query.get("rfq_id", [""])[0]
+        current_rfq = self.db.get_rfq(self.tenant_id, rfq_id) if rfq_id else None
         notice_html = {
             "recommendation": "<div class='notice'>需求已保存，推荐结果会基于当前已确认摘要重新计算。</div>",
             "answer": "<div class='notice'>问题已保存。若资料不足，后台已生成待处理人工任务。</div>",
         }.get(notice, "")
+        if notice == "rfq" and current_rfq:
+            missing_labels = json.loads(current_rfq["missing_json"])
+            if current_rfq["status"] == "submitted":
+                notice_html = f"<div class='notice'><b>询价已提交：</b>{esc(current_rfq['id'])}。销售会根据已保存的需求和产品版本继续处理。</div>"
+            else:
+                notice_html = f"<div class='error'><b>询价已保存，但仍待补充：</b>{esc('、'.join(missing_labels))}。记录编号：{esc(current_rfq['id'])}。</div>"
 
         message_rows = "".join(
             f"<div class='source'><span><b>{'You' if message['role'] == 'buyer' else 'Assistant'}</b><br>{esc(message['content'])}</span><span class='field-state'>{esc(message['created_at'])}</span></div>"
@@ -1219,6 +1360,8 @@ class Handler(BaseHTTPRequestHandler):
             for result in json.loads(current_recommendation["results_json"]):
                 if result.get("status") == "candidate":
                     candidate_options += f"<option value='{esc(result['product_id'])}'>{esc(result['model'])} · v{esc(result['product_version'])}</option>"
+        prefill = {key: values.get(key, {}).get("value", "") for key in ("quantity", "region", "delivery")}
+        submission_key = secrets.token_urlsafe(18)
 
         body = f"""
 <div class='toolbar'><div><h1>Buyer inquiry</h1><div class='muted'>Conversation {esc(conversation_id)} · 原始消息和每次需求修订都会保留</div></div><div><a class='button secondary' href='/inquiry?lang={'zh' if lang == 'en' else 'en'}'>New inquiry / 新询盘</a></div></div>
@@ -1227,6 +1370,7 @@ class Handler(BaseHTTPRequestHandler):
 <section class='card'><h2>Requirement summary</h2>{missing_html}<form method='post' action='/inquiry/{conversation_id}/confirm'><div class='form-grid'>{input_fields}</div><p><button>Confirm summary and match</button></p></form><table><thead><tr><th>Field</th><th>Value</th><th>State</th></tr></thead><tbody>{summary_rows}</tbody></table></section></div>
 <section class='card' style='margin-top:18px'><h2>Recommendations</h2>{recommendation_html}</section>
 <section class='card' style='margin-top:18px'><h2>Ask about the recommended product</h2><p class='muted'>资料内问题会显示引用；价格、交期、认证或资料外问题不会被猜测，会生成后台人工任务。</p><form method='post' action='/inquiry/{conversation_id}/ask'><label>Product context</label><select name='product_id'>{candidate_options}</select><label>Your question / 技术问题 *</label><textarea name='question' required placeholder='Example: What is the flow range? Or ask about price, stock, certification to test handoff.'></textarea><p><button>Ask and save answer</button></p></form><h3>Answers and handoff</h3>{answer_html}{task_html}</section>
+<section class='card' style='margin-top:18px'><h2>Request for quotation (RFQ)</h2><p class='muted'>已确认工况和推荐产品会保存为本次询价快照；联系方式只供企业后台使用。缺少数量、目的地、期望交期或邮箱时，记录会标记为“待补充”，不会标记为可报价。</p><form method='post' action='/inquiry/{conversation_id}/rfq'><input type='hidden' name='submission_key' value='{esc(submission_key)}'><div class='form-grid'><div><label>Product / 产品</label><select name='product_id'>{candidate_options}</select></div><div><label>Contact name / 联系人</label><input name='contact_name' placeholder='Your name'></div><div><label>Company / 公司</label><input name='company' placeholder='Company name'></div><div><label>Email / 邮箱</label><input name='contact_email' type='email' placeholder='you@example.com'></div><div><label>Phone / 电话</label><input name='contact_phone' placeholder='+49 ...'></div><div><label>Quantity / 数量</label><input name='quantity' value='{esc(prefill['quantity'])}' placeholder='e.g. 2'></div><div><label>Destination / 目的地</label><input name='region' value='{esc(prefill['region'])}' placeholder='e.g. Germany'></div><div><label>Expected delivery / 期望交期</label><input name='delivery' value='{esc(prefill['delivery'])}' placeholder='e.g. 8 weeks'></div><div class='full'><label>Notes / 补充说明</label><textarea name='notes' placeholder='Additional operating conditions or questions'></textarea></div></div><p><button>Save RFQ / 提交询价</button></p></form></section>
 <div class='footer-note'>产品页面、推荐和后续 chatbot 都只读取已核准并已发布的产品版本。当前规则是透明的水泵演示规则，正式阈值需由企业工程师确认。</div>
 """
         self.send_html(layout("Buyer inquiry", body, lang=lang), 200)
@@ -1260,6 +1404,37 @@ class Handler(BaseHTTPRequestHandler):
 <section class='card' style='margin-top:18px'><h2>工程师处理</h2>{response_area}<p class='muted'>该回复只属于当前会话；如果要成为通用资料，必须回到产品资料核准流程。</p></section>
 """
         self.send_html(layout("人工接管任务", body), 200)
+
+    def admin_rfqs(self, query: dict[str, list[str]]) -> None:
+        rfqs = self.db.list_rfqs(self.tenant_id)
+        rows = "".join(
+            f"<tr><td><a href='/admin/rfqs/{rfq['id']}'>{esc(rfq['id'])}</a></td><td>{esc(rfq['model'] or '未指定型号')}</td><td>{esc(rfq['contact_email'] or '未提供')}</td><td><span class='badge'>{esc(rfq['status'])}</span></td><td>{esc(rfq['created_at'])}</td></tr>"
+            for rfq in rfqs
+        ) or "<tr><td colspan='5' class='muted'>暂无 RFQ。买方提交询价后会出现在这里。</td></tr>"
+        body = f"""
+<div class='toolbar'><div><h1>RFQ 询价记录</h1><div class='muted'>当前仅展示所属企业记录；完整负责人、阶段和跟进操作将在销售工作台切片中加入。</div></div></div>
+<section class='card'><table><thead><tr><th>记录编号</th><th>型号</th><th>联系人</th><th>状态</th><th>提交时间</th></tr></thead><tbody>{rows}</tbody></table></section>
+"""
+        self.send_html(layout("RFQ 询价记录", body), 200)
+
+    def admin_rfq(self, rfq_id: str, query: dict[str, list[str]]) -> None:
+        rfq = self.db.get_rfq(self.tenant_id, rfq_id)
+        if not rfq:
+            self.send_html(layout("RFQ 不存在", "<div class='error'>RFQ 不存在或不属于当前企业。</div>"), 404)
+            return
+        snapshot = json.loads(rfq["snapshot_json"])
+        requirements = snapshot.get("requirements", {})
+        requirement_rows = "".join(f"<tr><td>{esc(item.get('label', key))}</td><td>{esc(item.get('value', ''))} {esc(item.get('unit', ''))}</td><td>{esc(item.get('state', ''))}</td></tr>" for key, item in requirements.items()) or "<tr><td colspan='3' class='muted'>暂无需求快照</td></tr>"
+        missing = json.loads(rfq["missing_json"])
+        missing_html = f"<div class='error'>待补充：{esc('、'.join(missing))}</div>" if missing else "<div class='notice'>提交字段完整，仍不等于系统自动承诺可报价。</div>"
+        body = f"""
+<div class='toolbar'><div><a href='/admin/rfqs'>← 返回 RFQ 列表</a><h1>RFQ {esc(rfq['id'])}</h1><div class='muted'>状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])}</div></div></div>
+{missing_html}
+<div class='grid'><section class='card'><h2>联系人（后台可见）</h2><p><b>姓名：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p></section><section class='card'><h2>询价信息</h2><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'}</p><p><b>目的地：</b>{esc(rfq['destination']) or '待补充'}</p><p><b>期望交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>补充说明：</b>{esc(rfq['notes']) or '无'}</p></section></div>
+<section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>
+<div class='footer-note'>该 RFQ 保存了提交时的需求、推荐和产品版本快照；后续产品更新不会静默改写这条历史询价。</div>
+"""
+        self.send_html(layout("RFQ 详情", body), 200)
 
     def public_product(self, slug: str, query: dict[str, list[str]]) -> None:
         product = self.db.get_product_by_slug(self.tenant_id, slug)
