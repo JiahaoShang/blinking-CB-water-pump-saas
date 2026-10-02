@@ -260,6 +260,14 @@ class SalesWorkspaceTests(unittest.TestCase):
         self.assertEqual(len(self.db.list_sales_records("other-tenant")), 0)
         self.assertEqual(len(self.db.list_sales_records("demo-tenant")), 1)
 
+    def test_admin_summary_counts_current_tenant_and_overdue_leads(self):
+        self.db.update_lead("demo-tenant", self.rfq_id, "technical_review", "Alex", "2020-01-01", "Follow up", "demo-sales")
+        summary = self.db.get_admin_summary("demo-tenant")
+        self.assertEqual(summary["rfqs_total"], 1)
+        self.assertEqual(summary["leads_active"], 1)
+        self.assertEqual(summary["leads_overdue"], 1)
+        self.assertEqual(self.db.get_admin_summary("other-tenant")["rfqs_total"], 0)
+
 
 class AuthTests(unittest.TestCase):
     def setUp(self):

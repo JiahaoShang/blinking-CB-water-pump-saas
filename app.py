@@ -687,6 +687,50 @@ class Database:
             (tenant_id,),
         ).fetchall()
 
+    def get_admin_summary(self, tenant_id: str) -> dict[str, int]:
+        """Return small, tenant-scoped counters for the management overview."""
+        product_counts = self.conn.execute(
+            "SELECT "
+            "COUNT(*) AS total, "
+            "SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) AS published, "
+            "SUM(CASE WHEN status IN ('pending_review', 'draft') THEN 1 ELSE 0 END) AS needs_review "
+            "FROM products WHERE tenant_id=?",
+            (tenant_id,),
+        ).fetchone()
+        task_counts = self.conn.execute(
+            "SELECT "
+            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending, "
+            "COUNT(*) AS total "
+            "FROM human_tasks WHERE tenant_id=?",
+            (tenant_id,),
+        ).fetchone()
+        rfq_counts = self.conn.execute(
+            "SELECT "
+            "COUNT(*) AS total, "
+            "SUM(CASE WHEN status='needs_info' THEN 1 ELSE 0 END) AS needs_info "
+            "FROM rfqs WHERE tenant_id=?",
+            (tenant_id,),
+        ).fetchone()
+        today = datetime.now(timezone.utc).date().isoformat()
+        lead_counts = self.conn.execute(
+            "SELECT "
+            "SUM(CASE WHEN stage NOT IN ('closed', 'paused') THEN 1 ELSE 0 END) AS active, "
+            "SUM(CASE WHEN next_follow_up < ? AND stage NOT IN ('closed', 'paused') THEN 1 ELSE 0 END) AS overdue "
+            "FROM leads WHERE tenant_id=?",
+            (today, tenant_id),
+        ).fetchone()
+        return {
+            "products_total": int(product_counts["total"] or 0),
+            "products_published": int(product_counts["published"] or 0),
+            "products_needs_review": int(product_counts["needs_review"] or 0),
+            "tasks_pending": int(task_counts["pending"] or 0),
+            "tasks_total": int(task_counts["total"] or 0),
+            "rfqs_total": int(rfq_counts["total"] or 0),
+            "rfqs_needs_info": int(rfq_counts["needs_info"] or 0),
+            "leads_active": int(lead_counts["active"] or 0),
+            "leads_overdue": int(lead_counts["overdue"] or 0),
+        }
+
     def update_lead(
         self,
         tenant_id: str,
@@ -1106,9 +1150,9 @@ def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh"
 <style>
 :root{{--ink:#102a43;--muted:#627d98;--line:#d9e2ec;--blue:#1677ff;--teal:#0e9384;--bg:#f5f8fb;--card:#fff;--warn:#b45309;--danger:#b42318;}}
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}}
-a{{color:var(--blue);text-decoration:none}}a:hover{{text-decoration:underline}}header{{background:#102a43;color:white;padding:18px 28px;display:flex;justify-content:space-between;align-items:center;gap:16px}}header strong{{font-size:18px}}header nav{{display:flex;gap:16px;align-items:center}}header a{{color:#d9e2ec}}main{{max-width:1180px;margin:30px auto;padding:0 20px}}h1{{font-size:32px;letter-spacing:-.02em;margin:0 0 6px}}h2{{font-size:21px;margin:0 0 14px}}h3{{font-size:16px;margin:20px 0 8px}}.muted{{color:var(--muted)}}.notice{{padding:12px 14px;border-radius:10px;background:#e7f5f2;color:#086f63;margin:0 0 20px}}.error{{padding:12px 14px;border-radius:10px;background:#fff0ee;color:var(--danger);margin:0 0 20px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}}.card{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:0 5px 18px rgba(16,42,67,.05)}}.toolbar{{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:22px}}button,.button{{border:0;border-radius:9px;padding:9px 14px;background:var(--blue);color:#fff;font-weight:650;cursor:pointer;display:inline-block}}button.secondary,.button.secondary{{background:#e7eef7;color:var(--ink)}}button.warn,.button.warn{{background:#fff3d6;color:var(--warn)}}button.danger,.button.danger{{background:#fff0ee;color:var(--danger)}}form.inline{{display:inline}}label{{display:block;font-weight:650;margin:10px 0 4px}}input,select,textarea{{width:100%;padding:9px 10px;border:1px solid #bcccdc;border-radius:8px;font:inherit;background:#fff}}textarea{{min-height:76px;resize:vertical}}.form-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px}}.full{{grid-column:1/-1}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line);vertical-align:top}}th{{font-size:13px;color:var(--muted)}}.badge{{display:inline-flex;align-items:center;border-radius:999px;padding:2px 9px;font-size:12px;font-weight:700;background:#e7eef7;color:var(--ink)}}.badge.published,.badge.approved{{background:#e7f5f2;color:#086f63}}.badge.pending_review{{background:#fff3d6;color:#925c00}}.badge.withdrawn{{background:#fff0ee;color:var(--danger)}}.field-state{{font-size:12px;color:var(--muted)}}.source{{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}}.product-hero{{background:linear-gradient(135deg,#102a43,#0e9384);color:white;border-radius:20px;padding:32px;margin-bottom:20px}}.product-hero .eyebrow{{text-transform:uppercase;letter-spacing:.12em;font-size:12px;opacity:.8}}.product-hero h1{{font-size:38px;margin:4px 0 8px}}.kv{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:20px}}.kv div{{background:rgba(255,255,255,.12);padding:12px;border-radius:10px}}.kv b{{display:block;font-size:12px;opacity:.8}}.kv span{{font-size:18px;font-weight:700}}.footer-note{{margin-top:28px;padding:13px;border-left:3px solid #f0b429;background:#fffaf0;color:#7c5b10}}@media(max-width:700px){{header{{padding:15px 18px;align-items:flex-start;flex-direction:column}}main{{margin:20px auto;padding:0 14px}}.form-grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}h1{{font-size:27px}}.product-hero h1{{font-size:31px}}table{{font-size:13px}}th:nth-child(3),td:nth-child(3){{display:none}}}}
+a{{color:var(--blue);text-decoration:none}}a:hover{{text-decoration:underline}}header{{background:#102a43;color:white;padding:18px 28px;display:flex;justify-content:space-between;align-items:center;gap:16px}}header strong{{font-size:18px}}header nav{{display:flex;gap:16px;align-items:center}}header a{{color:#d9e2ec}}main{{max-width:1180px;margin:30px auto;padding:0 20px}}h1{{font-size:32px;letter-spacing:-.02em;margin:0 0 6px}}h2{{font-size:21px;margin:0 0 14px}}h3{{font-size:16px;margin:20px 0 8px}}.muted{{color:var(--muted)}}.notice{{padding:12px 14px;border-radius:10px;background:#e7f5f2;color:#086f63;margin:0 0 20px}}.error{{padding:12px 14px;border-radius:10px;background:#fff0ee;color:var(--danger);margin:0 0 20px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}}.metric-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:18px}}.metric{{font-size:34px;font-weight:750;line-height:1.2;margin:5px 0}}.action-card{{display:block;color:var(--ink)}}.action-card:hover{{text-decoration:none;border-color:var(--blue);transform:translateY(-1px)}}.card{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:0 5px 18px rgba(16,42,67,.05)}}.toolbar{{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:22px}}button,.button{{border:0;border-radius:9px;padding:9px 14px;background:var(--blue);color:#fff;font-weight:650;cursor:pointer;display:inline-block}}button.secondary,.button.secondary{{background:#e7eef7;color:var(--ink)}}button.warn,.button.warn{{background:#fff3d6;color:var(--warn)}}button.danger,.button.danger{{background:#fff0ee;color:var(--danger)}}form.inline{{display:inline}}label{{display:block;font-weight:650;margin:10px 0 4px}}input,select,textarea{{width:100%;padding:9px 10px;border:1px solid #bcccdc;border-radius:8px;font:inherit;background:#fff}}textarea{{min-height:76px;resize:vertical}}.form-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px}}.full{{grid-column:1/-1}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line);vertical-align:top}}th{{font-size:13px;color:var(--muted)}}.badge{{display:inline-flex;align-items:center;border-radius:999px;padding:2px 9px;font-size:12px;font-weight:700;background:#e7eef7;color:var(--ink)}}.badge.published,.badge.approved{{background:#e7f5f2;color:#086f63}}.badge.pending_review{{background:#fff3d6;color:#925c00}}.badge.withdrawn{{background:#fff0ee;color:var(--danger)}}.field-state{{font-size:12px;color:var(--muted)}}.source{{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}}.product-hero{{background:linear-gradient(135deg,#102a43,#0e9384);color:white;border-radius:20px;padding:32px;margin-bottom:20px}}.product-hero .eyebrow{{text-transform:uppercase;letter-spacing:.12em;font-size:12px;opacity:.8}}.product-hero h1{{font-size:38px;margin:4px 0 8px}}.kv{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:20px}}.kv div{{background:rgba(255,255,255,.12);padding:12px;border-radius:10px}}.kv b{{display:block;font-size:12px;opacity:.8}}.kv span{{font-size:18px;font-weight:700}}.footer-note{{margin-top:28px;padding:13px;border-left:3px solid #f0b429;background:#fffaf0;color:#7c5b10}}@media(max-width:700px){{header{{padding:15px 18px;align-items:flex-start;flex-direction:column}}main{{margin:20px auto;padding:0 14px}}.form-grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}h1{{font-size:27px}}.product-hero h1{{font-size:31px}}table{{font-size:13px}}}}
 </style></head><body>
-<header><strong>CB Water Pump SaaS</strong><nav><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/admin/sales'>{'销售工作台' if lang == 'zh' else 'Sales desk'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>
+<header><strong>CB Water Pump SaaS</strong><nav><a href='/admin'>{'管理概览' if lang == 'zh' else 'Overview'}</a><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/admin/sales'>{'销售工作台' if lang == 'zh' else 'Sales desk'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>
 <main>{body}</main></body></html>"""
 
 
@@ -1142,6 +1186,7 @@ class Handler(BaseHTTPRequestHandler):
     db: Database
     tenant_id = "demo-tenant"
     actor = "demo-admin"
+    user_role = "admin"
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -1171,7 +1216,10 @@ class Handler(BaseHTTPRequestHandler):
             return False
         self.tenant_id = user["tenant_id"]
         self.actor = user["email"]
-        if path.startswith("/admin/products"):
+        self.user_role = user["role"]
+        if path == "/admin":
+            allowed = {"admin", "sales", "engineer"}
+        elif path.startswith("/admin/products"):
             allowed = {"admin"}
         elif path.startswith("/admin/tasks"):
             allowed = {"admin", "engineer"}
@@ -1234,9 +1282,12 @@ class Handler(BaseHTTPRequestHandler):
             self.logout()
             return
         if path == "/":
-            self.redirect("/admin/products")
+            self.redirect("/admin")
             return
-        if path.startswith("/admin/") and not self.authorize_admin(path, "GET"):
+        if (path == "/admin" or path.startswith("/admin/")) and not self.authorize_admin(path, "GET"):
+            return
+        if path == "/admin":
+            self.admin_dashboard(query)
             return
         if path == "/admin/products":
             self.admin_products(query)
@@ -1582,6 +1633,48 @@ class Handler(BaseHTTPRequestHandler):
 <div class='footer-note'>产品页面、推荐和后续 chatbot 都只读取已核准并已发布的产品版本。当前规则是透明的水泵演示规则，正式阈值需由企业工程师确认。</div>
 """
         self.send_html(layout("Buyer inquiry", body, lang=lang), 200)
+
+    def admin_dashboard(self, query: dict[str, list[str]]) -> None:
+        summary = self.db.get_admin_summary(self.tenant_id)
+        role_labels = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}
+        role_label = role_labels.get(self.user_role, self.user_role)
+        cards = "".join(
+            f"<div class='card'><div class='muted'>{label}</div><div class='metric'>{value}</div><div class='field-state'>{detail}</div></div>"
+            for label, value, detail in (
+                ("产品总数", summary["products_total"], f"已发布 {summary['products_published']} · 待核准 {summary['products_needs_review']}"),
+                ("待处理人工任务", summary["tasks_pending"], f"累计任务 {summary['tasks_total']}"),
+                ("RFQ 询价", summary["rfqs_total"], f"待补充 {summary['rfqs_needs_info']}"),
+                ("进行中线索", summary["leads_active"], f"逾期跟进 {summary['leads_overdue']}"),
+            )
+        )
+        quick_links = [
+            ("/admin/sales", "打开销售工作台", "查看待跟进线索、负责人和完整上下文"),
+            ("/admin/rfqs", "查看 RFQ", "检查买方提交的询价和待补充字段"),
+        ]
+        if self.user_role in {"admin", "engineer"}:
+            quick_links.append(("/admin/tasks?status=pending", "处理人工任务", "回复资料外问题并保留当前会话上下文"))
+        if self.user_role == "admin":
+            quick_links.append(("/admin/products", "维护产品资料", "核准字段、发布版本或撤回公开页"))
+        quick_html = "".join(f"<a class='card action-card' href='{href}'><h2>{title}</h2><p class='muted'>{description}</p></a>" for href, title, description in quick_links)
+        pending_tasks = self.db.list_human_tasks(self.tenant_id, "pending")[:5]
+        task_rows = "".join(
+            f"<tr><td><a href='/admin/tasks/{task['id']}'>{esc(task['question'])}</a></td><td>{esc(task['model'] or '未指定型号')}</td><td>{esc(task['created_at'])}</td></tr>"
+            for task in pending_tasks
+        ) or "<tr><td colspan='3' class='muted'>暂无待处理人工任务。</td></tr>"
+        records = self.db.list_sales_records(self.tenant_id)[:5]
+        stage_labels = {"new": "新线索", "needs_info": "待补充", "technical_review": "技术确认中", "quote_ready": "可进入报价", "paused": "暂缓", "closed": "已关闭"}
+        lead_rows = "".join(
+            f"<tr><td><a href='/admin/sales/{record['id']}'>{esc(record['id'])}</a></td><td>{esc(stage_labels.get(record['stage'], record['stage'] or '未分配'))}</td><td>{esc(record['owner'] or '未分配')}</td><td>{esc(record['next_follow_up'] or '未安排')}</td></tr>"
+            for record in records
+        ) or "<tr><td colspan='4' class='muted'>暂无销售线索。</td></tr>"
+        body = f"""
+<div class='toolbar'><div><h1>管理概览</h1><div class='muted'>当前企业：示例水泵企业（演示） · 当前账号：{esc(self.actor)}（{role_label}）</div></div><a class='button secondary' href='/logout'>退出登录</a></div>
+<section class='metric-grid'>{cards}</section>
+<section class='grid' style='margin-top:18px'>{quick_html}</section>
+<div class='grid' style='margin-top:18px'><section class='card'><h2>待处理人工任务</h2><table><thead><tr><th>问题</th><th>型号</th><th>创建时间</th></tr></thead><tbody>{task_rows}</tbody></table></section><section class='card'><h2>最近销售线索</h2><table><thead><tr><th>记录</th><th>阶段</th><th>负责人</th><th>跟进日期</th></tr></thead><tbody>{lead_rows}</tbody></table></section></div>
+<div class='footer-note'>概览只读取当前登录账号所属企业的数据；具体修改仍需进入对应模块，并按角色权限执行。</div>
+"""
+        self.send_html(layout("管理概览", body), 200)
 
     def admin_tasks(self, query: dict[str, list[str]]) -> None:
         tasks = self.db.list_human_tasks(self.tenant_id, query.get("status", [""])[0] or None)
