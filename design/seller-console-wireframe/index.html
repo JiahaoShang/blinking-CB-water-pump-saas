@@ -42,6 +42,7 @@
     @media(max-width:1200px){.cols-triple{grid-template-columns:225px minmax(0,1fr)}.context{grid-column:1/-1}.cols-4{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(max-width:850px){.app{grid-template-columns:1fr}.sidebar{position:fixed;left:0;width:240px;transform:translateX(-100%);transition:.2s}.sidebar.open{transform:translateX(0);box-shadow:8px 0 30px #1118}.menu{display:block}.topbar{padding:0 14px}main{padding:21px 15px}.cols-main,.cols-half,.cols-triple{grid-template-columns:1fr}.context{grid-column:auto}}
     @media(max-width:530px){.head{align-items:start;flex-direction:column}.search-button{min-width:32px;width:32px;font-size:0;padding:6px}.search-button kbd,.mode{display:none}.cols-4{grid-template-columns:repeat(2,minmax(0,1fr))}.metric{min-height:80px;padding:11px}.metric strong{font-size:21px}}
+    .row-link{border:0;background:none;text-align:left;color:var(--blue);font-weight:650;padding:0;cursor:pointer}.stack{display:grid;gap:10px}.inline{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.selected-row{background:#f3f6fb}.btn:disabled{opacity:.45;cursor:not-allowed}.explain{font-size:10px;color:#7c6260;margin-top:6px}.banner{padding:9px 12px;border:1px solid #d7e1e6;background:#f8fbfd;border-radius:5px;font-size:11px;margin-bottom:14px}.data-row{padding:9px 0;border-bottom:1px solid #e7eded;font-size:11px}.data-row:last-child{border-bottom:0}.data-row small{color:var(--muted)}.data-row strong{display:block}.role-select{border:1px solid var(--line);background:white;border-radius:5px;padding:6px;font-size:11px}.subnav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}.subnav .btn.active{border-color:var(--blue);color:var(--blue);background:#f2f5fc}.message{padding:9px 11px;border:1px solid var(--line);border-radius:5px;margin:8px 0;font-size:11px}.message small{display:block;color:var(--muted)}.message.human{border-left:3px solid #486bab}.message.buyer{border-left:3px solid #83949b}.guide{font-size:10px;color:var(--muted);margin-top:7px}.audit{max-height:210px;overflow:auto}
   </style>
 </head>
 <body>
@@ -51,104 +52,188 @@
     <div class="tenant">◧ &nbsp; 示例企业空间 <span style="float:right">⌄</span></div>
     <div class="nav-scroll">
       <div class="nav-heading">日常工作</div>
-      <button class="nav" data-go="home"><span class="symbol">⌑</span>工作台<span class="count">8</span></button>
-      <button class="nav" data-go="inquiries"><span class="symbol">▤</span>询盘与线索<span class="count">3</span></button>
-      <button class="nav" data-go="engineering"><span class="symbol">◇</span>工程任务<span class="count">2</span></button>
-      <button class="nav" data-go="rfqs"><span class="symbol">▦</span>RFQ 与跟进<span class="count">4</span></button>
+      <button class="nav" data-page="home"><span class="symbol">⌑</span>工作台</button>
+      <button class="nav" data-page="inquiries"><span class="symbol">▤</span>询盘与线索</button>
+      <button class="nav" data-page="engineering"><span class="symbol">◇</span>工程任务</button>
+      <button class="nav" data-page="rfqs"><span class="symbol">▦</span>RFQ 与跟进</button>
       <div class="nav-heading">产品知识</div>
-      <button class="nav" data-go="products"><span class="symbol">▧</span>产品资料</button>
-      <button class="nav" data-go="review"><span class="symbol">◩</span>资料核准</button>
-      <button class="nav" data-go="publication"><span class="symbol">▣</span>页面发布</button>
-      <button class="nav" data-go="templates"><span class="symbol">▥</span>企业模板<span class="v1">V1</span></button>
+      <button class="nav" data-page="products"><span class="symbol">▧</span>产品资料</button>
+      <button class="nav" data-page="review"><span class="symbol">◩</span>资料核准</button>
+      <button class="nav" data-page="publication"><span class="symbol">▣</span>页面发布</button>
+      <button class="nav" data-page="templates"><span class="symbol">▥</span>企业模板<span class="v1">V1</span></button>
       <div class="nav-heading">组织管理</div>
-      <button class="nav" data-go="team"><span class="symbol">◎</span>成员与权限</button>
-      <button class="nav" data-go="analytics"><span class="symbol">▤</span>流程分析<span class="v1">V1</span></button>
+      <button class="nav" data-page="team"><span class="symbol">◎</span>成员与权限</button>
+      <button class="nav" data-page="analytics"><span class="symbol">▤</span>流程分析<span class="v1">V1</span></button>
     </div>
-    <div class="side-foot"><strong>示例管理员 · 管理员</strong>概念线稿；页面和数字均不连接真实业务数据。</div>
+    <div class="side-foot"><strong id="roleLabel">示例管理员</strong>交互线稿；所有数据和状态仅供演示，不连接真实买家或业务服务。</div>
   </aside>
   <div class="shell">
-    <header class="topbar"><div class="topbar-left"><button class="menu" id="menu" aria-label="打开导航">☰</button><span class="crumb" id="crumb">工作空间 / <b>工作台</b></span></div><div class="topbar-right"><button class="search-button" id="search" aria-label="快捷查找">⌕ &nbsp; 查找型号、任务、RFQ <kbd>⌘ K</kbd></button><span class="mode">卖家系统线稿</span></div></header>
-    <main>
-      <section class="screen" id="screen-home" data-title="工作台" data-group="日常工作">
-        <div class="head"><div><span class="kicker">01 / DAILY WORK</span><h1>工作台</h1><p class="subtitle">从“今天需要处理什么”进入对象，而不是从功能目录猜路径。</p></div><div class="actions"><button class="btn" data-go="rfqs">RFQ 队列</button><button class="btn primary" data-go="review">＋ 导入并核对资料</button></div></div>
-        <div class="grid cols-4"><div class="metric"><span>待核准资料</span><strong>02</strong><small>产品负责人处理</small></div><div class="metric"><span>待工程答复</span><strong>03</strong><small>原问题与出处同看</small></div><div class="metric"><span>新 RFQ</span><strong>04</strong><small>企业共享队列</small></div><div class="metric"><span>今日跟进</span><strong>05</strong><small>按负责人显示</small></div></div>
-        <div class="grid cols-main gap"><div class="panel"><div class="panel-head"><h2>需要处理</h2><span class="note">按任务与到期时间聚合 · 示例</span></div><div class="table-wrap"><table><thead><tr><th>类型</th><th>对象</th><th>状态</th><th>负责人</th><th>下一步</th></tr></thead><tbody>
-          <tr data-go="review"><td><span class="badge blue">产品资料</span></td><td><strong>Lowara 3SV08NL007T</strong><br><span class="mono muted">P-001 · 资料 v02</span></td><td>字段待核准</td><td>产品负责人</td><td><button class="link" data-go="review">核对出处 →</button></td></tr>
-          <tr data-go="engineering"><td><span class="badge amber">工程任务</span></td><td><strong>介质适用性待确认</strong><br><span class="mono muted">T-204 · 会话 C-042</span></td><td>等待工程师</td><td>售前工程师</td><td><button class="link" data-go="engineering">打开任务 →</button></td></tr>
-          <tr data-go="rfqs"><td><span class="badge green">RFQ</span></td><td><strong>RFQ-1087</strong><br><span class="mono muted">关联会话 C-042</span></td><td>待领取</td><td>企业队列</td><td><button class="link" data-go="rfqs">查看询价 →</button></td></tr>
-        </tbody></table></div></div><div class="grid"><div class="panel"><div class="panel-head"><h2>业务对象的连接</h2></div><div class="flow"><span>原文件</span><b>→</b><span>核准事实</span><b>→</b><span>发布版本</span><b>→</b><span>询盘</span><b>→</b><span>RFQ</span></div></div><div class="panel"><div class="panel-head"><h2>最近变化</h2></div><ul class="list"><li><strong>资料字段已修正</strong><small>P-001 · 原值与修正人保留</small></li><li><strong>新人工请求</strong><small>T-204 · 原会话上下文已关联</small></li><li><strong>RFQ 内容更新</strong><small>RFQ-1087 · 仍使用原编号</small></li></ul></div></div></div>
-        <p class="fineprint">本页数字是线稿占位，不代表已采集事件或真实运营指标。</p>
-      </section>
-      <section class="screen" id="screen-products" data-title="产品资料" data-group="产品知识" hidden>
-        <div class="head"><div><span class="kicker">02 / PRODUCT KNOWLEDGE</span><h1>产品资料</h1><p class="subtitle">型号、文件、事实、来源和版本在同一个对象下管理。</p></div><button class="btn primary" data-go="review">＋ 导入资料</button></div>
-        <div class="toolbar"><div class="actions"><input class="field long" placeholder="搜索型号 / 文件名（线稿）"><select class="field"><option>全部核准状态</option><option>待核准</option></select><select class="field"><option>全部页面状态</option><option>已发布</option></select></div><span class="note">来源与缺项可见</span></div>
-        <div class="grid cols-main"><div class="panel"><div class="panel-head"><h2>型号清单</h2><span class="note">2 项示例</span></div><div class="table-wrap"><table><thead><tr><th>型号</th><th>资料版本</th><th>事实状态</th><th>页面状态</th><th>缺项</th></tr></thead><tbody>
-          <tr data-go="review"><td><strong>Lowara e-SV 3SV08NL007T</strong><br><span class="mono muted">P-001</span></td><td>v02</td><td><span class="badge amber">部分待核准</span></td><td><span class="badge green">已发布 v01</span></td><td>新版参数待核</td></tr>
-          <tr data-go="review"><td><strong>示例型号 B</strong><br><span class="mono muted">P-002 · 非真实参数</span></td><td>v01</td><td><span class="badge">草稿</span></td><td>未发布</td><td>关键工况</td></tr>
-        </tbody></table></div></div><div class="panel"><div class="panel-head"><h2>当前型号</h2><button class="link" data-go="review">核对资料 →</button></div><div class="panel-body"><dl class="kv"><dt>产品</dt><dd>Lowara e-SV 3SV08NL007T</dd><dt>文件</dt><dd>技术手册、STEP、DXF、预览图</dd><dt>资料版本</dt><dd>v02</dd><dt>页面版本</dt><dd>v01</dd><dt>下一步</dt><dd>核对来源与待补字段</dd></dl><div class="rule"></div><button class="btn" data-go="publication">查看发布记录</button></div></div></div>
-      </section>
-      <section class="screen" id="screen-review" data-title="资料核准" data-group="产品知识" hidden>
-        <div class="head"><div><span class="kicker">03 / SOURCE REVIEW</span><h1>资料核准 <span class="badge amber">待人工核对</span></h1><p class="subtitle">P-001 · AI 提取是草稿；授权人员检查来源、修正值和缺项。</p></div><div class="actions"><button class="btn" data-go="products">返回列表</button><button class="btn primary" data-note="线稿：实际核准需检查权限并保存来源、操作者和时间">核准选中字段</button></div></div>
-        <div class="flow panel" style="margin-bottom:14px"><span>1 上传原文件</span><b>→</b><span>2 提取草稿</span><b>→</b><span style="border-color:#829bd0;color:#3657a4">3 人工核对</span><b>→</b><span>4 预览与发布</span></div>
-        <div class="grid cols-half"><div class="panel"><div class="panel-head"><h2>原文件 · 技术手册 Rev. B</h2><span class="note">点击字段应定位原文</span></div><div class="document"><div class="doc-title">LOWARA e-SV · TECHNICAL DATA</div><div class="mono muted" style="margin-top:10px">REV. B / SOURCE PAGE 8</div><div class="line"></div><div class="line mid"></div><div class="line"></div><div class="highlight"><strong>来源位置示意</strong><br>型号编码与额定功率 · 0.75 kW<br><span class="muted">正式实现应显示原文件页码和高亮位置。</span></div><div class="line"></div><div class="line short"></div><div class="line mid"></div></div></div>
-          <div class="panel"><div class="panel-head"><h2>提取字段与人工判断</h2><span class="badge blue">草稿 ≠ 核准</span></div><div class="panel-body">
-            <div class="fact"><span>型号</span><div><strong>3SV08NL007T</strong><small>来源：CAD 中心 · 命名映射待核</small></div><span class="badge amber">待核</span></div>
-            <div class="fact"><span>额定功率</span><div><strong>0.75 kW</strong><small>来源：技术手册 Rev. B · 第 8 页</small></div><span class="badge blue">草稿</span></div>
-            <div class="fact"><span>材料</span><div><strong>具体配置待核准</strong><small>系列信息不自动写为型号事实</small></div><span class="badge amber">待核</span></div>
-            <div class="fact"><span>性能曲线</span><div><strong>尚无本型号核准关联</strong><small>有限信息页可以标缺项</small></div><span class="badge red">缺项</span></div>
-            <div class="rule"></div><div class="callout warn">发布前核对已展示数据、出处与缺项。修订不会静默改变旧页面或旧 RFQ 的依据。</div>
-            <div class="actions" style="margin-top:13px"><button class="btn" data-note="线稿：保存修正时保留原值和修正人">保存修正</button><button class="btn" data-note="线稿：记录资料缺口">标记缺项</button><button class="btn primary" data-go="publication">进入页面管理 →</button></div>
-          </div></div></div>
-      </section>
-      <section class="screen" id="screen-publication" data-title="页面发布" data-group="产品知识" hidden>
-        <div class="head"><div><span class="kicker">04 / PAGE GOVERNANCE</span><h1>页面发布</h1><p class="subtitle">这是卖家管理发布内容、版本和授权的页面；不包含对外页面线稿。</p></div><button class="btn primary" data-note="线稿：仅授权人员在核对预览后发布新版本">发布新版本</button></div>
-        <div class="grid cols-main"><div class="panel"><div class="panel-head"><h2>P-001 · 页面草稿</h2><span class="badge amber">等待核准</span></div><div class="panel-body"><div class="grid cols-half"><div><h3>区块清单</h3><ul class="list" style="border:1px solid var(--line)"><li>01 型号与摘要</li><li>02 已核准参数</li><li>03 曲线与材料</li><li>04 文件 / 2D / 3D</li><li>05 来源与缺项</li></ul></div><div><h3>结构预览</h3><div class="wire medium">标题 / 核准事实 / 状态</div><div class="wire-row"><div class="wire">参数</div><div class="wire">来源</div><div class="wire">缺项</div></div><div class="wire tall">资料与模型区块</div></div></div><div class="callout gap">页面草稿只引用已核准事实；预览不自动对外发布。</div></div></div>
-        <div class="grid"><div class="panel"><div class="panel-head"><h2>发布控制</h2></div><div class="panel-body"><dl class="kv"><dt>当前公开</dt><dd>v01 · 已发布</dd><dt>编辑版本</dt><dd>v02 · 草稿</dd><dt>核准人</dt><dd>待确认</dd><dt>附件范围</dt><dd>按文件许可决定</dd></dl><div class="rule"></div><button class="btn" data-note="此线稿只展示卖家管理页面，不展示对外预览的页面设计">预览发布内容</button></div></div><div class="panel"><div class="panel-head"><h2>版本历史</h2></div><ul class="list"><li><strong>v01 · 已发布</strong><small>保留产品事实版本及核准记录</small></li><li><strong>v02 · 草稿</strong><small>不覆盖现有公开版本</small></li></ul></div></div></div>
-      </section>
-      <section class="screen" id="screen-inquiries" data-title="询盘与线索" data-group="日常工作" hidden>
-        <div class="head"><div><span class="kicker">05 / INQUIRY DESK</span><h1>询盘与线索</h1><p class="subtitle">卖家在一处读取原始消息、工况摘要、推荐依据和处理历史。</p></div><div class="actions"><button class="btn" data-go="engineering">关联任务</button><button class="btn primary" data-go="rfqs">关联 RFQ →</button></div></div>
-        <div class="grid cols-triple"><div class="panel"><div class="panel-head"><h2>询盘列表</h2><span class="note">3 项示例</span></div><div class="inbox-item selected"><strong>C-042 · 增压系统咨询</strong><small>网页 · 待工程答复 · 已有 RFQ</small></div><div class="inbox-item" data-note="线稿：应切换到该询盘的上下文"><strong>C-058 · 工况待补充</strong><small>网页 · 尚未形成 RFQ</small></div><div class="inbox-item" data-note="线稿：应切换到该询盘的上下文"><strong>C-063 · 已知型号咨询</strong><small>网页 · 有据问答</small></div></div>
-          <div class="panel"><div class="panel-head"><div><h2>询盘 C-042</h2><span class="note">原话与系统动作同一时间线</span></div><span class="badge amber">待工程答复</span></div><div class="panel-body"><ol class="timeline"><li><strong>收到原始询问</strong><small>保留原话和入口</small><div class="quote">“需要用于楼宇供水增压，想确认型号是否适合实际工况。”</div></li><li><strong>需求摘要已确认</strong><small>确认值与未知项分开存储</small></li><li><strong>候选结果已记录</strong><small>保留产品版本、理由与待核项</small></li><li><strong>人工请求已提交</strong><small>任务 T-204 · 等待工程师</small></li></ol><div class="rule"></div><button class="btn" data-go="engineering">处理工程任务</button> <button class="btn" data-go="rfqs">查看 RFQ-1087</button></div></div>
-          <div class="panel context"><div class="panel-head"><h2>对象上下文</h2></div><div class="panel-body"><dl class="kv"><dt>场景</dt><dd>楼宇供水增压</dd><dt>已确认</dt><dd>使用场景</dd><dt>未知</dt><dd>流量、扬程、介质</dd><dt>关联产品</dt><dd>P-001 v01</dd><dt>推荐状态</dt><dd>待核实候选</dd><dt>下一步</dt><dd>工程师审查原问题</dd></dl><div class="rule"></div><button class="btn" data-go="products">查产品事实 →</button></div></div></div>
-      </section>
-      <section class="screen" id="screen-engineering" data-title="工程任务" data-group="日常工作" hidden>
-        <div class="head"><div><span class="kicker">06 / ENGINEER HANDOFF</span><h1>工程任务</h1><p class="subtitle">任务携带问题、条件、产品版本和资料出处；工程师在同一对象内回复。</p></div><div class="actions"><button class="btn" data-go="inquiries">返回原询盘</button><button class="btn primary" data-note="线稿：发布答复需记录处理人、方式、时间与结果">发布答复</button></div></div>
-        <div class="grid cols-main"><div class="panel"><div class="panel-head"><h2>T-204 · 适用性待确认</h2><span class="badge amber">待处理</span></div><div class="panel-body"><h3>原问题</h3><div class="quote">当前资料不足以对该工况给出确定结论；请工程师结合完整条件判断。</div><h3>已知条件与缺口</h3><div class="check"><span class="badge green">已确认</span> 使用场景：楼宇供水增压</div><div class="check"><span class="badge amber">待补充</span> 流量、扬程及介质条件</div><div class="check"><span class="badge blue">来源</span> 产品 P-001 · 已发布版本 v01</div><div class="rule"></div><label for="answer" style="font-size:11px;font-weight:650">工程师答复草稿</label><textarea id="answer" class="field" placeholder="线稿输入区：不会实际发送"></textarea><div class="actions gap"><button class="btn" data-note="线稿：在原任务内向客户追问条件">追问条件</button><button class="btn" data-note="线稿：资料缺口转入产品核准流程">记录资料缺口</button><button class="btn primary" data-note="线稿：答复回原会话并标记人工身份">确认发布</button></div></div></div><div class="grid"><div class="panel"><div class="panel-head"><h2>关联对象</h2></div><div class="panel-body"><dl class="kv"><dt>原询盘</dt><dd><button class="link" data-go="inquiries">C-042 →</button></dd><dt>产品资料</dt><dd><button class="link" data-go="products">P-001 →</button></dd><dt>相关 RFQ</dt><dd><button class="link" data-go="rfqs">RFQ-1087 →</button></dd></dl></div></div><div class="panel"><div class="panel-head"><h2>处理状态</h2></div><div class="flow"><span>待处理</span><b>→</b><span>处理中</span><b>→</b><span>已答复</span></div><div class="panel-body note">草稿不等于对方已收到。</div></div></div></div>
-      </section>
-      <section class="screen" id="screen-rfqs" data-title="RFQ 与跟进" data-group="日常工作" hidden>
-        <div class="head"><div><span class="kicker">07 / SALES DESK</span><h1>RFQ 与跟进</h1><p class="subtitle">在原 RFQ 上处理负责人、历史修订、待补项和下一步，不复制一份新的线索记录。</p></div><div class="actions"><button class="btn" data-go="inquiries">关联询盘</button><button class="btn primary" data-note="线稿：销售领取或管理员分配，须留操作记录">领取 RFQ</button></div></div>
-        <div class="grid cols-main"><div class="panel"><div class="panel-head"><h2>共享队列</h2><span class="note">按待处理与跟进日期筛选</span></div><div class="table-wrap"><table><thead><tr><th>编号</th><th>产品 / 场景</th><th>完整性</th><th>负责人</th><th>最新变化</th></tr></thead><tbody><tr><td class="mono">RFQ-1087</td><td>Lowara 3SV08NL007T<br><span class="muted">楼宇增压</span></td><td><span class="badge amber">有待补充项</span></td><td>共享队列</td><td>新增修订</td></tr><tr><td class="mono">RFQ-1088</td><td>示例型号 B</td><td><span class="badge">待核实</span></td><td>销售 A</td><td>新提交</td></tr></tbody></table></div><div class="panel-head"><h2>RFQ-1087 · 当前内容</h2><span class="badge green">允许当前跟进</span></div><div class="panel-body"><dl class="kv"><dt>工况</dt><dd>楼宇供水增压 · 关键值待补</dd><dt>推荐依据</dt><dd>C-042 / P-001 v01</dd><dt>联系方式</dt><dd>按企业权限查看</dd><dt>下一步</dt><dd>核实缺项与工程答复</dd></dl><div class="rule"></div><div class="callout">缺少工况不阻止提交 RFQ；缺项进入卖家的下一步处理。</div></div></div><div class="grid"><div class="panel"><div class="panel-head"><h2>修订记录</h2></div><div class="panel-body"><ol class="timeline"><li><strong>初次提交</strong><small>保留原字段与产品版本</small></li><li><strong>修订 #1</strong><small>新增交付地点；可查修改前后</small></li><li><strong>销售记录</strong><small>负责人、阶段、日期及结果</small></li></ol></div></div><div class="panel"><div class="panel-head"><h2>销售动作</h2></div><div class="panel-body grid"><button class="btn" data-note="线稿：分配负责人并保留历史">分配负责人</button><button class="btn" data-note="线稿：设置下一步与日期">记录下一步</button><button class="btn" data-note="线稿：停止主动联系标记独立于 RFQ 状态">标记停止主动联系</button></div></div></div></div>
-      </section>
-      <section class="screen" id="screen-team" data-title="成员与权限" data-group="组织管理" hidden>
-        <div class="head"><div><span class="kicker">08 / ACCESS GOVERNANCE</span><h1>成员与权限</h1><p class="subtitle">授权是系统的组成部分：操作入口、服务端权限与操作记录保持一致。</p></div><button class="btn primary" data-note="V1 规划：邀请和停用成员需连接真实身份服务">邀请成员 · V1</button></div>
-        <div class="grid cols-main"><div class="panel"><div class="panel-head"><h2>权限矩阵结构示意</h2><span class="note">具体权限由试点企业确认</span></div><div class="table-wrap"><table class="role"><thead><tr><th>动作</th><th>管理员</th><th>产品负责人</th><th>销售</th><th>工程师</th></tr></thead><tbody><tr><td>查看所属企业资料</td><td>✓</td><td>✓</td><td>按授权</td><td>按授权</td></tr><tr><td>核准技术事实</td><td>按授权</td><td>✓</td><td>—</td><td>按授权</td></tr><tr><td>发布产品页面</td><td>✓</td><td>按授权</td><td>—</td><td>—</td></tr><tr><td>处理 RFQ</td><td>✓</td><td>按授权</td><td>✓</td><td>相关任务</td></tr><tr><td>发布工程答复</td><td>按授权</td><td>—</td><td>—</td><td>✓</td></tr></tbody></table></div><div class="panel-body"><div class="callout">矩阵只是布局示意，并非已批准的最终权限。MVP 首先保证企业隔离、必要授权和操作记录；完整成员生命周期在 V1 细化。</div></div></div><div class="grid"><div class="panel"><div class="panel-head"><h2>成员状态</h2></div><ul class="list"><li><strong>示例管理员</strong><small>管理员 · 已启用</small></li><li><strong>产品负责人</strong><small>资料核准</small></li><li><strong>售前工程师</strong><small>工程答复</small></li></ul></div><div class="panel"><div class="panel-head"><h2>审计记录</h2></div><ul class="list"><li>谁核准了哪个字段</li><li>谁发布或撤回了页面版本</li><li>谁处理了任务或 RFQ</li></ul></div></div></div>
-      </section>
-      <section class="screen" id="screen-templates" data-title="企业模板" data-group="产品知识" hidden>
-        <div class="head"><div><span class="kicker">09 / V1 EXPANSION</span><h1>企业模板 <span class="badge blue">V1 规划</span></h1><p class="subtitle">完整工作流、提示词与展示字段编辑器不属于当前 MVP。</p></div></div>
-        <div class="empty"><div><strong>企业模板库与审批链路</strong><p>平台基础模板 → 企业草稿 → 预览 → 授权核准 → 发布模板版本。当前仅预留系统入口，不伪装成已实现编辑器。</p></div></div>
-      </section>
-      <section class="screen" id="screen-analytics" data-title="流程分析" data-group="组织管理" hidden>
-        <div class="head"><div><span class="kicker">10 / V1 EXPANSION</span><h1>流程分析 <span class="badge blue">V1 规划</span></h1><p class="subtitle">只使用真实事件生成指标；线稿不虚构成交效果。</p></div></div>
-        <div class="grid cols-4"><div class="metric"><span>资料缺口</span><strong>—</strong><small>待试点数据</small></div><div class="metric"><span>有据问答</span><strong>—</strong><small>待试点数据</small></div><div class="metric"><span>人工移交</span><strong>—</strong><small>待试点数据</small></div><div class="metric"><span>RFQ 处理</span><strong>—</strong><small>待试点数据</small></div></div><div class="empty gap"><div><strong>分析区结构预留</strong><p>资料缺口、问答类型、RFQ 状态与处理时间应从可追溯事件计算；这里不展示未经测量的增长率。</p></div></div>
-      </section>
-    </main>
+    <header class="topbar">
+      <div class="topbar-left"><button class="menu" id="menu" aria-label="打开导航">☰</button><span class="crumb" id="crumb"></span></div>
+      <div class="topbar-right"><button class="search-button" id="search">⌕ &nbsp; 查找页面或对象 <kbd>⌘ K</kbd></button><label class="note" for="role">演示岗位</label><select class="role-select" id="role"><option value="admin">管理员</option><option value="product">产品负责人</option><option value="sales">销售</option><option value="engineer">售前工程师</option></select><span class="mode">卖家系统线稿</span></div>
+    </header>
+    <main id="main"></main>
   </div>
 </div>
-<div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-label="快捷查找"><div class="command"><input id="commandInput" placeholder="输入页面名称，如产品、RFQ、任务"><div class="command-list" id="commandList"></div><div class="command-foot">⌘ K 打开 · Esc 关闭 · 线稿中的探索性交互</div></div></div>
+<div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-label="快捷查找"><div class="command"><input id="commandInput" placeholder="输入页面名或 P-001、C-042、T-204、RFQ-1087"><div class="command-list" id="commandList"></div><div class="command-foot">⌘ K 打开 · Esc 关闭 · 仅查找本线稿示例对象</div></div></div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
-  (function(){
-    var labels={home:'工作台',products:'产品资料',review:'资料核准',publication:'页面发布',inquiries:'询盘与线索',engineering:'工程任务',rfqs:'RFQ 与跟进',team:'成员与权限',templates:'企业模板 · V1',analytics:'流程分析 · V1'};
-    var sidebar=document.getElementById('sidebar'), overlay=document.getElementById('overlay'), input=document.getElementById('commandInput'), timer;
-    function page(id,hash){if(!labels[id])id='home';document.querySelectorAll('.screen').forEach(function(x){x.hidden=x.id!=='screen-'+id});document.querySelectorAll('.nav').forEach(function(x){var active=x.getAttribute('data-go')===id;x.classList.toggle('active',active);if(active)x.setAttribute('aria-current','page');else x.removeAttribute('aria-current')});var s=document.getElementById('screen-'+id);document.getElementById('crumb').innerHTML='工作空间 / '+s.getAttribute('data-group')+' / <b>'+s.getAttribute('data-title')+'</b>';document.title=labels[id]+'｜卖家系统线稿';sidebar.classList.remove('open');overlay.classList.remove('open');window.scrollTo(0,0);if(hash!==false)history.replaceState(null,'','#'+id)}
-    function note(message){var x=document.getElementById('toast');x.textContent=message;x.classList.add('show');clearTimeout(timer);timer=setTimeout(function(){x.classList.remove('show')},3500)}
-    function commands(q){var list=document.getElementById('commandList');list.innerHTML='';Object.keys(labels).filter(function(k){return !q||k.includes(q.toLowerCase())||labels[k].toLowerCase().includes(q.toLowerCase())}).forEach(function(k){var b=document.createElement('button');b.type='button';b.setAttribute('data-go',k);var a=document.createElement('span');a.textContent=labels[k];var t=document.createElement('span');t.className='muted mono';t.textContent='GO TO';b.appendChild(a);b.appendChild(t);list.appendChild(b)});if(!list.children.length){var e=document.createElement('div');e.className='note';e.style.padding='12px';e.textContent='没有匹配页面';list.appendChild(e)}}
-    function open(){input.value='';commands('');overlay.classList.add('open');input.focus()}
-    document.addEventListener('click',function(e){var go=e.target.closest('[data-go]');if(go){page(go.getAttribute('data-go'));return}var n=e.target.closest('[data-note]');if(n){note(n.getAttribute('data-note'));return}if(e.target===overlay)overlay.classList.remove('open')});
-    document.getElementById('menu').addEventListener('click',function(){sidebar.classList.toggle('open')});document.getElementById('search').addEventListener('click',open);input.addEventListener('input',function(){commands(this.value)});
-    document.addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();open()}if(e.key==='Escape'){overlay.classList.remove('open');sidebar.classList.remove('open')}});
-    window.addEventListener('hashchange',function(){page(location.hash.slice(1),false)});page(location.hash.slice(1),false);
-  }());
+(function(){
+  var labels={home:'工作台',inquiries:'询盘与线索',engineering:'工程任务',rfqs:'RFQ 与跟进',products:'产品资料',review:'资料核准',publication:'页面发布',templates:'企业模板 · V1',team:'成员与权限',analytics:'流程分析 · V1'};
+  var app={
+    role:'admin', page:'home', id:null, timer:null,
+    products:[
+      {id:'P-001',name:'Lowara 3SV08NL007T',version:2,pageVersion:1,published:true,previewed:false,approved:[{key:'型号',value:'3SV08NL007T',source:'型号资料 · 第 2 页'},{key:'额定功率',value:'0.75 kW',source:'技术手册 Rev. B · 第 8 页'}],draft:[{key:'材料',value:'配置待核对',source:'系列资料 · 第 12 页'}],gaps:['本型号性能曲线','介质适用性']},
+      {id:'P-002',name:'示例型号 B',version:1,pageVersion:0,published:false,previewed:false,approved:[{key:'型号',value:'型号 B',source:'示例资料 · 第 1 页'}],draft:[{key:'额定功率',value:'1.1 kW（演示值）',source:'示例资料 · 第 4 页'}],gaps:['材料证明','性能曲线']}
+    ],
+    conversations:[
+      {id:'C-042',title:'楼宇供水增压',source:'网页对话',owner:null,consent:false,stop:false,confirmed:true,need:'楼宇供水增压',unknown:'流量、扬程、介质',recommendation:'P-001 v01 · 待核实候选',messages:[{who:'买家',body:'需要用于楼宇供水增压，想确认型号是否适合实际工况。'},{who:'AI 助手',body:'已确认用途为楼宇供水增压；流量、扬程与介质仍需核实。当前仅为待核实候选，不构成适用性结论。'}]},
+      {id:'C-058',title:'工况待补充',source:'网页对话',owner:null,consent:false,stop:false,confirmed:false,need:'生产线供水（待买家确认）',unknown:'流量、扬程、介质',recommendation:null,messages:[{who:'买家',body:'想了解生产线供水用泵。'}]},
+      {id:'C-063',title:'已知型号咨询',source:'产品页',owner:null,consent:false,stop:false,confirmed:false,need:'已知型号 P-001',unknown:'实际工况',recommendation:null,messages:[{who:'买家',body:'这个型号额定功率是多少？'},{who:'AI 助手',body:'核准资料中的额定功率为 0.75 kW。出处：技术手册 Rev. B，第 8 页；产品版本 v02。'}]},
+      {id:'C-070',title:'未选型询价',source:'网页对话',owner:null,consent:false,stop:false,confirmed:false,need:'采购泵，尚未选型',unknown:'型号、工况',recommendation:null,messages:[{who:'买家',body:'请给我报价，我还没有选定型号。'}]}
+    ],
+    task:{id:'T-204',conversation:'C-042',product:'P-001',status:'待工程师处理',question:'型号 3SV08NL007T 是否适合我这栋楼的实际供水增压工况？',draft:'',asked:false,answer:null},
+    rfqs:[
+      {id:'RFQ-1087',conversation:'C-042',model:'P-001',status:'待领取',gap:'流量、扬程、介质待补',time:'10:00',intent:'楼宇增压采购 A',revisions:[{text:'初次提交：型号 P-001，工况待补',time:'10:00'},{text:'修订 #1：补充交付地点',time:'10:20'}]},
+      {id:'RFQ-1088',conversation:'C-042',model:'P-002',status:'待核实',gap:'材料与性能曲线待核',time:'10:30',intent:'独立采购请求 B',revisions:[{text:'初次提交：独立询价型号 P-002',time:'10:30'}]},
+      {id:'RFQ-1090',conversation:'C-042',model:'P-001',status:'待核实',gap:'数量待补',time:'10:45',intent:'独立采购请求 C',revisions:[{text:'初次提交：再次询价型号 P-001，独立采购意图',time:'10:45'}]},
+      {id:'RFQ-1089',conversation:'C-070',model:null,status:'待核实',gap:'型号、工况待补',time:'11:10',intent:'待选型询价',revisions:[{text:'初次提交：未选型号，买家确认联系方式',time:'11:10'}]}
+    ],
+    audit:[]
+  };
+  function esc(x){return String(x==null?'':x).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+  function find(list,id){return list.find(function(x){return x.id===id})}
+  function current(list){return find(list,app.id)||list[0]}
+  function can(action){return app.role==='admin'||({approve:['product'],publish:['product'],engineer:['engineer'],sales:['sales']}[action]||[]).includes(app.role)}
+  function act(label,action,klass,ok,reason){return '<button class="btn '+(klass||'')+'" data-action="'+action+'"'+(ok?'':' disabled title="'+esc(reason||'当前岗位无权执行')+'"')+'>'+esc(label)+'</button>'}
+  function go(label,page,id,klass){return '<button class="'+(klass||'link')+'" data-page="'+page+'"'+(id?' data-id="'+esc(id)+'"':'')+'>'+esc(label)+'</button>'}
+  function badge(s){var c=/已发布|已答复|已确认/.test(s)?'green':/待|缺|未/.test(s)?'amber':'blue';return '<span class="badge '+c+'">'+esc(s)+'</span>'}
+  function panel(title,body,extra){return '<section class="panel"><div class="panel-head"><h2>'+title+'</h2>'+(extra||'')+'</div><div class="panel-body">'+body+'</div></section>'}
+  function heading(n,title,subtitle,buttons){return '<div class="head"><div><span class="kicker">'+n+'</span><h1>'+title+'</h1><p class="subtitle">'+subtitle+'</p></div><div class="actions">'+(buttons||'')+'</div></div>'}
+  function row(label,value){return '<div class="data-row"><small>'+esc(label)+'</small><strong>'+value+'</strong></div>'}
+  function audit(type,details){app.audit.unshift({type:type,details:details,time:new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})})}
+  function toast(msg){var x=document.getElementById('toast');x.textContent=msg;x.classList.add('show');clearTimeout(app.timer);app.timer=setTimeout(function(){x.classList.remove('show')},3500)}
+  function navigate(page,id,hash){app.page=labels[page]?page:'home';app.id=id||null;document.querySelectorAll('.nav').forEach(function(x){x.classList.toggle('active',x.dataset.page===app.page)});document.getElementById('sidebar').classList.remove('open');document.getElementById('overlay').classList.remove('open');if(hash!==false)history.replaceState(null,'','#'+app.page+(app.id?'/'+app.id:''));render();window.scrollTo(0,0)}
+  function home(){
+    var tasks=[];
+    if(can('approve')) tasks.push(['产品核准','P-002 · 示例型号 B','review','P-002','待核准']);
+    if(can('engineer')&&app.task.status!=='已答复') tasks.push(['工程任务','T-204 · '+app.task.question,'engineering','T-204',app.task.status]);
+    if(can('sales')) app.rfqs.filter(function(x){return x.status!=='已处理'}).forEach(function(x){tasks.push(['RFQ',x.id+' · '+x.intent,'rfqs',x.id,x.status])});
+    var body=tasks.length?tasks.map(function(t){return '<tr><td>'+badge(t[0])+'</td><td>'+esc(t[1])+'</td><td>'+badge(t[4])+'</td><td>'+go('打开 →',t[2],t[3])+'</td></tr>'}).join(''):'<tr><td colspan="4">当前岗位没有需要处理的示例待办。</td></tr>';
+    return heading('01 / DAILY WORK','工作台','按岗位显示待办；自助会话可检索，但不会自动成为销售任务。',go('查看全部询盘','inquiries',null,'btn'))+
+      '<div class="grid cols-4"><div class="metric"><span>待核准产品</span><strong>'+app.products.filter(function(p){return p.draft.length}).length+'</strong><small>产品岗位</small></div><div class="metric"><span>待工程师任务</span><strong>'+(app.task.status==='已答复'?0:1)+'</strong><small>买家已请求人工</small></div><div class="metric"><span>待处理 RFQ</span><strong>'+app.rfqs.filter(function(r){return r.status!=='已处理'}).length+'</strong><small>各 RFQ 独立状态</small></div><div class="metric"><span>仅自助会话</span><strong>02</strong><small>不自动进销售队列</small></div></div>'+
+      '<div class="grid cols-main gap">'+panel('我的待办','<div class="table-wrap"><table><thead><tr><th>类型</th><th>对象</th><th>状态</th><th>下一步</th></tr></thead><tbody>'+body+'</tbody></table></div>')+
+      panel('完整接力','<div class="flow"><span>上传与核准</span><b>→</b><span>内容预览与发布</span><b>→</b><span>需求与推荐</span><b>→</b><span>有据问答 / 人工任务</span><b>→</b><span>RFQ 与跟进</span></div><div class="callout">会话、工程任务、RFQ 彼此关联但身份独立；本线稿只展示卖家工作界面。</div>')+'</div>';
+  }
+  function products(){
+    return heading('02 / PRODUCT KNOWLEDGE','产品资料','按型号进入各自的核准、内容预览与发布记录。',act('＋ 模拟导入产品','add-product','primary',can('approve')))+
+      panel('本企业型号',app.products.map(function(p){return '<div class="data-row"><div class="inline"><strong>'+esc(p.id+' · '+p.name)+'</strong>'+badge(p.published?'已发布 v'+p.pageVersion:'未发布')+'</div><small>事实版本 v'+p.version+' · 已核准 '+p.approved.length+' 项 · 待核 '+p.draft.length+' 项 · 缺项 '+p.gaps.length+' 项</small><div class="actions gap">'+go('核对字段','review',p.id)+go('内容核对预览','publication',p.id)+'</div></div>'}).join(''));
+  }
+  function review(){
+    var p=current(app.products);
+    return heading('03 / FACT REVIEW','资料核准','抽取草稿与核准事实分开；只对当前型号操作。',go('返回产品资料','products',null,'btn')+go('进入发布','publication',p.id,'btn primary'))+
+      '<div class="subnav">'+app.products.map(function(x){return go(x.id+' · '+x.name,'review',x.id,'btn '+(x.id===p.id?'active':''))}).join('')+'</div>'+
+      '<div class="grid cols-half">'+panel('原文件与定位','<div class="document"><div class="doc-title">'+esc(p.name)+' · SOURCE DOCUMENT</div><p class="muted">概念线稿：每项事实的出处页码在右侧显示；正式系统需打开实际授权文件并定位原文。</p><div class="highlight">来源定位示例：'+esc((p.draft[0]||p.approved[0]).source)+'</div><div class="line"></div><div class="line mid"></div></div>')+
+      panel('提取草稿与人工判断',p.draft.map(function(f){return row(f.key,esc(f.value)+' <small>来源：'+esc(f.source)+'</small> '+badge('待核'))}).join('')+
+      (p.draft.length?'<div class="actions gap">'+act('核准当前型号的草稿事实','approve','primary',can('approve')&&p.draft.every(function(f){return !/待核对|待人工核准/.test(f.value)}),'含待核对值时须先取得可核准事实')+'</div>':'<div class="callout gap">当前型号没有待核准草稿。</div>')+
+      '<div class="rule"></div><h3>已核准事实</h3>'+p.approved.map(function(f){return row(f.key,esc(f.value)+' <small>来源：'+esc(f.source)+'</small>')}).join('')+
+      '<div class="rule"></div><div class="callout warn">缺项：'+esc(p.gaps.join('、')||'无')+'。有限信息页可发布，但展示事实和缺项都须由授权人员核对。</div>')+'</div>';
+  }
+  function publication(){
+    var p=current(app.products);
+    return heading('04 / PAGE GOVERNANCE','页面发布','卖家核对将公开的事实、出处与缺项；买家详情页布局仍待调研。',go('返回字段核准','review',p.id,'btn'))+
+      '<div class="subnav">'+app.products.map(function(x){return go(x.id+' · '+x.name,'publication',x.id,'btn '+(x.id===p.id?'active':''))}).join('')+'</div>'+
+      '<div class="grid cols-main">'+panel('内容核对预览区 · '+esc(p.id),'<div class="callout">这不是买家详情页视觉预览；这里只显示准备公开的内容清单。</div>'+
+      row('型号与事实版本',esc(p.name)+' · v'+p.version)+
+      p.approved.map(function(f){return row(f.key,esc(f.value)+' <small>出处：'+esc(f.source)+'</small>')}).join('')+
+      row('未展示的草稿',esc(p.draft.map(function(f){return f.key}).join('、')||'无')+'（未核准，不进入公开页面）')+
+      row('公开缺项',esc(p.gaps.join('、')||'无'))+
+      '<div class="actions gap">'+act('确认已核对预览','preview','',can('publish'))+act('发布新页面版本','publish','primary',can('publish')&&p.previewed&&p.approved.length>0,'需有发布权限、至少一项已核准事实且先核对预览')+'</div><div class="guide">每次核准字段后须重新预览；已发布版本不会被草稿原地覆盖。</div>')+
+      '<div class="stack">'+panel('版本与授权',row('当前公开',p.published?'v'+p.pageVersion:'无')+row('编辑状态',p.previewed?'已完成内容核对':'待内容核对')+row('素材许可','演示线稿不包含对外附件发布'))+
+      panel('关联影响','<div class="callout">产品事实更新不会静默改写旧 RFQ 的依据。推荐资格需另外判断；页面能有限信息发布不代表适用性已确认。</div>')+'</div></div>';
+  }
+  function inquiries(){
+    var c=current(app.conversations), related=app.rfqs.filter(function(r){return r.conversation===c.id}), task=app.task.conversation===c.id?app.task:null;
+    var items=app.conversations.map(function(x){return '<button class="inbox-item '+(x.id===c.id?'selected':'')+'" style="width:100%;border-left:0;border-right:0;border-top:0;text-align:left;background:'+(x.id===c.id?'#f3f6fb':'#fff')+'" data-page="inquiries" data-id="'+x.id+'"><strong>'+esc(x.id+' · '+x.title)+'</strong><small>'+esc(x.source)+' · '+(app.rfqs.some(function(r){return r.conversation===x.id})?'有关联 RFQ':'无 RFQ；不自动生成销售待办')+'</small></button>'}).join('');
+    var messages=c.messages.map(function(m){return '<div class="message '+(m.who==='买家'?'buyer':'human')+'"><small>'+esc(m.who)+'</small>'+esc(m.body)+'</div>'}).join('');
+    return heading('05 / INQUIRY DESK','询盘与线索','原始对话、需求、推荐、人工任务和 RFQ 在同一工作区查看，记录各自独立。')+
+      '<div class="grid cols-triple"><section class="panel"><div class="panel-head"><h2>会话列表</h2></div>'+items+'</section>'+
+      panel('会话 '+esc(c.id)+' · '+esc(c.title),'<div class="note">入口：'+esc(c.source)+' · 线索负责人：'+esc(c.owner||'未分配')+'</div><div class="rule"></div>'+messages+
+      '<div class="rule"></div><h3>需求与推荐</h3>'+row('需求状态',badge(c.confirmed?'已确认':'待买家确认'))+row('场景',esc(c.need))+row('未知项',esc(c.unknown))+row('推荐',esc(c.recommendation||'无可靠候选或尚未匹配'))+
+      (!c.confirmed?'<div class="guide">买家确认需求后才可展示匹配候选。此按钮仅模拟买家已在其界面完成确认。</div>'+act('模拟买家确认需求','confirm-requirement','',true):'')+
+      '<div class="rule"></div><h3>关联对象</h3>'+(task?'<div class="data-row">'+go(task.id+' · '+task.status,'engineering',task.id)+'</div>':'<div class="data-row muted">没有买家提交的人工请求，不建立工程任务。</div>')+
+      (related.length?related.map(function(r){return '<div class="data-row">'+go(r.id+' · '+r.intent,'rfqs',r.id)+' · '+badge(r.status)+'</div>'}).join(''):'<div class="data-row muted">无 RFQ；会话本身不等于 RFQ。</div>'))+
+      panel('卖家上下文',row('线索负责人',esc(c.owner||'未分配'))+row('主动联系',c.stop?'已停止':'按买家授权与业务状态')+row('产品依据',c.recommendation?go('P-001 · 查看资料','review','P-001'):'无推荐依据')+
+      '<div class="rule"></div><div class="callout">联系信息只对授权岗位显示；本演示不存真实买家联系方式。</div>')+'</div>';
+  }
+  function engineering(){
+    var t=app.task,c=find(app.conversations,t.conversation);
+    return heading('06 / ENGINEER HANDOFF','工程任务','买家明确请求后才建任务；追问与答复回到原会话。',go('查看原会话','inquiries',c.id,'btn'))+
+      '<div class="grid cols-main">'+panel('T-204 · '+esc(t.status),row('买家原问题','“'+esc(t.question)+'”')+row('已确认条件',esc(c.need))+row('未解决原因','流量、扬程与介质未确认，现有资料不足以判断实际适用性')+row('资料依据',go('P-001 v02 · 已核准事实','review','P-001'))+
+      '<div class="rule"></div><label for="answer" class="note">工程师拟发给买家的内容</label><textarea id="answer" class="field" placeholder="输入实际追问或答复">'+esc(t.draft)+'</textarea><div class="actions gap">'+act('向买家追问条件','task-ask','',can('engineer')&&t.status!=='已答复'&&t.draft.trim().length>0,'需工程师权限并输入内容')+act('模拟买家补充条件','task-buyer-reply','',t.status==='待买家补充','仅待买家补充时可模拟')+act('发布人工答复','task-answer','primary',can('engineer')&&t.status!=='已答复'&&t.draft.trim().length>0,'需工程师权限并输入内容')+'</div>'+
+      '<div class="guide">追问/答复会作为人工消息写入原会话；草稿本身不代表买家收到。专业结论由工程师填写。</div>')+
+      '<div class="stack">'+panel('关联对象',row('原会话',go(c.id,'inquiries',c.id))+row('产品',go('P-001','review','P-001'))+row('RFQ',app.rfqs.filter(function(r){return r.conversation===c.id}).map(function(r){return go(r.id,'rfqs',r.id)}).join(' · ')))+
+      panel('任务状态',row('当前',badge(t.status))+row('人工答复',esc(t.answer||'尚未发布'))+'<div class="callout gap">一次人工答复不会自动成为产品通用知识；如需复用，转回产品事实核准流程。</div>')+'</div></div>';
+  }
+  function hint(r){function minutes(t){var a=t.split(':');return Number(a[0])*60+Number(a[1])}return app.rfqs.filter(function(x){return x.id!==r.id&&x.conversation===r.conversation&&x.model&&x.model===r.model&&Math.abs(minutes(x.time)-minutes(r.time))<=1440}).map(function(x){return x.id})}
+  function rfqs(){
+    var r=current(app.rfqs),c=find(app.conversations,r.conversation),h=hint(r);
+    var list=app.rfqs.map(function(x){return '<tr class="'+(x.id===r.id?'selected-row':'')+'"><td>'+go(x.id,'rfqs',x.id)+'</td><td>'+esc(x.model||'未选型号')+'</td><td>'+badge(x.status)+'</td><td>'+esc(x.gap)+'</td></tr>'}).join('');
+    return heading('07 / SALES DESK','RFQ 与跟进','一个会话一个线索负责人；每份 RFQ 独立保存状态、待补项和修订。',go('查看原会话','inquiries',c.id,'btn'))+
+      '<div class="grid cols-main">'+panel('共享 RFQ 队列','<div class="table-wrap"><table><thead><tr><th>编号</th><th>型号</th><th>状态</th><th>待补项</th></tr></thead><tbody>'+list+'</tbody></table></div><div class="guide">RFQ 是询价，不自动生成订单。编号分别对应独立采购请求。</div>')+
+      '<div class="stack">'+panel('当前 RFQ · '+esc(r.id),row('采购意图',esc(r.intent))+row('原会话',go(c.id,'inquiries',c.id))+row('当前型号',esc(r.model||'未选型'))+row('当前状态',badge(r.status))+row('待补项',esc(r.gap))+row('负责人',esc(c.owner||'共享队列'))+
+      row('买家联系信息',can('sales')?'演示：已确认一种可回复方式（不展示真实值）':'无权查看')+
+      '<div class="rule"></div><div class="actions">'+act('领取会话线索','claim','',can('sales')&&!c.owner,'需要销售权限且当前未分配')+act('标记已处理','rfq-complete','',can('sales')&&r.status!=='已处理')+act(c.stop?'恢复主动联系':'停止主动联系','toggle-contact','',can('sales'))+'</div>'+
+      '<div class="guide">停止主动联系与 RFQ 状态分开；已有 RFQ 及历史仍保留。</div>')+
+      panel('修订与分组',r.revisions.map(function(v,i){return '<div class="data-row"><small>'+esc(v.time)+' · 修订 '+i+'</small><strong>'+esc(v.text)+'</strong></div>'}).join('')+
+      '<div class="rule"></div><div class="callout">'+(h.length?'同一会话、24 小时内同型号可能相关：'+h.map(function(id){return go(id,'rfqs',id)}).join(' · '):'当前无同会话、24 小时内同型号的相似提示。')+' 提示不自动合并或拆分，也不跨会话按联系方式匹配。</div>'+
+      '<div class="actions gap">'+act('模拟买家在原请求补充型号 P-001','add-model','',can('sales')&&!r.model,'仅无型号 RFQ 可补充')+act('模拟买家纠正误选型号','correct-model','',can('sales')&&!!r.model,'需销售权限且当前已有型号')+act('模拟独立采购请求新建 RFQ','new-rfq','',can('sales'))+'</div><div class="guide">原请求补充或纠错沿用编号；独立采购请求才建新编号。这里模拟买家提出并确认的请求，不替买家自动判定。</div>')+'</div></div>';
+  }
+  function team(){
+    return heading('08 / ACCESS GOVERNANCE','成员与权限','共用系统框架，按岗位呈现任务；这里仅模拟权限效果。')+
+      panel('演示岗位','<div class="callout">右上角切换岗位：管理员、产品负责人、销售、工程师。无权操作保留可理解的只读上下文并解释原因；真实系统还需要服务端鉴权、企业隔离和审计。</div><div class="rule"></div>'+
+      row('产品负责人','核准事实、核对发布内容')+row('工程师','处理买家提交的人工请求')+row('销售','处理会话负责人、RFQ 状态和修订')+row('管理员','查看与操作本示例企业全部功能')+
+      '<div class="rule"></div><h3>本次演示的操作历史</h3><div class="audit">'+(app.audit.length?app.audit.map(function(a){return '<div class="data-row"><small>'+esc(a.time+' · '+a.type)+'</small><strong>'+esc(a.details)+'</strong></div>'}).join(''):'<div class="muted">尚无演示操作。</div>')+'</div>');
+  }
+  function v1(title,desc){return heading('09 / V1 CONNECTION',title+' '+badge('V1 规划'),desc)+
+    '<div class="empty"><strong>与现有 MVP 模块连接的位置</strong><p>'+(title==='企业模板'?'产品核准事实 → 企业模板草稿 → 预览 → 授权核准 → 页面版本。完整 DIY 编辑器留在 V1。':'会话、推荐、人工任务、RFQ 的可追溯事件 → 流程分析。指标须从真实数据计算，不在此线稿虚构转化率。')+'</p></div>'}
+  function render(){
+    document.getElementById('role').value=app.role;
+    document.getElementById('roleLabel').textContent=({admin:'示例管理员',product:'产品负责人',sales:'示例销售',engineer:'售前工程师'})[app.role];
+    document.getElementById('crumb').innerHTML='工作空间 / <b>'+esc(labels[app.page])+'</b>'+(app.id?' / '+esc(app.id):'');
+    document.title=labels[app.page]+'｜卖家系统线稿';
+    document.getElementById('main').innerHTML=({home:home,inquiries:inquiries,engineering:engineering,rfqs:rfqs,products:products,review:review,publication:publication,team:team,templates:function(){return v1('企业模板','平台基础模板、企业编辑和审批在 V1 接入产品知识线。')},analytics:function(){return v1('流程分析','V1 从既有业务事件计算指标。')}}[app.page])();
+  }
+  function action(name){
+    var p=current(app.products),r=current(app.rfqs),c=find(app.conversations,r.conversation),t=app.task;
+    if(name==='add-product'&&can('approve')){var id='P-'+String(app.products.length+1).padStart(3,'0');app.products.push({id:id,name:'新导入示例产品',version:1,pageVersion:0,published:false,previewed:false,approved:[],draft:[{key:'型号',value:'示例型号 C（演示）',source:'新上传示例文件 · 第 1 页'}],gaps:['技术参数','曲线']});audit('产品导入',id+' 抽取草稿待核');navigate('review',id);return}
+    if(name==='approve'&&can('approve')&&p.draft.length&&p.draft.every(function(f){return !/待核对|待人工核准/.test(f.value)})){p.approved=p.approved.concat(p.draft);p.draft=[];p.version++;p.previewed=false;audit('事实核准',p.id+' 事实版本 v'+p.version);toast('已核准草稿事实；发布前须重新核对内容')}
+    else if(name==='preview'&&can('publish')){p.previewed=true;audit('内容核对',p.id+' · 事实、出处与缺项');toast('已记录内容核对')}
+    else if(name==='publish'&&can('publish')&&p.previewed&&p.approved.length){p.pageVersion++;p.published=true;p.previewed=false;audit('页面发布',p.id+' 页面 v'+p.pageVersion);toast('已发布演示页面版本 v'+p.pageVersion)}
+    else if(name==='confirm-requirement'){var q=current(app.conversations);q.confirmed=true;q.recommendation='条件不足：需进一步核对流量、扬程、介质';q.messages.push({who:'系统事件',body:'买家确认了需求摘要；因关键参数缺失，尚无可靠推荐。'});audit('需求确认',q.id+' 仍有未知项');toast('需求已确认；当前条件不足，未推荐产品')}
+    else if(name==='task-ask'&&can('engineer')&&t.draft.trim()){t.status='待买家补充';find(app.conversations,t.conversation).messages.push({who:'售前工程师',body:t.draft.trim()});audit('人工追问',t.id+' → 原会话');t.draft='';toast('追问已回到原会话')}
+    else if(name==='task-buyer-reply'&&t.status==='待买家补充'){t.status='待工程师处理';find(app.conversations,t.conversation).messages.push({who:'买家',body:'补充：正在确认楼宇实际流量和扬程，稍后提供。'});audit('买家补充',t.id+' 保留原任务');toast('买家补充已记录；原任务继续处理')}
+    else if(name==='task-answer'&&can('engineer')&&t.draft.trim()){t.status='已答复';t.answer=t.draft.trim();find(app.conversations,t.conversation).messages.push({who:'售前工程师',body:t.answer});audit('工程答复',t.id+' → 原会话');t.draft='';toast('人工答复已显示在原会话')}
+    else if(name==='claim'&&can('sales')&&!c.owner){c.owner='示例销售';audit('线索领取',c.id+' · 一个会话一个负责人');toast('已领取会话线索')}
+    else if(name==='rfq-complete'&&can('sales')){r.status='已处理';audit('RFQ 状态',r.id+' → 已处理');toast(r.id+' 已标记处理')}
+    else if(name==='toggle-contact'&&can('sales')){c.stop=!c.stop;audit('主动联系',c.id+(c.stop?' · 已停止':' · 已恢复'));toast('主动联系状态已更新；RFQ 状态未变')}
+    else if(name==='add-model'&&can('sales')&&!r.model){r.model='P-001';r.gap='流量、扬程待补';r.revisions.push({text:'原采购请求补充型号 P-001；编号不变',time:'现在'});audit('买家 RFQ 修订模拟',r.id+' 补充型号');toast('已在原 RFQ 补充型号')}
+    else if(name==='correct-model'&&can('sales')&&r.model){var old=r.model;r.model=old==='P-001'?'P-002':'P-001';r.revisions.push({text:'原采购请求纠正误选型号：'+old+' → '+r.model+'；编号不变',time:'现在'});audit('买家 RFQ 修订模拟',r.id+' 更正型号');toast('已更正型号，RFQ 编号不变')}
+    else if(name==='new-rfq'&&can('sales')){var id='RFQ-'+(1100+app.rfqs.length);app.rfqs.push({id:id,conversation:r.conversation,model:r.model,status:'待核实',gap:'采购条件待确认',time:'10:50',intent:'买家另起的独立采购请求（演示）',revisions:[{text:'独立采购请求初次提交，联系方式已确认',time:'现在'}]});audit('新 RFQ',id+' · 同一会话 '+r.conversation);navigate('rfqs',id);toast('已建立独立 RFQ；原编号仍保留');return}
+    render();
+  }
+  document.addEventListener('click',function(e){var b=e.target.closest('[data-page]');if(b){navigate(b.dataset.page,b.dataset.id);return}var a=e.target.closest('[data-action]');if(a&&!a.disabled){action(a.dataset.action);return}if(e.target===document.getElementById('overlay'))document.getElementById('overlay').classList.remove('open')});
+  document.addEventListener('input',function(e){if(e.target.id==='answer'){app.task.draft=e.target.value;document.querySelectorAll('[data-action="task-ask"],[data-action="task-answer"]').forEach(function(x){x.disabled=!can('engineer')||!app.task.draft.trim()||app.task.status==='已答复'})}});
+  document.getElementById('role').addEventListener('change',function(){app.role=this.value;render()});
+  document.getElementById('menu').addEventListener('click',function(){document.getElementById('sidebar').classList.toggle('open')});
+  var overlay=document.getElementById('overlay'),input=document.getElementById('commandInput'),list=document.getElementById('commandList');
+  function commands(q){var items=Object.keys(labels).map(function(k){return {label:labels[k],page:k}}).concat(app.products.map(function(x){return {label:x.id+' · '+x.name,page:'review',id:x.id}}),app.conversations.map(function(x){return {label:x.id+' · '+x.title,page:'inquiries',id:x.id}}),[{label:'T-204 · 工程任务',page:'engineering',id:'T-204'}],app.rfqs.map(function(x){return {label:x.id+' · '+x.intent,page:'rfqs',id:x.id}}));list.innerHTML=items.filter(function(x){return !q||x.label.toLowerCase().includes(q.toLowerCase())}).map(function(x){return '<button data-page="'+x.page+'"'+(x.id?' data-id="'+x.id+'"':'')+'>'+esc(x.label)+'</button>'}).join('')||'<div class="note" style="padding:12px">没有匹配对象</div>'}
+  function open(){input.value='';commands('');overlay.classList.add('open');input.focus()}
+  document.getElementById('search').addEventListener('click',open);input.addEventListener('input',function(){commands(this.value)});
+  document.addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();open()}if(e.key==='Escape'){overlay.classList.remove('open');document.getElementById('sidebar').classList.remove('open')}});
+  window.addEventListener('hashchange',function(){var a=location.hash.slice(1).split('/');navigate(a[0],a[1],false)});
+  var start=location.hash.slice(1).split('/');navigate(start[0]||'home',start[1],false);
+}());
 </script>
 </body>
 </html>
