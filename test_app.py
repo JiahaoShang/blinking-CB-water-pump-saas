@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import Database, Handler, answer_from_approved_material, confirm_requirement_values, extract_requirement_values, match_products
+from app import Database, Handler, answer_from_approved_material, confirm_requirement_values, extract_requirement_values, layout, match_products
 
 
 class ProductApprovalTests(unittest.TestCase):
@@ -292,6 +292,13 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(session_user["email"], "demo-sales@example.invalid")
         self.db.delete_session(session_id)
         self.assertIsNone(self.db.get_session_user(session_id))
+
+
+class BrandingTests(unittest.TestCase):
+    def test_layout_uses_growave_brand(self):
+        page = layout("管理概览", "<p>content</p>")
+        self.assertIn("Growave", page)
+        self.assertNotIn("CB Water Pump SaaS", page)
 
 
 if __name__ == "__main__":
