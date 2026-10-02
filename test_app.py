@@ -261,5 +261,30 @@ class SalesWorkspaceTests(unittest.TestCase):
         self.assertEqual(len(self.db.list_sales_records("demo-tenant")), 1)
 
 
+class AuthTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.temp_dir.name) / "app.db")
+
+    def tearDown(self):
+        self.db.conn.close()
+        self.temp_dir.cleanup()
+
+    def test_demo_roles_authenticate_and_session_keeps_tenant_context(self):
+        admin = self.db.authenticate_user("demo-admin@example.invalid", "demo-admin")
+        sales = self.db.authenticate_user("demo-sales@example.invalid", "demo-sales")
+        engineer = self.db.authenticate_user("demo-engineer@example.invalid", "demo-engineer")
+        self.assertEqual(admin["role"], "admin")
+        self.assertEqual(sales["role"], "sales")
+        self.assertEqual(engineer["role"], "engineer")
+        self.assertIsNone(self.db.authenticate_user("demo-sales@example.invalid", "wrong-password"))
+        session_id = self.db.create_session(sales)
+        session_user = self.db.get_session_user(session_id)
+        self.assertEqual(session_user["tenant_id"], "demo-tenant")
+        self.assertEqual(session_user["email"], "demo-sales@example.invalid")
+        self.db.delete_session(session_id)
+        self.assertIsNone(self.db.get_session_user(session_id))
+
+
 if __name__ == "__main__":
     unittest.main()

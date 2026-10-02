@@ -24,7 +24,7 @@ M3/M4 当前使用标明为 `pump-demo-v1` 的确定性演示规则：只读取�
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
 ```
 
-当前登录和企业成员权限仍是下一切片前必须补齐的开发项；本地演示固定使用 `demo-tenant`，不能视为生产级租户隔离或身份认证。
+后台现在有本地演示登录和角色权限：`demo-admin@example.invalid`、`demo-sales@example.invalid`、`demo-engineer@example.invalid`，密码分别与账号前缀 `demo-admin`、`demo-sales`、`demo-engineer` 相同。登录会话保存到 SQLite，企业上下文从会话读取；这些账号和密码只适合本地演示，不能视为生产身份系统。生产部署前仍需接入正式身份、密钥管理、密码策略和多企业账号管理。
 
 ## 文档
 

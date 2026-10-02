@@ -19,6 +19,7 @@ import re
 import secrets
 import sqlite3
 import tempfile
+import hmac
 from datetime import datetime, timezone
 from email.parser import BytesParser
 from email.policy import default
@@ -91,6 +92,23 @@ class Database:
             CREATE TABLE IF NOT EXISTS tenants (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                email TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                role TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                expires_at TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS products (
@@ -271,6 +289,7 @@ class Database:
             "INSERT OR IGNORE INTO tenants(id, name, created_at) VALUES (?, ?, ?)",
             ("demo-tenant", "示例水泵企业（演示）", now_iso()),
         )
+        self.seed_demo_users()
         self.conn.commit()
 
     def _audit(self, tenant_id: str, entity_type: str, entity_id: str, action: str, actor: str, details: str = "") -> None:
@@ -286,6 +305,64 @@ class Database:
             (tenant_id, name or tenant_id, now_iso()),
         )
         self.conn.commit()
+
+    @staticmethod
+    def password_hash(password: str, salt: bytes | None = None) -> str:
+        salt = salt or secrets.token_bytes(16)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120_000)
+        return f"pbkdf2_sha256$120000${salt.hex()}${digest.hex()}"
+
+    @staticmethod
+    def verify_password(password: str, encoded: str) -> bool:
+        try:
+            algorithm, rounds, salt_hex, digest_hex = encoded.split("$", 3)
+            if algorithm != "pbkdf2_sha256":
+                return False
+            digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(rounds))
+            return hmac.compare_digest(digest.hex(), digest_hex)
+        except (ValueError, TypeError):
+            return False
+
+    def seed_demo_users(self) -> None:
+        users = [
+            ("demo-admin@example.invalid", "演示管理员", "admin", "demo-admin"),
+            ("demo-sales@example.invalid", "演示销售", "sales", "demo-sales"),
+            ("demo-engineer@example.invalid", "演示工程师", "engineer", "demo-engineer"),
+        ]
+        for email, display_name, role, password in users:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO users(id, tenant_id, email, display_name, role, password_hash, active, created_at) VALUES (?, 'demo-tenant', ?, ?, ?, ?, 1, ?)",
+                (secrets.token_hex(12), email, display_name, role, self.password_hash(password), now_iso()),
+            )
+
+    def authenticate_user(self, email: str, password: str) -> sqlite3.Row | None:
+        user = self.conn.execute("SELECT * FROM users WHERE lower(email)=lower(?) AND active=1", (email.strip(),)).fetchone()
+        if not user or not self.verify_password(password, user["password_hash"]):
+            return None
+        return user
+
+    def create_session(self, user: sqlite3.Row, hours: int = 12) -> str:
+        session_id = secrets.token_urlsafe(32)
+        expires_at = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() + hours * 3600, timezone.utc).replace(microsecond=0).isoformat()
+        self.conn.execute(
+            "INSERT INTO sessions(id, user_id, tenant_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+            (session_id, user["id"], user["tenant_id"], expires_at, now_iso()),
+        )
+        self.conn.commit()
+        return session_id
+
+    def get_session_user(self, session_id: str | None) -> sqlite3.Row | None:
+        if not session_id:
+            return None
+        return self.conn.execute(
+            "SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=? AND s.expires_at>? AND u.active=1",
+            (session_id, now_iso()),
+        ).fetchone()
+
+    def delete_session(self, session_id: str | None) -> None:
+        if session_id:
+            self.conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+            self.conn.commit()
 
     def list_products(self, tenant_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -1069,10 +1146,43 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
-    def redirect(self, location: str) -> None:
+    def redirect(self, location: str, cookie: str | None = None) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", location)
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
         self.end_headers()
+
+    def cookie_value(self, name: str) -> str | None:
+        raw = self.headers.get("Cookie", "")
+        for part in raw.split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == name:
+                return value
+        return None
+
+    def current_user(self) -> sqlite3.Row | None:
+        return self.db.get_session_user(self.cookie_value("cb_session"))
+
+    def authorize_admin(self, path: str, method: str) -> bool:
+        user = self.current_user()
+        if not user:
+            self.redirect("/login?next=" + quote(path, safe="/"))
+            return False
+        self.tenant_id = user["tenant_id"]
+        self.actor = user["email"]
+        if path.startswith("/admin/products"):
+            allowed = {"admin"}
+        elif path.startswith("/admin/tasks"):
+            allowed = {"admin", "engineer"}
+        elif path.startswith("/admin/sales") or path.startswith("/admin/rfqs"):
+            allowed = {"admin", "sales", "engineer"}
+        else:
+            allowed = set()
+        if user["role"] not in allowed:
+            self.send_html(layout("无权限", "<div class='error'>当前账号没有访问此管理功能的权限。</div><p><a href='/login'>切换账号</a></p>"), 403)
+            return False
+        return True
 
     def send_html(self, content: str, status: int = 200) -> None:
         data = content.encode("utf-8")
@@ -1090,12 +1200,43 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
+    def login_page(self, query: dict[str, list[str]], error: str = "") -> None:
+        next_path = query.get("next", ["/admin/sales"])[0]
+        error_html = f"<div class='error'>{esc(error)}</div>" if error else ""
+        body = f"""
+<div style='max-width:520px;margin:70px auto'><section class='card'><h1>企业后台登录</h1><p class='muted'>登录后只能访问当前账号所属企业的数据。买方公开页面不需要后台账号。</p>{error_html}<form method='post' action='/login'><input type='hidden' name='next' value='{esc(next_path)}'><label>邮箱</label><input name='email' type='email' autocomplete='username' required placeholder='demo-sales@example.invalid'><label>密码</label><input name='password' type='password' autocomplete='current-password' required><p><button>登录</button></p></form><div class='footer-note'>本地演示账号：管理员 `demo-admin`、销售 `demo-sales`、工程师 `demo-engineer`，密码与账号相同。仅用于本地演示，不能用于生产。</div></section></div>
+"""
+        self.send_html(layout("企业后台登录", body), 200)
+
+    def login_post(self, form: dict[str, str | bytes]) -> None:
+        user = self.db.authenticate_user(str(form.get("email", "")), str(form.get("password", "")))
+        if not user:
+            self.login_page({"next": [str(form.get("next", "/admin/sales"))]}, "邮箱或密码不正确")
+            return
+        next_path = str(form.get("next", "/admin/sales"))
+        if not next_path.startswith("/") or next_path.startswith("//"):
+            next_path = "/admin/sales"
+        session_id = self.db.create_session(user)
+        self.redirect(next_path, f"cb_session={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200")
+
+    def logout(self) -> None:
+        self.db.delete_session(self.cookie_value("cb_session"))
+        self.redirect("/login", "cb_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         query = parse_qs(parsed.query)
+        if path == "/login":
+            self.login_page(query)
+            return
+        if path == "/logout":
+            self.logout()
+            return
         if path == "/":
             self.redirect("/admin/products")
+            return
+        if path.startswith("/admin/") and not self.authorize_admin(path, "GET"):
             return
         if path == "/admin/products":
             self.admin_products(query)
@@ -1149,6 +1290,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
+        if path == "/login":
+            self.login_post(parse_multipart(self))
+            return
+        if path == "/logout":
+            self.logout()
+            return
+        if path.startswith("/admin/") and not self.authorize_admin(path, "POST"):
+            return
         try:
             form = parse_multipart(self)
             if path == "/admin/products":
