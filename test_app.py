@@ -293,6 +293,30 @@ class AuthTests(unittest.TestCase):
         self.db.delete_session(session_id)
         self.assertIsNone(self.db.get_session_user(session_id))
 
+    def test_admin_can_create_and_deactivate_member_with_tenant_scope(self):
+        user_id = self.db.create_user(
+            "demo-tenant",
+            "new-sales@example.invalid",
+            "New Sales",
+            "sales",
+            "strong-pass",
+            "demo-admin@example.invalid",
+        )
+        created = self.db.authenticate_user("new-sales@example.invalid", "strong-pass")
+        self.assertEqual(created["id"], user_id)
+        session_id = self.db.create_session(created)
+        self.db.set_user_active("demo-tenant", user_id, False, "demo-admin@example.invalid")
+        self.assertIsNone(self.db.authenticate_user("new-sales@example.invalid", "strong-pass"))
+        self.assertIsNone(self.db.get_session_user(session_id))
+        self.db.ensure_tenant("other-tenant")
+        self.assertEqual(len(self.db.list_users("other-tenant")), 0)
+
+    def test_member_password_and_role_are_validated(self):
+        with self.assertRaises(ValueError):
+            self.db.create_user("demo-tenant", "short@example.invalid", "Short", "sales", "short", "demo-admin")
+        with self.assertRaises(ValueError):
+            self.db.create_user("demo-tenant", "bad-role@example.invalid", "Bad role", "buyer", "long-pass", "demo-admin")
+
 
 class BrandingTests(unittest.TestCase):
     def test_layout_uses_growave_brand(self):

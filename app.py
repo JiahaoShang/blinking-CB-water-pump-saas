@@ -341,6 +341,63 @@ class Database:
             return None
         return user
 
+    def list_users(self, tenant_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT id, tenant_id, email, display_name, role, active, created_at "
+            "FROM users WHERE tenant_id=? ORDER BY active DESC, created_at, email",
+            (tenant_id,),
+        ).fetchall()
+
+    def create_user(
+        self,
+        tenant_id: str,
+        email: str,
+        display_name: str,
+        role: str,
+        password: str,
+        actor: str,
+    ) -> str:
+        email = email.strip().lower()
+        display_name = display_name.strip()
+        if not email or "@" not in email:
+            raise ValueError("请输入有效邮箱")
+        if not display_name:
+            raise ValueError("姓名不能为空")
+        if role not in {"admin", "sales", "engineer"}:
+            raise ValueError("不支持的账号角色")
+        if len(password) < 8:
+            raise ValueError("密码至少需要 8 位")
+        user_id = secrets.token_hex(12)
+        try:
+            self.conn.execute(
+                "INSERT INTO users(id, tenant_id, email, display_name, role, password_hash, active, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+                (user_id, tenant_id, email, display_name, role, self.password_hash(password), now_iso()),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("该邮箱已经存在") from exc
+        self._audit(tenant_id, "user", user_id, "created", actor, f"email={email};role={role}")
+        self.conn.commit()
+        return user_id
+
+    def set_user_active(self, tenant_id: str, user_id: str, active: bool, actor: str) -> None:
+        user = self.conn.execute(
+            "SELECT id, email, active FROM users WHERE tenant_id=? AND id=?",
+            (tenant_id, user_id),
+        ).fetchone()
+        if not user:
+            raise ValueError("账号不存在")
+        if bool(user["active"]) == active:
+            return
+        self.conn.execute(
+            "UPDATE users SET active=? WHERE tenant_id=? AND id=?",
+            (1 if active else 0, tenant_id, user_id),
+        )
+        if not active:
+            self.conn.execute("DELETE FROM sessions WHERE tenant_id=? AND user_id=?", (tenant_id, user_id))
+        self._audit(tenant_id, "user", user_id, "activated" if active else "deactivated", actor, user["email"])
+        self.conn.commit()
+
     def create_session(self, user: sqlite3.Row, hours: int = 12) -> str:
         session_id = secrets.token_urlsafe(32)
         expires_at = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() + hours * 3600, timezone.utc).replace(microsecond=0).isoformat()
@@ -1187,6 +1244,7 @@ class Handler(BaseHTTPRequestHandler):
     tenant_id = "demo-tenant"
     actor = "demo-admin"
     user_role = "admin"
+    user_id = ""
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -1217,8 +1275,11 @@ class Handler(BaseHTTPRequestHandler):
         self.tenant_id = user["tenant_id"]
         self.actor = user["email"]
         self.user_role = user["role"]
+        self.user_id = user["id"]
         if path == "/admin":
             allowed = {"admin", "sales", "engineer"}
+        elif path.startswith("/admin/users"):
+            allowed = {"admin"}
         elif path.startswith("/admin/products"):
             allowed = {"admin"}
         elif path.startswith("/admin/tasks"):
@@ -1289,6 +1350,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin":
             self.admin_dashboard(query)
             return
+        if path == "/admin/users":
+            self.admin_users(query)
+            return
         if path == "/admin/products":
             self.admin_products(query)
             return
@@ -1358,6 +1422,17 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/admin/products/seed":
                 self.db.seed_demo_products(self.tenant_id, self.actor)
                 self.redirect("/admin/products?notice=demo")
+                return
+            if path == "/admin/users":
+                self.db.create_user(
+                    self.tenant_id,
+                    str(form.get("email", "")),
+                    str(form.get("display_name", "")),
+                    str(form.get("role", "sales")),
+                    str(form.get("password", "")),
+                    self.actor,
+                )
+                self.redirect("/admin/users?notice=created")
                 return
             match = re.fullmatch(r"/inquiry/([a-f0-9]+)/message", path)
             if match:
@@ -1456,6 +1531,20 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 self.db.update_lead(self.tenant_id, match.group(1), str(form.get("stage", "new")), str(form.get("owner", "")), str(form.get("next_follow_up", "")), str(form.get("note", "")), self.actor)
                 self.redirect(f"/admin/sales/{match.group(1)}?notice=updated")
+                return
+            match = re.fullmatch(r"/admin/users/([a-f0-9]+)/toggle", path)
+            if match:
+                user_id = match.group(1)
+                if user_id == self.user_id:
+                    raise ValueError("不能停用当前登录账号")
+                target = self.db.conn.execute(
+                    "SELECT active FROM users WHERE tenant_id=? AND id=?",
+                    (self.tenant_id, user_id),
+                ).fetchone()
+                if not target:
+                    raise ValueError("账号不存在")
+                self.db.set_user_active(self.tenant_id, user_id, not bool(target["active"]), self.actor)
+                self.redirect("/admin/users?notice=updated")
                 return
             match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources", path)
             if match:
@@ -1655,6 +1744,7 @@ class Handler(BaseHTTPRequestHandler):
             quick_links.append(("/admin/tasks?status=pending", "处理人工任务", "回复资料外问题并保留当前会话上下文"))
         if self.user_role == "admin":
             quick_links.append(("/admin/products", "维护产品资料", "核准字段、发布版本或撤回公开页"))
+            quick_links.append(("/admin/users", "管理成员账号", "创建销售/工程师账号并控制后台访问"))
         quick_html = "".join(f"<a class='card action-card' href='{href}'><h2>{title}</h2><p class='muted'>{description}</p></a>" for href, title, description in quick_links)
         pending_tasks = self.db.list_human_tasks(self.tenant_id, "pending")[:5]
         task_rows = "".join(
@@ -1675,6 +1765,36 @@ class Handler(BaseHTTPRequestHandler):
 <div class='footer-note'>概览只读取当前登录账号所属企业的数据；具体修改仍需进入对应模块，并按角色权限执行。</div>
 """
         self.send_html(layout("管理概览", body), 200)
+
+    def admin_users(self, query: dict[str, list[str]]) -> None:
+        role_labels = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}
+        users = self.db.list_users(self.tenant_id)
+        rows = []
+        for user in users:
+            active = bool(user["active"])
+            status = "启用" if active else "已停用"
+            action = "停用" if active else "重新启用"
+            action_html = (
+                "<span class='muted'>当前账号</span>"
+                if user["id"] == self.user_id
+                else f"<form method='post' action='/admin/users/{esc(user['id'])}/toggle' class='inline'><button class='{'danger' if active else 'secondary'}'>{action}</button></form>"
+            )
+            rows.append(
+                f"<tr><td><b>{esc(user['display_name'])}</b><br><span class='muted'>{esc(user['email'])}</span></td>"
+                f"<td>{esc(role_labels.get(user['role'], user['role']))}</td><td><span class='badge {'approved' if active else 'withdrawn'}'>{status}</span></td>"
+                f"<td>{esc(user['created_at'])}</td><td>{action_html}</td></tr>"
+            )
+        notice = {
+            "created": "<div class='notice'>成员账号已创建，可以使用新邮箱和密码登录。</div>",
+            "updated": "<div class='notice'>成员账号状态已更新；停用账号的现有会话已失效。</div>",
+        }.get(query.get("notice", [""])[0], "")
+        body = f"""
+<div class='toolbar'><div><h1>成员管理</h1><div class='muted'>管理当前企业的后台账号和最小角色权限。</div></div><a class='button secondary' href='/admin'>返回管理概览</a></div>
+{notice}
+<div class='grid'><section class='card'><h2>创建成员账号</h2><p class='muted'>密码只在创建时使用，不会在后台列表显示。生产环境应接入正式身份提供商。</p><form method='post' action='/admin/users'><label>姓名 *</label><input name='display_name' required placeholder='例如 Alex Chen'><label>邮箱 *</label><input name='email' type='email' required placeholder='alex@example.com'><label>角色 *</label><select name='role'><option value='sales'>销售</option><option value='engineer'>工程师</option><option value='admin'>管理员</option></select><label>初始密码 *</label><input name='password' type='password' minlength='8' required placeholder='至少 8 位'><p><button>创建账号</button></p></form></section><section class='card'><h2>角色说明</h2><p><b>管理员：</b>产品管理、成员管理、人工任务、RFQ 和销售工作台。</p><p><b>销售：</b>RFQ 和销售工作台。</p><p><b>工程师：</b>人工任务、RFQ 和销售工作台。</p><p class='footer-note'>账号属于当前企业；停用后不能继续登录，也不会改变历史 RFQ、任务或操作记录。</p></section></div>
+<section class='card' style='margin-top:18px'><h2>当前成员</h2><table><thead><tr><th>成员</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{''.join(rows) or "<tr><td colspan='5' class='muted'>暂无成员。</td></tr>"}</tbody></table></section>
+"""
+        self.send_html(layout("成员管理", body), 200)
 
     def admin_tasks(self, query: dict[str, list[str]]) -> None:
         tasks = self.db.list_human_tasks(self.tenant_id, query.get("status", [""])[0] or None)
