@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "data" / "app.db"
 UPLOAD_DIR = ROOT / "data" / "uploads"
 DEMO_SEED_FILE = ROOT / "fixtures" / "demo_seed.json"
+LOWARA_SEED_FILE = ROOT / "fixtures" / "lowara_demo_seed.json"
 REQUIRED_FIELDS = ("flow_range", "head_range", "media", "material")
 MATCH_REQUIRED_FIELDS = ("flow", "head", "media")
 REQUIREMENT_LABELS = {
@@ -53,6 +54,7 @@ FIELD_LABELS = {
     "material": "材质",
     "power": "功率",
     "temperature": "介质温度",
+    "performance_points": "性能曲线目录点",
 }
 
 
@@ -700,7 +702,7 @@ class Database:
         if selected_product_id:
             selected_result = next((result for result in recommendation_results if result.get("product_id") == selected_product_id), None)
         if not selected_result:
-            selected_result = next((result for result in recommendation_results if result.get("status") == "candidate"), None)
+            selected_result = next((result for result in recommendation_results if result.get("status") in {"candidate", "needs_confirmation"}), None)
         product_id = selected_result.get("product_id") if selected_result else None
         product_version_id = selected_result.get("product_version_id") if selected_result else None
         missing = []
@@ -1070,6 +1072,55 @@ class Database:
                 created_tasks += 1
         return {"products": len(self.list_products(tenant_id)), "rfqs": created_rfqs, "tasks": created_tasks}
 
+    def seed_lowara_workspace(self, tenant_id: str, actor: str = "demo-admin") -> dict[str, int]:
+        """Load the user-provided Lowara research as an internal demo product.
+
+        Only structured facts and source metadata are tracked in Git. The source
+        PDFs/CAD files remain in the user's research folder because redistribution
+        permission has not been confirmed.
+        """
+        if not LOWARA_SEED_FILE.is_file():
+            raise ValueError("项目缺少 fixtures/lowara_demo_seed.json")
+        fixture = json.loads(LOWARA_SEED_FILE.read_text(encoding="utf-8"))
+        created = 0
+        for item in fixture.get("products", []):
+            model = item["model"]
+            existing = self.conn.execute(
+                "SELECT id FROM products WHERE tenant_id=? AND model=?", (tenant_id, model)
+            ).fetchone()
+            if existing:
+                continue
+            product_id = self.create_product(tenant_id, model, item["name"], item["use_case"], actor)
+            source_ids = []
+            for source in item.get("sources", []):
+                source_ids.append(
+                    self.add_source(
+                        tenant_id,
+                        product_id,
+                        source["filename"],
+                        source.get("file_type", "OTHER"),
+                        source["source_location"],
+                        actor=actor,
+                    )
+                )
+            if not source_ids:
+                raise ValueError(f"Lowara {model} 缺少来源资料")
+            for field_key, field in item.get("fields", {}).items():
+                self.save_field(
+                    tenant_id,
+                    product_id,
+                    field_key,
+                    field["value"],
+                    field.get("unit", ""),
+                    source_ids[field.get("source_index", 0)],
+                    field["source_location"],
+                    actor,
+                )
+            self.approve_product(tenant_id, product_id, actor)
+            self.publish_product(tenant_id, product_id, actor)
+            created += 1
+        return {"products": created}
+
 
 def number_from_text(value: str) -> float | None:
     match = re.search(r"-?\d+(?:[.,]\d+)?", value or "")
@@ -1087,6 +1138,26 @@ def range_from_text(value: str) -> tuple[float, float] | None:
     if first is None or second is None:
         return None
     return (min(first, second), max(first, second))
+
+
+def performance_points_from_text(value: str) -> list[tuple[float, float]]:
+    """Parse `flow:head` pairs recorded from a published catalogue table."""
+    points = []
+    for flow, head in re.findall(r"(-?\d+(?:[.,]\d+)?)\s*:\s*(-?\d+(?:[.,]\d+)?)", value or ""):
+        points.append((float(flow.replace(",", ".")), float(head.replace(",", "."))))
+    return sorted(points)
+
+
+def curve_head_at_flow(points: list[tuple[float, float]], flow: float) -> float | None:
+    if not points or flow < points[0][0] or flow > points[-1][0]:
+        return None
+    for (left_flow, left_head), (right_flow, right_head) in zip(points, points[1:]):
+        if left_flow <= flow <= right_flow:
+            if right_flow == left_flow:
+                return max(left_head, right_head)
+            ratio = (flow - left_flow) / (right_flow - left_flow)
+            return left_head + ratio * (right_head - left_head)
+    return points[-1][1]
 
 
 def field_value(values: dict[str, dict[str, str]], key: str) -> str:
@@ -1165,15 +1236,31 @@ def match_products(db: Database, tenant_id: str, values: dict[str, dict[str, str
         conflicts: list[str] = []
         unknown: list[str] = []
 
-        for requirement_key, product_key, label, unit in (("flow", "flow_range", "流量", "m³/h"), ("head", "head_range", "扬程", "m")):
-            required_number = requirements[requirement_key]
-            product_range = range_from_text(product_fields.get(product_key, {}).get("value", ""))
-            if required_number is None or product_range is None:
-                unknown.append(f"{label}规则无法解析")
-            elif product_range[0] <= required_number <= product_range[1]:
-                satisfies.append(f"{label} {required_number:g}{unit} 在产品范围内")
+        performance_points = performance_points_from_text(product_fields.get("performance_points", {}).get("value", ""))
+        if performance_points:
+            required_flow = requirements["flow"]
+            required_head = requirements["head"]
+            curve_head = curve_head_at_flow(performance_points, required_flow) if required_flow is not None else None
+            if curve_head is None:
+                conflicts.append("流量超出该型号目录性能点范围")
+            elif required_head is None:
+                unknown.append("扬程无法与目录性能曲线核对")
+            elif required_head <= curve_head:
+                satisfies.append(f"流量 {required_flow:g}m³/h 位于目录性能点范围")
+                satisfies.append(f"扬程 {required_head:g}m 不高于该流量目录曲线值约 {curve_head:g}m")
+                unknown.append("最终工作点仍需工程师按曲线和系统工况确认")
             else:
-                conflicts.append(f"{label} {required_number:g}{unit} 超出产品范围")
+                conflicts.append(f"扬程 {required_head:g}m 高于该流量目录曲线值约 {curve_head:g}m")
+        else:
+            for requirement_key, product_key, label, unit in (("flow", "flow_range", "流量", "m³/h"), ("head", "head_range", "扬程", "m")):
+                required_number = requirements[requirement_key]
+                product_range = range_from_text(product_fields.get(product_key, {}).get("value", ""))
+                if required_number is None or product_range is None:
+                    unknown.append(f"{label}规则无法解析")
+                elif product_range[0] <= required_number <= product_range[1]:
+                    satisfies.append(f"{label} {required_number:g}{unit} 在产品范围内")
+                else:
+                    conflicts.append(f"{label} {required_number:g}{unit} 超出产品范围")
 
         product_media = product_fields.get("media", {}).get("value", "").lower()
         if "清水" in requirement_media or "water" in requirement_media:
@@ -1198,7 +1285,7 @@ def match_products(db: Database, tenant_id: str, values: dict[str, dict[str, str
             else:
                 conflicts.append(f"介质温度 {requirements['temperature']:g}°C 超出资料范围")
 
-        candidate_status = "candidate" if not conflicts else "conflict"
+        candidate_status = "candidate" if not conflicts and not unknown else "needs_confirmation" if not conflicts else "conflict"
         results.append({
             "product_id": row["id"],
             "model": row["model"],
@@ -1210,8 +1297,13 @@ def match_products(db: Database, tenant_id: str, values: dict[str, dict[str, str
             "conflicts": conflicts,
             "unknown": unknown,
         })
-    results.sort(key=lambda item: (0 if item["status"] == "candidate" else 1, item["model"]))
-    status = "recommended" if any(item["status"] == "candidate" for item in results) else "no_match"
+    results.sort(key=lambda item: (0 if item["status"] == "candidate" else 1 if item["status"] == "needs_confirmation" else 2, item["model"]))
+    if any(item["status"] == "candidate" for item in results):
+        status = "recommended"
+    elif any(item["status"] == "needs_confirmation" for item in results):
+        status = "needs_confirmation"
+    else:
+        status = "no_match"
     return status, results, []
 
 
@@ -1223,7 +1315,7 @@ def answer_from_approved_material(
 ) -> tuple[str, str, str | None, str | None, list[dict[str, str]], str]:
     """Answer only from the selected published snapshot; otherwise hand off."""
     question_lower = question.lower()
-    forbidden = ("price", "cost", "quote", "price", "价格", "报价", "库存", "stock", "delivery", "交期", "认证", "certificate", "certification")
+    forbidden = ("price", "cost", "quote", "price", "价格", "报价", "库存", "stock", "delivery", "lead time", "shipping", "交期", "交货", "到货", "认证", "certificate", "certification")
     if any(token in question_lower for token in forbidden):
         return "needs_human", "这个问题涉及价格、库存、交期或认证等资料外信息，当前无法从核准产品资料确认。我们已把问题转给工程师。", product_id, None, [], "资料不包含商业承诺或认证判断"
 
@@ -1241,6 +1333,7 @@ def answer_from_approved_material(
         (("material", "材质", "材料"), "material", "该型号的材质是：{value}{unit}。"),
         (("power", "功率"), "power", "该型号的功率是 {value}{unit}。"),
         (("temperature", "温度", "temperature"), "temperature", "资料标注的介质温度范围是 {value}{unit}。"),
+        (("性能", "曲线", "performance", "catalogue"), "performance_points", "资料中的目录性能点（流量:扬程）是：{value}{unit}。最终工作点需工程师确认。"),
     ]
     selected_key = None
     template = ""
@@ -1497,6 +1590,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.db.seed_demo_products(self.tenant_id, self.actor)
                 self.redirect("/admin/products?notice=demo")
                 return
+            if path == "/admin/products/seed-lowara":
+                summary = self.db.seed_lowara_workspace(self.tenant_id, self.actor)
+                self.redirect(f"/admin/products?notice=lowara&created={summary['products']}")
+                return
             if path == "/admin/users":
                 self.db.create_user(
                     self.tenant_id,
@@ -1511,6 +1608,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/admin/demo/seed":
                 summary = self.db.seed_demo_workspace(self.tenant_id, self.actor)
                 self.redirect(f"/admin?notice=demo&rfqs={summary['rfqs']}&tasks={summary['tasks']}")
+                return
+            if path == "/admin/lowara/seed":
+                summary = self.db.seed_lowara_workspace(self.tenant_id, self.actor)
+                self.redirect(f"/admin?notice=lowara&products={summary['products']}")
                 return
             match = re.fullmatch(r"/inquiry/([a-f0-9]+)/message", path)
             if match:
@@ -1573,7 +1674,7 @@ class Handler(BaseHTTPRequestHandler):
                     if selected_product_id:
                         result_for_product = next((result for result in recommendation_results if result.get("product_id") == selected_product_id), None)
                     if not result_for_product:
-                        result_for_product = next((result for result in recommendation_results if result.get("status") == "candidate"), None)
+                        result_for_product = next((result for result in recommendation_results if result.get("status") in {"candidate", "needs_confirmation"}), None)
                     selected_product_id = (result_for_product or {}).get("product_id") or selected_product_id
                 answer_status, answer_text, answered_product_id, product_version_id, citations, reason = answer_from_approved_material(self.db, self.tenant_id, question, selected_product_id)
                 self.db.save_message(self.tenant_id, conversation_id, "assistant", answer_text, "grounded-answer" if answer_status == "grounded" else "human-handoff")
@@ -1659,6 +1760,8 @@ class Handler(BaseHTTPRequestHandler):
         products = self.db.list_products(self.tenant_id)
         notice = query.get("notice", [""])[0]
         notice_html = "<div class='notice'>示例资料已登记为候选值，请逐个核对后核准，再发布到买方产品页。</div>" if notice == "demo" else ""
+        if notice == "lowara":
+            notice_html = f"<div class='notice'>Lowara 资料已加载：新增 {esc(query.get('created', ['0'])[0])} 个内部演示型号。来源文件只登记元数据，外部再发布授权仍待确认。</div>"
         row_parts = []
         for product in products:
             public_link = (
@@ -1673,11 +1776,11 @@ class Handler(BaseHTTPRequestHandler):
             )
         rows = "".join(row_parts) or "<tr><td colspan='4' class='muted'>还没有产品，请先导入示例或新建型号。</td></tr>"
         body = f"""
-<div class='toolbar'><div><h1>{'产品资料与发布' if lang == 'zh' else 'Products & publishing'}</h1><div class='muted'>企业：示例水泵企业（演示） · 当前操作员：管理员</div></div><form method='post' action='/admin/products/seed' class='inline'><button class='secondary'>导入两款示例水泵</button></form></div>
+<div class='toolbar'><div><h1>{'产品资料与发布' if lang == 'zh' else 'Products & publishing'}</h1><div class='muted'>企业：示例水泵企业（演示） · 当前操作员：管理员</div></div><div><form method='post' action='/admin/products/seed' class='inline'><button class='secondary'>导入两款示例水泵</button></form> <form method='post' action='/admin/products/seed-lowara' class='inline'><button class='secondary'>加载 Lowara 资料</button></form></div></div>
 {notice_html}
 <div class='grid'>
 <section class='card'><h2>新建产品型号</h2><form method='post' action='/admin/products'><label>型号 *</label><input name='model' placeholder='例如 CB-80A' required><label>产品名称</label><input name='name' placeholder='买方页面显示名称'><label>主要用途</label><textarea name='use_case' placeholder='例如清水循环、化工介质输送'></textarea><p><button>创建草稿</button></p></form></section>
-<section class='card'><h2>当前切片</h2><p>产品资料登记 → 来源文件 → 字段候选值 → 人工核准 → 版本发布 → 固定买方页面。</p><p class='muted'>未核准字段不会进入公开页；重新编辑已发布字段会回到待核准状态。</p></section>
+<section class='card'><h2>当前切片</h2><p>产品资料登记 → 来源文件 → 字段候选值 → 人工核准 → 版本发布 → 固定买方页面。</p><p class='muted'>未核准字段不会进入公开页；重新编辑已发布字段会回到待核准状态。Lowara 数据仅用于内部 Demo，外部再发布授权待确认。</p></section>
 </div>
 <section class='card' style='margin-top:18px'><h2>产品列表</h2><table><thead><tr><th>型号</th><th>状态</th><th>资料完整度</th><th>买方页面</th></tr></thead><tbody>{rows}</tbody></table></section>
 """
@@ -1755,13 +1858,14 @@ class Handler(BaseHTTPRequestHandler):
         recommendation_html = "<p class='muted'>Send a message and confirm the structured summary to see a recommendation.</p>"
         if current_recommendation:
             result_status = current_recommendation["status"]
-            result_label = {"recommended": "可初步推荐 / Initial recommendation", "insufficient": "条件不足 / More information needed", "no_match": "无可靠候选 / No reliable candidate"}.get(result_status, result_status)
+            result_label = {"recommended": "可初步推荐 / Initial recommendation", "needs_confirmation": "需工程确认 / Engineering confirmation needed", "insufficient": "条件不足 / More information needed", "no_match": "无可靠候选 / No reliable candidate"}.get(result_status, result_status)
             results = json.loads(current_recommendation["results_json"])
             cards = []
             for result in results:
-                card_class = "notice" if result["status"] == "candidate" else "error"
+                card_class = "notice" if result["status"] in {"candidate", "needs_confirmation"} else "error"
+                result_badge = {"candidate": "Candidate", "needs_confirmation": "需工程确认 / Confirm", "conflict": "Conflict"}.get(result["status"], result["status"])
                 cards.append(
-                    f"<div class='card' style='margin-top:12px'><h3>{esc(result['model'])} <span class='badge'>{'Candidate' if result['status'] == 'candidate' else 'Conflict'}</span></h3>"
+                    f"<div class='card' style='margin-top:12px'><h3>{esc(result['model'])} <span class='badge'>{result_badge}</span></h3>"
                     f"<p><b>满足项 / Meets:</b> {esc('；'.join(result['satisfies']) or '—')}</p>"
                     f"<p><b>冲突项 / Conflicts:</b> {esc('；'.join(result['conflicts']) or '—')}</p>"
                     f"<p><b>未确认 / Unknown:</b> {esc('；'.join(result['unknown']) or '—')}</p>"
@@ -1771,6 +1875,8 @@ class Handler(BaseHTTPRequestHandler):
                 cards.append(f"<div class='error'>缺少影响匹配的条件：{esc(', '.join(REQUIREMENT_LABELS.get(key, key) for key in missing))}。系统不会把未知当成满足。</div>")
             if result_status == "no_match":
                 cards.append("<div class='error'>当前已发布产品没有满足全部硬条件的可靠候选，请转人工确认；系统没有把冲突产品标为适用。</div>")
+            if result_status == "needs_confirmation":
+                cards.append("<div class='error'>当前结果包含目录曲线或不可解析条件，系统不会把它当成最终适配；请让工程师确认工作点后再报价。</div>")
             recommendation_html = f"<div class='notice'><b>匹配结果：</b>{esc(result_label)} · 规则版本 {esc(current_recommendation['rule_version'])}（演示规则，不能替代正式工程选型）</div>" + "".join(cards)
 
         answer_rows = []
@@ -1784,7 +1890,7 @@ class Handler(BaseHTTPRequestHandler):
         candidate_options = "<option value=''>自动选择当前推荐型号</option>"
         if current_recommendation:
             for result in json.loads(current_recommendation["results_json"]):
-                if result.get("status") == "candidate":
+                if result.get("status") in {"candidate", "needs_confirmation"}:
                     candidate_options += f"<option value='{esc(result['product_id'])}'>{esc(result['model'])} · v{esc(result['product_version'])}</option>"
         prefill = {key: values.get(key, {}).get("value", "") for key in ("quantity", "region", "delivery")}
         submission_key = secrets.token_urlsafe(18)
@@ -1808,6 +1914,8 @@ class Handler(BaseHTTPRequestHandler):
         demo_notice = ""
         if query.get("notice", [""])[0] == "demo":
             demo_notice = f"<div class='notice'>演示数据已加载：新增 RFQ {esc(query.get('rfqs', ['0'])[0])} 条、人工任务 {esc(query.get('tasks', ['0'])[0])} 条；重复加载不会复制已有记录。</div>"
+        elif query.get("notice", [""])[0] == "lowara":
+            demo_notice = f"<div class='notice'>Lowara 资料已加载：新增 {esc(query.get('products', ['0'])[0])} 个内部演示型号；来源文件只登记元数据，外部再发布授权仍待确认。</div>"
         cards = "".join(
             f"<div class='card'><div class='muted'>{label}</div><div class='metric'>{value}</div><div class='field-state'>{detail}</div></div>"
             for label, value, detail in (
@@ -1839,7 +1947,7 @@ class Handler(BaseHTTPRequestHandler):
             for record in records
         ) or "<tr><td colspan='4' class='muted'>暂无销售线索。</td></tr>"
         body = f"""
-<div class='toolbar'><div><h1>管理概览</h1><div class='muted'>当前企业：示例水泵企业（演示） · 当前账号：{esc(self.actor)}（{role_label}）</div></div><div><form method='post' action='/admin/demo/seed' class='inline'><button class='secondary'>加载演示数据</button></form> <a class='button secondary' href='/logout'>退出登录</a></div></div>
+<div class='toolbar'><div><h1>管理概览</h1><div class='muted'>当前企业：示例水泵企业（演示） · 当前账号：{esc(self.actor)}（{role_label}）</div></div><div><form method='post' action='/admin/demo/seed' class='inline'><button class='secondary'>加载演示数据</button></form> <form method='post' action='/admin/lowara/seed' class='inline'><button class='secondary'>加载 Lowara 资料</button></form> <a class='button secondary' href='/logout'>退出登录</a></div></div>
 {demo_notice}
 <section class='metric-grid'>{cards}</section>
 <section class='grid' style='margin-top:18px'>{quick_html}</section>

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import Database, Handler, answer_from_approved_material, confirm_requirement_values, extract_requirement_values, layout, match_products
+from app import Database, Handler, answer_from_approved_material, confirm_requirement_values, curve_head_at_flow, extract_requirement_values, layout, match_products, performance_points_from_text
 
 
 class ProductApprovalTests(unittest.TestCase):
@@ -251,6 +251,78 @@ class DemoFixtureTests(unittest.TestCase):
         self.assertEqual(second["tasks"], 0)
         self.assertEqual(len(self.db.list_rfqs("demo-tenant")), 2)
         self.assertEqual(len(self.db.list_human_tasks("demo-tenant", "pending")), 1)
+
+
+class LowaraFixtureTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.temp_dir.name) / "app.db")
+
+    def tearDown(self):
+        self.db.conn.close()
+        self.temp_dir.cleanup()
+
+    def test_lowara_fixture_publishes_cited_product_and_is_idempotent(self):
+        first = self.db.seed_lowara_workspace("demo-tenant")
+        second = self.db.seed_lowara_workspace("demo-tenant")
+        self.assertEqual(first["products"], 1)
+        self.assertEqual(second["products"], 0)
+        product = self.db.conn.execute(
+            "SELECT * FROM products WHERE tenant_id=? AND model=?", ("demo-tenant", "3SV08NL007T")
+        ).fetchone()
+        self.assertEqual(product["status"], "published")
+        fields = {row["field_key"]: row for row in self.db.get_fields("demo-tenant", product["id"])}
+        self.assertEqual(fields["power"]["value"], "0.75")
+        self.assertIn("Rev. B", fields["performance_points"]["source_location"])
+        self.assertEqual(len(self.db.get_sources("demo-tenant", product["id"])), 3)
+
+    def test_lowara_catalogue_curve_requires_engineering_confirmation(self):
+        self.db.seed_lowara_workspace("demo-tenant")
+        values = confirm_requirement_values({
+            "flow": {"value": "3", "unit": "m³/h", "label": "流量"},
+            "head": {"value": "48", "unit": "m", "label": "扬程"},
+            "media": {"value": "清水", "unit": "", "label": "介质"},
+        })
+        status, results, missing = match_products(self.db, "demo-tenant", values)
+        lowara = next(result for result in results if result["model"] == "3SV08NL007T")
+        self.assertEqual(status, "needs_confirmation")
+        self.assertEqual(missing, [])
+        self.assertEqual(lowara["status"], "needs_confirmation")
+        self.assertIn("工程师", "".join(lowara["unknown"]))
+
+    def test_delivery_wording_is_handed_to_human(self):
+        self.db.seed_lowara_workspace("demo-tenant")
+        product = self.db.conn.execute(
+            "SELECT id FROM products WHERE tenant_id=? AND model=?", ("demo-tenant", "3SV08NL007T")
+        ).fetchone()
+        status, answer, *_rest = answer_from_approved_material(self.db, "demo-tenant", "什么时候可以交货？", product["id"])
+        self.assertEqual(status, "needs_human")
+        self.assertIn("交期", answer)
+
+    def test_rfq_uses_lowara_confirmation_candidate_when_product_is_not_selected(self):
+        self.db.seed_lowara_workspace("demo-tenant")
+        conversation_id = self.db.create_conversation("demo-tenant")
+        values = confirm_requirement_values({
+            "flow": {"value": "3", "unit": "m³/h", "label": "流量"},
+            "head": {"value": "48", "unit": "m", "label": "扬程"},
+            "media": {"value": "清水", "unit": "", "label": "介质"},
+        })
+        revision_id = self.db.create_requirement_revision("demo-tenant", conversation_id, values, "confirmed")
+        status, results, _ = match_products(self.db, "demo-tenant", values)
+        self.db.save_recommendation("demo-tenant", conversation_id, revision_id, status, results)
+        rfq_id, created = self.db.create_rfq(
+            "demo-tenant", conversation_id, "lowara-rfq-token",
+            {"quantity": "1", "region": "上海", "delivery": "6 周", "contact_email": ""}, "演示询价"
+        )
+        self.assertTrue(created)
+        rfq = self.db.get_rfq("demo-tenant", rfq_id)
+        self.assertEqual(rfq["model"], "3SV08NL007T")
+        self.assertEqual(rfq["status"], "needs_info")
+
+    def test_catalogue_points_are_interpolated_only_for_demo_screening(self):
+        points = performance_points_from_text("0:60;3:48.1;4.4:27.5")
+        self.assertEqual(points, [(0.0, 60.0), (3.0, 48.1), (4.4, 27.5)])
+        self.assertAlmostEqual(curve_head_at_flow(points, 3.7), 37.8, places=2)
 
 
 class SalesWorkspaceTests(unittest.TestCase):
