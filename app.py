@@ -2998,6 +2998,13 @@ html[data-theme="dark"]{
 h1{font-size:21px}
 .metric{font-size:21px}
 }
+/* ── 侧栏待办数字（行动待办量；变化时机械表日历跳转式翻牌，脚本见 CONSOLE_NAV_JS） ── */
+.side-count{margin-left:auto;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:var(--accent);color:#fff;font-size:11px;font-weight:600;display:inline-grid;place-items:center;font-variant-numeric:tabular-nums;perspective:120px}
+.side-count[hidden]{display:none}
+.side-count .n{display:block;transform:rotateX(0deg);transition:transform .12s ease-in;backface-visibility:hidden}
+.side-count .n.flip-out{transform:rotateX(90deg)}
+.side-count .n.flip-in{transform:rotateX(-90deg);transition:none}
+@media (prefers-reduced-motion:reduce){.side-count .n{transition:none}}
 """
 
 
@@ -3046,6 +3053,71 @@ CONSOLE_THEME_JS = """
    if(e.metaKey||e.ctrlKey||e.altKey){return;}
    var btn=document.getElementById('themeToggle');if(btn){btn.click();}
  });
+})();
+"""
+
+
+CONSOLE_NAV_JS = """
+// 侧栏待办数字：每 5 秒轮询一次 /admin/nav-counts，只在数字真的变化时更新
+// （只动导航上的数字，不触碰页面正文）；变化时做机械表日历跳转式翻牌动画；
+// 系统启用"减少动态效果"时直接切换，不播动画。
+(function () {
+  var POLL_INTERVAL_MS = 5000;
+  var FLIP_MS = 120;
+  var prefersReduce = false;
+  try { prefersReduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (error) {}
+  function flipIn(num, text) {
+    num.textContent = text;
+    if (prefersReduce) { return; }
+    num.classList.add('flip-in');
+    void num.offsetWidth;
+    num.classList.remove('flip-in');
+  }
+  function flipSwap(num, text) {
+    if (prefersReduce) { num.textContent = text; return; }
+    num.classList.add('flip-out');
+    setTimeout(function () {
+      num.textContent = text;
+      num.classList.remove('flip-out');
+      num.classList.add('flip-in');
+      void num.offsetWidth;
+      num.classList.remove('flip-in');
+    }, FLIP_MS);
+  }
+  function applyCount(badge, value) {
+    var num = badge.querySelector('.n');
+    var prev = parseInt(badge.getAttribute('data-count') || '0', 10) || 0;
+    if (value === prev && (value > 0) === (!badge.hidden)) { return; }
+    badge.setAttribute('data-count', String(value));
+    if (value <= 0) {
+      if (badge.hidden) { return; }
+      if (prefersReduce) { num.textContent = ''; badge.hidden = true; return; }
+      num.classList.add('flip-out');
+      setTimeout(function () { num.textContent = ''; num.classList.remove('flip-out'); badge.hidden = true; }, FLIP_MS);
+      return;
+    }
+    var text = value > 99 ? '99+' : String(value);
+    var appearing = badge.hidden;
+    badge.hidden = false;
+    if (appearing) { flipIn(num, text); } else { flipSwap(num, text); }
+  }
+  function pollNavCounts() {
+    fetch('/admin/nav-counts', { headers: { 'Accept': 'application/json' }, cache: 'no-store' })
+      .then(function (response) { return response.ok ? response.json() : null; })
+      .then(function (data) {
+        if (!data || !data.counts) { return; }
+        var badges = document.querySelectorAll('.side-count[data-nav-count]');
+        for (var index = 0; index < badges.length; index += 1) {
+          var badge = badges[index];
+          var value = Number(data.counts[badge.getAttribute('data-nav-count')] || 0);
+          if (!isFinite(value)) { value = 0; }
+          applyCount(badge, value);
+        }
+      })
+      .catch(function () { /* 静默：下一轮重试 */ });
+  }
+  setInterval(pollNavCounts, POLL_INTERVAL_MS);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) { pollNavCounts(); } });
 })();
 """
 
@@ -3113,7 +3185,7 @@ def auth_layout(title: str, body: str) -> str:
 </body></html>"""
 
 
-def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path: str = "/admin", actor: str = "", role: str = "", tenant: str = "") -> str:
+def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path: str = "/admin", actor: str = "", role: str = "", tenant: str = "", nav_counts: dict[str, int] | None = None) -> str:
     """卖家控制台外壳：左侧按业务分组的工具架 + 右侧工作区（顶栏面包屑）。"""
     groups = (
         ("我的工作", (("admin", "/admin", "home", "管理概览"),)),
@@ -3131,10 +3203,17 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
     group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "users": "团队与接入", "sites": "团队与接入"}
     role_label = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}.get(role, role or "未登录")
     lang_target = f"{esc(path)}?lang={'en' if lang == 'zh' else 'zh'}"
+    counts = nav_counts or {}
+    def side_count_html(key: str) -> str:
+        """待办数字胶囊：0 时隐藏但保留占位（轮询发现变化时原地翻牌出现）。"""
+        value = counts.get(key, 0)
+        hidden = "" if value else " hidden"
+        text = "99+" if value > 99 else (str(value) if value else "")
+        return f"<span class='side-count' data-nav-count='{key}' data-count='{value}'{hidden}><span class='n'>{text}</span></span>"
     sections = []
     for heading, items in groups:
         links = "".join(
-            f"<a class='side-link{' active' if key == active else ''}' href='{url}'>{svg_icon(icon)}{label}</a>"
+            f"<a class='side-link{' active' if key == active else ''}' href='{url}'>{svg_icon(icon)}{label}{side_count_html(key)}</a>"
             for key, url, icon, label in items
         )
         sections.append(f"<div class='side-heading'>{heading}</div>{links}")
@@ -3167,6 +3246,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
 </div>
 </div>
 <script>document.getElementById('console-menu').addEventListener('click',function(){{document.getElementById('console-side').classList.toggle('open');}});</script>
+<script>{CONSOLE_NAV_JS}</script>
 </body></html>"""
 
 
@@ -3265,6 +3345,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/admin/tasks"):
             allowed = {"admin", "engineer"}
         elif path.startswith("/admin/sales") or path.startswith("/admin/rfqs"):
+            allowed = {"admin", "sales", "engineer"}
+        elif path.startswith("/admin/nav-counts"):
             allowed = {"admin", "sales", "engineer"}
         else:
             allowed = set()
@@ -3371,6 +3453,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
+    def nav_badge_counts(self) -> dict[str, int]:
+        """侧栏待办数字：与概览页待办同一评分口径与角色规则（同一计数函数），值含 0。
+
+        键 = 导航项 key；未登录返回空字典。仅返回数字本身，不含任何业务内容。
+        """
+        if not self.user_id:
+            return {}
+        summary = self.db.get_admin_summary(self.tenant_id)
+        role = self.user_role
+        counts: dict[str, int] = {}
+        if role == "admin":
+            counts["products"] = summary["products_needs_review"]
+        if role in {"admin", "engineer"}:
+            counts["tasks"] = summary["tasks_pending"]
+        if role in {"admin", "sales"}:
+            counts["rfqs"] = summary["rfqs_needs_info"]
+            counts["sales"] = summary["leads_overdue"]
+        return counts
+
     def console_page(self, title: str, body: str, active: str, lang: str = "zh") -> str:
         tenant = self.db.conn.execute("SELECT name FROM tenants WHERE id=?", (self.tenant_id,)).fetchone()
         clean_path = urlparse(self.path).path.rstrip("/") or "/admin"
@@ -3379,6 +3480,7 @@ class Handler(BaseHTTPRequestHandler):
             actor=self.actor if self.user_id else "",
             role=self.user_role if self.user_id else "",
             tenant=(tenant["name"] if tenant else self.tenant_id),
+            nav_counts=self.nav_badge_counts(),
         )
 
     def login_page(self, query: dict[str, list[str]], error: str = "") -> None:
@@ -3553,6 +3655,10 @@ class Handler(BaseHTTPRequestHandler):
             self.redirect("/admin")
             return
         if (path == "/admin" or path.startswith("/admin/")) and not self.authorize_admin(path, "GET"):
+            return
+        if path == "/admin/nav-counts":
+            # 侧栏待办数字轮询接口：登录 + 角色过滤 + 租户隔离；只返回数字，不含任何内容。
+            self.send_json({"counts": self.nav_badge_counts()})
             return
         if path == "/admin":
             self.admin_dashboard(query)
