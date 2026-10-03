@@ -11,4 +11,12 @@ html{scroll-behavior:smooth;background:#f4f6f8}body{background:#f4f6f8;backgroun
 .product-gallery{display:grid;gap:10px}
 .product-gallery .gallery-input{position:absolute;width:1px;height:1px;opacity:0}
 .product-gallery .gallery-slide{display:none;margin:0}
-.product-gallery .gallery-slide img{display:block;max-width:100
+.product-gallery .gallery-slide img{display:block;max-width:100%;max-height:520px;object-fit:contain;margin:0 auto;border-radius:10px}
+.product-gallery figcaption{font-size:12px;color:#687c8b;margin-top:6px;text-align:center}
+.product-gallery .gallery-thumbs{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+.product-gallery .gallery-thumbs label{display:block;border:1px solid #dce3e8;border-radius:8px;padding:2px;cursor:pointer;background:#fff;line-height:0}
+.product-gallery .gallery-thumbs label img{width:72px;height:54px;object-fit:cover;border-radius:6px}
+.file-list{margin:0;padding:0;list-style:none}
+.file-list li{padding:10px 0;border-bottom:1px solid #e6ecef;font-size:14px}
+.file-list li small{display:block;color:#8a6547;font-size:12px;margin-top:2px}
+.file-chip{display:inline-block;padding:1px 8px;border-radius:999px;background:#eef5f8;border:1px solid #cfe0e8;color:#0f5576;font-size:12px;font-weight:600}
