@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import Database, Handler, answer_from_approved_material, confirm_requirement_values, curve_head_at_flow, extract_requirement_values, layout, match_products, performance_points_from_text
+from app import Database, Handler, answer_from_approved_material, confirm_requirement_values, curve_head_at_flow, extract_requirement_values, layout, match_products, performance_points_from_text, requirement_capture_reply
 
 
 class ProductApprovalTests(unittest.TestCase):
@@ -155,6 +155,19 @@ class GroundedAnswerTests(unittest.TestCase):
         self.assertTrue(version_id)
         self.assertEqual(citations[0]["filename"], "CB-80A-模拟产品手册.pdf")
         self.assertEqual(reason, "")
+
+    def test_answer_and_requirement_prompt_follow_locale(self):
+        status, answer, *_ = answer_from_approved_material(self.db, "demo-tenant", "What is the flow range?", self.product["id"], "en")
+        self.assertEqual(status, "grounded")
+        self.assertIn("flow range", answer)
+        self.assertIn("流量", requirement_capture_reply("zh", ["流量", "扬程"]))
+        self.assertIn("confirm", requirement_capture_reply("en", ["flow"]))
+
+    def test_conversation_locale_can_be_changed_by_language_toggle(self):
+        conversation_id = self.db.create_conversation("demo-tenant", locale="en")
+        self.db.set_conversation_locale("demo-tenant", conversation_id, "zh")
+        conversation = self.db.get_conversation("demo-tenant", conversation_id)
+        self.assertEqual(conversation["locale"], "zh")
 
     def test_unknown_question_creates_resolvable_task_without_changing_product_facts(self):
         conversation_id = self.db.create_conversation("demo-tenant")

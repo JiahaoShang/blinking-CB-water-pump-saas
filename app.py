@@ -66,6 +66,20 @@ def esc(value: object) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
+def normalize_locale(value: str | None) -> str:
+    return "zh" if (value or "").lower().startswith("zh") else "en"
+
+
+def requirement_capture_reply(locale: str, missing: list[str]) -> str:
+    if normalize_locale(locale) == "zh":
+        if missing:
+            return "我已记录你的需求。为了比较产品，请确认：" + "、".join(missing) + "。"
+        return "我已提取出以上工况。请先检查并确认需求摘要，再开始匹配。"
+    if missing:
+        return "I captured your message. To compare products, please confirm: " + ", ".join(missing) + "."
+    return "I extracted the conditions above. Please check and confirm the summary before matching."
+
+
 def slugify(model: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", model.lower()).strip("-")
     return slug or secrets.token_hex(4)
@@ -479,6 +493,14 @@ class Database:
         return self.conn.execute(
             "SELECT * FROM conversations WHERE tenant_id=? AND id=?", (tenant_id, conversation_id)
         ).fetchone()
+
+    def set_conversation_locale(self, tenant_id: str, conversation_id: str, locale: str) -> None:
+        normalized = normalize_locale(locale)
+        self.conn.execute(
+            "UPDATE conversations SET locale=?, updated_at=? WHERE tenant_id=? AND id=?",
+            (normalized, now_iso(), tenant_id, conversation_id),
+        )
+        self.conn.commit()
 
     def list_messages(self, tenant_id: str, conversation_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -1333,28 +1355,41 @@ def answer_from_approved_material(
     tenant_id: str,
     question: str,
     product_id: str | None,
+    locale: str = "zh",
 ) -> tuple[str, str, str | None, str | None, list[dict[str, str]], str]:
     """Answer only from the selected published snapshot; otherwise hand off."""
+    locale = normalize_locale(locale)
+    is_zh = locale == "zh"
     question_lower = question.lower()
     forbidden = ("price", "cost", "quote", "price", "价格", "报价", "库存", "stock", "delivery", "lead time", "shipping", "交期", "交货", "到货", "认证", "certificate", "certification")
     if any(token in question_lower for token in forbidden):
-        return "needs_human", "这个问题涉及价格、库存、交期或认证等资料外信息，当前无法从核准产品资料确认。你可以明确请求工程师答复；在你提交请求前，我们不会创建人工任务。", product_id, None, [], "资料不包含商业承诺或认证判断"
+        answer = (
+            "这个问题涉及价格、库存、交期或认证等资料外信息，当前无法从核准产品资料确认。你可以明确请求工程师答复；在你提交请求前，我们不会创建人工任务。"
+            if is_zh else
+            "This question involves price, stock, delivery or certification information that is outside the approved materials. You can request an engineer reply; no human task is created until you submit that request."
+        )
+        return "needs_human", answer, product_id, None, [], "资料不包含商业承诺或认证判断"
 
     product = db.get_product(tenant_id, product_id) if product_id else None
     version = db.get_published_version(tenant_id, product_id) if product_id else None
     if not product or not version:
-        return "needs_human", "当前没有可引用的已发布产品版本，无法确认这个问题。你可以明确请求工程师答复；在你提交请求前，我们不会创建人工任务。", product_id, None, [], "没有可引用的已发布产品版本"
+        answer = (
+            "当前没有可引用的已发布产品版本，无法确认这个问题。你可以明确请求工程师答复；在你提交请求前，我们不会创建人工任务。"
+            if is_zh else
+            "There is no approved published product version to cite for this question. You can request an engineer reply; no human task is created until you submit that request."
+        )
+        return "needs_human", answer, product_id, None, [], "没有可引用的已发布产品版本"
 
     snapshot = json.loads(version["snapshot_json"])
     fields = {field["field_key"]: field for field in snapshot.get("fields", [])}
     field_map = [
-        (("flow", "流量"), "flow_range", "该型号的流量范围是 {value}{unit}。"),
-        (("head", "扬程"), "head_range", "该型号的扬程范围是 {value}{unit}。"),
-        (("media", "介质", "medium", "液体"), "media", "资料标注的介质适用条件是：{value}{unit}。"),
-        (("material", "材质", "材料"), "material", "该型号的材质是：{value}{unit}。"),
-        (("power", "功率"), "power", "该型号的功率是 {value}{unit}。"),
-        (("temperature", "温度", "temperature"), "temperature", "资料标注的介质温度范围是 {value}{unit}。"),
-        (("性能", "曲线", "performance", "catalogue"), "performance_points", "资料中的目录性能点（流量:扬程）是：{value}{unit}。最终工作点需工程师确认。"),
+        (("flow", "流量"), "flow_range", "该型号的流量范围是 {value}{unit}。" if is_zh else "The flow range for this model is {value}{unit}."),
+        (("head", "扬程"), "head_range", "该型号的扬程范围是 {value}{unit}。" if is_zh else "The head range for this model is {value}{unit}."),
+        (("media", "介质", "medium", "液体"), "media", "资料标注的介质适用条件是：{value}{unit}。" if is_zh else "The approved material describes the applicable medium as: {value}{unit}."),
+        (("material", "材质", "材料"), "material", "该型号的材质是：{value}{unit}。" if is_zh else "The material for this model is: {value}{unit}."),
+        (("power", "功率"), "power", "该型号的功率是 {value}{unit}。" if is_zh else "The rated power for this model is {value}{unit}."),
+        (("temperature", "温度", "temperature"), "temperature", "资料标注的介质温度范围是 {value}{unit}。" if is_zh else "The approved material describes the medium temperature range as {value}{unit}."),
+        (("性能", "曲线", "performance", "catalogue"), "performance_points", "资料中的目录性能点（流量:扬程）是：{value}{unit}。最终工作点需工程师确认。" if is_zh else "The catalogue performance points (flow:head) are {value}{unit}. An engineer must confirm the final duty point."),
     ]
     selected_key = None
     template = ""
@@ -1364,7 +1399,12 @@ def answer_from_approved_material(
             template = candidate_template
             break
     if not selected_key or not fields.get(selected_key) or not fields[selected_key].get("value", "").strip():
-        return "needs_human", "核准资料中没有足够依据回答这个问题。我们不会猜测参数；如果你需要工程师结合本次工况核实，请点击“请求工程师答复”。", product_id, version["id"], [], "资料缺少对应字段或问题需要工程判断"
+        answer = (
+            "核准资料中没有足够依据回答这个问题。我们不会猜测参数；如果你需要工程师结合本次工况核实，请点击“请求工程师答复”。"
+            if is_zh else
+            "The approved materials do not provide enough evidence to answer this question. We will not guess a parameter; click \"Request an engineer reply\" if you want a case-specific review."
+        )
+        return "needs_human", answer, product_id, version["id"], [], "资料缺少对应字段或问题需要工程判断"
 
     field = fields[selected_key]
     citation = {
@@ -1554,8 +1594,9 @@ class Handler(BaseHTTPRequestHandler):
             self.admin_sales(query)
             return
         if path == "/inquiry":
-            conversation_id = self.db.create_conversation(self.tenant_id, "web", query.get("lang", ["en"])[0])
-            self.redirect(f"/inquiry/{conversation_id}?lang={query.get('lang', ['en'])[0]}")
+            locale = normalize_locale(query.get("lang", ["en"])[0])
+            conversation_id = self.db.create_conversation(self.tenant_id, "web", locale)
+            self.redirect(f"/inquiry/{conversation_id}?lang={locale}")
             return
         match = re.fullmatch(r"/admin/products/([a-f0-9]+)/?", path)
         if match:
@@ -1638,6 +1679,10 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 conversation_id = match.group(1)
                 message = str(form.get("message", ""))
+                conversation = self.db.get_conversation(self.tenant_id, conversation_id)
+                if not conversation:
+                    raise ValueError("询盘不存在")
+                locale = normalize_locale(conversation["locale"])
                 self.db.save_message(self.tenant_id, conversation_id, "buyer", message, "buyer_web")
                 previous = self.db.get_latest_revision(self.tenant_id, conversation_id)
                 previous_values = json.loads(previous["values_json"]) if previous else {}
@@ -1647,12 +1692,9 @@ class Handler(BaseHTTPRequestHandler):
                 values = extract_requirement_values(message, explicit, previous_values)
                 self.db.create_requirement_revision(self.tenant_id, conversation_id, values, "candidate", "buyer-web")
                 missing = [REQUIREMENT_LABELS[key] for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
-                if missing:
-                    reply = "I captured your message. To compare products, please confirm: " + ", ".join(missing) + "."
-                else:
-                    reply = "I extracted the conditions above. Please check and confirm the summary before matching."
+                reply = requirement_capture_reply(locale, missing)
                 self.db.save_message(self.tenant_id, conversation_id, "assistant", reply, "rule-based-assistant")
-                self.redirect(f"/inquiry/{conversation_id}")
+                self.redirect(f"/inquiry/{conversation_id}?lang={locale}")
                 return
             match = re.fullmatch(r"/inquiry/([a-f0-9]+)/confirm", path)
             if match:
@@ -1677,7 +1719,9 @@ class Handler(BaseHTTPRequestHandler):
                 revision_id = self.db.create_requirement_revision(self.tenant_id, conversation_id, confirmed_values, "confirmed", "buyer-web")
                 status, results, _missing = match_products(self.db, self.tenant_id, confirmed_values)
                 self.db.save_recommendation(self.tenant_id, conversation_id, revision_id, status, results)
-                self.redirect(f"/inquiry/{conversation_id}?notice=recommendation")
+                conversation = self.db.get_conversation(self.tenant_id, conversation_id)
+                locale = normalize_locale(conversation["locale"] if conversation else "en")
+                self.redirect(f"/inquiry/{conversation_id}?lang={locale}&notice=recommendation")
                 return
             match = re.fullmatch(r"/inquiry/([a-f0-9]+)/ask", path)
             if match:
@@ -1697,10 +1741,12 @@ class Handler(BaseHTTPRequestHandler):
                     if not result_for_product:
                         result_for_product = next((result for result in recommendation_results if result.get("status") in {"candidate", "needs_confirmation"}), None)
                     selected_product_id = (result_for_product or {}).get("product_id") or selected_product_id
-                answer_status, answer_text, answered_product_id, product_version_id, citations, reason = answer_from_approved_material(self.db, self.tenant_id, question, selected_product_id)
+                conversation = self.db.get_conversation(self.tenant_id, conversation_id)
+                locale = normalize_locale(conversation["locale"] if conversation else "en")
+                answer_status, answer_text, answered_product_id, product_version_id, citations, reason = answer_from_approved_material(self.db, self.tenant_id, question, selected_product_id, locale)
                 self.db.save_message(self.tenant_id, conversation_id, "assistant", answer_text, "grounded-answer" if answer_status == "grounded" else "human-handoff")
                 self.db.save_answer(self.tenant_id, conversation_id, question_message_id, answered_product_id, product_version_id, answer_status, answer_text, citations)
-                self.redirect(f"/inquiry/{conversation_id}?notice=answer")
+                self.redirect(f"/inquiry/{conversation_id}?lang={locale}&notice=answer")
                 return
             match = re.fullmatch(r"/inquiry/([a-f0-9]+)/request-help", path)
             if match:
@@ -1710,12 +1756,14 @@ class Handler(BaseHTTPRequestHandler):
                 question_message = self.db.get_message(self.tenant_id, conversation_id, question_message_id)
                 if not answer or answer["answer_status"] != "needs_human" or not question_message:
                     raise ValueError("找不到可请求人工答复的问题")
+                conversation = self.db.get_conversation(self.tenant_id, conversation_id)
+                locale = normalize_locale(conversation["locale"] if conversation else "en")
                 existing_task = self.db.get_human_task_for_question(self.tenant_id, conversation_id, question_message_id)
                 if not existing_task:
                     recommendation = self.db.latest_active_recommendation(self.tenant_id, conversation_id)
                     latest_revision = self.db.get_latest_revision(self.tenant_id, conversation_id)
                     _, _, _, product_version_id, _, reason = answer_from_approved_material(
-                        self.db, self.tenant_id, question_message["content"], answer["product_id"]
+                        self.db, self.tenant_id, question_message["content"], answer["product_id"], locale
                     )
                     context = {
                         "requirement_revision_id": latest_revision["id"] if latest_revision else None,
@@ -1737,7 +1785,7 @@ class Handler(BaseHTTPRequestHandler):
                         latest_revision["id"] if latest_revision else None,
                         recommendation["id"] if recommendation else None,
                     )
-                self.redirect(f"/inquiry/{conversation_id}?notice=handoff")
+                self.redirect(f"/inquiry/{conversation_id}?lang={locale}&notice=handoff")
                 return
             match = re.fullmatch(r"/inquiry/([a-f0-9]+)/rfq", path)
             if match:
@@ -1747,7 +1795,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("询价提交标识缺失，请刷新页面后重试")
                 contact = {key: str(form.get(key, "")) for key in ("contact_name", "company", "contact_email", "contact_phone", "quantity", "region", "delivery")}
                 rfq_id, created = self.db.create_rfq(self.tenant_id, conversation_id, submission_key, contact, str(form.get("notes", "")), str(form.get("product_id", "")) or None)
-                self.redirect(f"/inquiry/{conversation_id}?notice=rfq&rfq_id={rfq_id}&created={'1' if created else '0'}")
+                conversation = self.db.get_conversation(self.tenant_id, conversation_id)
+                locale = normalize_locale(conversation["locale"] if conversation else "en")
+                self.redirect(f"/inquiry/{conversation_id}?lang={locale}&notice=rfq&rfq_id={rfq_id}&created={'1' if created else '0'}")
                 return
             match = re.fullmatch(r"/admin/tasks/([a-f0-9]+)/reply", path)
             if match:
@@ -1865,7 +1915,8 @@ class Handler(BaseHTTPRequestHandler):
         if not conversation:
             self.send_html(layout("Inquiry not found", "<div class='error'>This inquiry does not exist or is not available.</div>", lang="en"), 404)
             return
-        lang = query.get("lang", [conversation["locale"] or "en"])[0]
+        lang = normalize_locale(query.get("lang", [conversation["locale"] or "en"])[0])
+        self.db.set_conversation_locale(self.tenant_id, conversation_id, lang)
         messages = self.db.list_messages(self.tenant_id, conversation_id)
         revisions = self.db.get_revisions(self.tenant_id, conversation_id)
         latest = revisions[-1] if revisions else None
@@ -1879,9 +1930,9 @@ class Handler(BaseHTTPRequestHandler):
         rfq_id = query.get("rfq_id", [""])[0]
         current_rfq = self.db.get_rfq(self.tenant_id, rfq_id) if rfq_id else None
         notice_html = {
-            "recommendation": "<div class='notice'>需求已保存，推荐结果会基于当前已确认摘要重新计算。</div>",
-            "answer": "<div class='notice'>问题已保存。资料不足时，请在对应回答下明确请求工程师答复。</div>",
-            "handoff": "<div class='notice'>已收到人工答复请求，工程师会在本会话中处理；刷新页面可查看最新状态。</div>",
+            "recommendation": "<div class='notice'>需求已保存，推荐结果会基于当前已确认摘要重新计算。</div>" if lang == "zh" else "<div class='notice'>Requirements saved. Recommendations are recalculated from the confirmed summary.</div>",
+            "answer": "<div class='notice'>问题已保存。资料不足时，请在对应回答下明确请求工程师答复。</div>" if lang == "zh" else "<div class='notice'>Question saved. If the materials are insufficient, request an engineer reply below.</div>",
+            "handoff": "<div class='notice'>已收到人工答复请求，工程师会在本会话中处理；刷新页面可查看最新状态。</div>" if lang == "zh" else "<div class='notice'>Your engineer-reply request was received. Refresh this conversation to see its status.</div>",
         }.get(notice, "")
         if notice == "rfq" and current_rfq:
             missing_labels = json.loads(current_rfq["missing_json"])
