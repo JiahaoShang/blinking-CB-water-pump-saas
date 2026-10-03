@@ -110,6 +110,8 @@ class PilotCheckScriptTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("PASS", result.stdout)
+            self.assertIn("交接交换接口拒绝陌生域名", result.stdout)
+            self.assertIn("交接交换接口只在平台自身来源受理", result.stdout)
             # 白名单不匹配时必须 FAIL（把允许域名改错，检查脚本会拒绝放行）
             wrong = run_script(
                 str(CHECKS / "check_cors.py"), "--base", f"http://127.0.0.1:{server.server_port}",

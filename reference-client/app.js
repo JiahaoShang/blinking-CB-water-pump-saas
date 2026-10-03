@@ -2,6 +2,11 @@ const $ = (id) => document.getElementById(id);
 const log = $('chat-log');
 const notice = $('chat-notice');
 let siteKey = new URLSearchParams(location.search).get('site_key') || localStorage.getItem('pump_reference_site_key') || '';
+// 跨来源部署时，聊天页在企业官网来源、API/产品页在平台来源：用 ?api_base=https://platform.example
+// 指定平台来源；不填则与页面同源（本地参考演示）。产品链接也指向该来源。
+// 不落盘保存：api_base 属于页面级配置，避免一次跨来源演示影响后续同来源打开。
+let apiBase = (new URLSearchParams(location.search).get('api_base') || '').trim().replace(/\/+$/, '');
+if (apiBase && !/^https?:\/\/[^/\s]+$/i.test(apiBase)) apiBase = '';
 let conversationId = '';
 let token = '';
 let current = null;
@@ -24,7 +29,7 @@ function field(form, label, name, value = '', type = 'text') {
 }
 function action(buttonText, onClick, secondary = false) { const button = node('button', secondary ? 'secondary' : '', buttonText); button.type = 'button'; button.addEventListener('click', onClick); return button; }
 async function api(path, method = 'GET', data = null, extra = {}) {
-  const response = await fetch(`/api/v1/buyer${path}`, {
+  const response = await fetch(`${apiBase}/api/v1/buyer${path}`, {
     method,
     headers: { 'Content-Type': 'application/json', 'X-Site-Key': siteKey, ...(token ? { Authorization: `Bearer ${token}` } : {}), ...extra },
     body: data === null ? undefined : JSON.stringify(data),
@@ -145,8 +150,9 @@ function renderRecommendation(recommendation, requirement) {
       if (product.satisfies?.length) item.append(node('div', 'muted', (product.satisfies || []).join('; ')));
       if (product.unknown?.length) item.append(node('div', 'muted', `${locale === 'zh' ? '未确认' : 'Unconfirmed'}: ${product.unknown.join('; ')}`));
       const link = node('a', '', 'Open product detail ↗');
-      link.href = product.detail_url.startsWith('/products/') ? `/s/${encodeURIComponent(siteKey)}${product.detail_url}` : product.detail_url;
+      link.href = productUrl(product.detail_url);
       link.target = '_blank'; link.rel = 'noopener';
+      link.addEventListener('click', (event) => openProductDetail(event, link, product));
       item.append(link);
       list.append(item);
     }
@@ -187,6 +193,33 @@ function renderRecommendation(recommendation, requirement) {
     }
   }
   card.append(list);
+}
+function productUrl(path) {
+  const routed = path.startsWith('/products/') ? `/s/${encodeURIComponent(siteKey)}${path}` : path;
+  return `${apiBase}${routed}`;
+}
+// 点击产品链接：先向平台领取一次性交接码（短时、单次使用、绑定站点与型号），
+// 再新标签打开「产品页#handoff=码」；产品页在平台来源上用码换取同一会话的凭据。
+// 交接码只进 URL fragment（不发给服务器、不进 Referer）；长期会话凭据不出现在 URL。
+// 新标签必须在点击手势内同步打开，等码返回后再跳转；取码失败按普通直访链接打开并提示。
+async function openProductDetail(event, link, product) {
+  if (!conversationId || !token) return;
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  const popup = window.open('about:blank', '_blank');
+  if (popup) popup.opener = null;
+  let target = link.href;
+  try {
+    const minted = await api(`/conversations/${conversationId}/handoff-codes`, 'POST', { product_id: product.product_id });
+    target = `${link.href}#handoff=${encodeURIComponent(minted.code)}`;
+  } catch (error) {
+    showNotice(locale === 'zh'
+      ? `产品链接未能附带会话交接（${error.message}）；已按新访客方式打开产品页，提交询价将新建会话。`
+      : `The product link could not carry the conversation handoff (${error.message}); the page opens as a new visitor and a request starts a new conversation.`);
+  }
+  if (popup) { popup.location.replace(target); return; }
+  const fallback = window.open(target, '_blank', 'noopener');
+  if (!fallback) showNotice((locale === 'zh' ? '浏览器阻止了新标签页，请手动打开：' : 'The browser blocked the new tab; please open: ') + target);
 }
 function renderAnswers(answers, tasks) {
   for (const answer of answers) {

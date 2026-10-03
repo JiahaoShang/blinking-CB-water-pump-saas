@@ -72,6 +72,13 @@ PRODUCT_PAGE_GROUPS = (
 # to this model (exact_model) or its series (series) may be approved for public
 # download; unfiled documents never appear on a public page.
 SOURCE_SCOPES = {"exact_model": "本型号", "series": "系列", "unknown": "归属待核对"}
+# 跨站会话交接（一次性交接码）：官网聊天（来源 A）与平台产品页（来源 B）不同来源时，
+# 由持有会话凭据的聊天方出具短时、一次性、绑定站点与型号的交接码；产品页在平台自身
+# 来源上用它换取同一会话的新凭据。码与凭据都只存摘要（SHA-256）；长期会话凭据绝不
+# 进入 URL、日志、页面 HTML 或 Referer。
+BUYER_HANDOFF_CODE_TTL_SECONDS = 600  # 交接码有效期：10 分钟
+BUYER_HANDOFF_CODE_KEEP = 40  # 每会话保留的最近交接码行数（含已用/过期，防无上限增长）
+BUYER_HANDOFF_TOKEN_KEEP = 20  # 每会话经交接换取、仍有效的凭据上限（原始凭据不受影响）
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".avif"}
 CAD_3D_EXTENSIONS = {".step", ".stp", ".stl", ".iges", ".igs", ".obj", ".3mf", ".sldprt", ".sldasm"}
 CAD_2D_EXTENSIONS = {".dxf", ".dwg"}
@@ -374,6 +381,26 @@ class Database:
                 token_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS buyer_conversation_tokens (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                token_hash TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'handoff',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_buyer_tokens_conversation ON buyer_conversation_tokens(tenant_id, conversation_id);
+            CREATE TABLE IF NOT EXISTS buyer_handoff_codes (
+                code_hash TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                site_key TEXT NOT NULL,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                product_id TEXT NOT NULL REFERENCES products(id),
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_handoff_codes_conversation ON buyer_handoff_codes(conversation_id);
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -902,11 +929,89 @@ class Database:
     def has_buyer_access(self, tenant_id: str, conversation_id: str, token: str | None) -> bool:
         if not token:
             return False
+        digest = hashlib.sha256(token.encode()).hexdigest()
         row = self.conn.execute(
             "SELECT token_hash FROM buyer_conversation_access WHERE tenant_id=? AND conversation_id=?",
             (tenant_id, conversation_id),
         ).fetchone()
-        return bool(row and hmac.compare_digest(row["token_hash"], hashlib.sha256(token.encode()).hexdigest()))
+        if row and hmac.compare_digest(row["token_hash"], digest):
+            return True
+        # 跨站交接换取的凭据（同会话可有多个来源的凭据；原始凭据始终保留）
+        rows = self.conn.execute(
+            "SELECT token_hash FROM buyer_conversation_tokens WHERE tenant_id=? AND conversation_id=?",
+            (tenant_id, conversation_id),
+        ).fetchall()
+        return any(hmac.compare_digest(candidate["token_hash"], digest) for candidate in rows)
+
+    def create_handoff_code(
+        self,
+        tenant_id: str,
+        site_key: str,
+        conversation_id: str,
+        product_id: str,
+        ttl_seconds: int = BUYER_HANDOFF_CODE_TTL_SECONDS,
+    ) -> tuple[str, str]:
+        """出具一次性交接码：只存摘要，绑定会话、站点与型号，到期或使用后即失效。"""
+        if not self.get_conversation(tenant_id, conversation_id):
+            raise ValueError("会话不存在")
+        code = secrets.token_urlsafe(32)
+        created_at = now_iso()
+        expires_at = (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=max(1, ttl_seconds))).isoformat()
+        self.conn.execute(
+            "INSERT INTO buyer_handoff_codes(code_hash, tenant_id, site_key, conversation_id, product_id, created_at, expires_at, used_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+            (hashlib.sha256(code.encode()).hexdigest(), tenant_id, site_key, conversation_id, product_id, created_at, expires_at),
+        )
+        # 只保留该会话最近若干行，防止重复点击导致无上限增长；历史行不参与任何放行。
+        self.conn.execute(
+            "DELETE FROM buyer_handoff_codes WHERE conversation_id=? AND code_hash NOT IN ("
+            "SELECT code_hash FROM buyer_handoff_codes WHERE conversation_id=? ORDER BY rowid DESC LIMIT ?)",
+            (conversation_id, conversation_id, BUYER_HANDOFF_CODE_KEEP),
+        )
+        self._audit(tenant_id, "conversation", conversation_id, "handoff_code_created", "buyer-web", f"site={site_key};product={product_id}")
+        self.conn.commit()
+        return code, expires_at
+
+    def exchange_handoff_code(self, code: str, site_key: str, product_id: str, tenant_id: str) -> dict[str, object]:
+        """用一次性交接码换取同一会话的新凭据。
+
+        全部绑定与一次性检查通过后，在同一写事务内消费代码并出具新凭据：
+        并发交换同一代码只有一次成功；原始凭据与其他已发凭据在交换前后都保持有效。
+        """
+        row = self.conn.execute(
+            "SELECT * FROM buyer_handoff_codes WHERE code_hash=?", (hashlib.sha256(code.encode()).hexdigest(),)
+        ).fetchone()
+        if not row:
+            return {"ok": False, "error": "handoff_not_found"}
+        if row["site_key"] != site_key or row["product_id"] != product_id or row["tenant_id"] != tenant_id:
+            return {"ok": False, "error": "handoff_binding_mismatch"}
+        if row["used_at"]:
+            return {"ok": False, "error": "handoff_already_used"}
+        if row["expires_at"] <= now_iso():
+            return {"ok": False, "error": "handoff_expired"}
+        if not self.get_conversation(tenant_id, row["conversation_id"]):
+            return {"ok": False, "error": "handoff_expired"}
+        token = secrets.token_urlsafe(32)
+        timestamp = now_iso()
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            consumed = self.conn.execute(
+                "UPDATE buyer_handoff_codes SET used_at=? WHERE code_hash=? AND used_at IS NULL",
+                (timestamp, row["code_hash"]),
+            )
+            if consumed.rowcount != 1:
+                return {"ok": False, "error": "handoff_already_used"}
+            self.conn.execute(
+                "INSERT INTO buyer_conversation_tokens(id, conversation_id, tenant_id, token_hash, source, created_at) VALUES (?, ?, ?, ?, 'handoff', ?)",
+                (secrets.token_hex(12), row["conversation_id"], tenant_id, hashlib.sha256(token.encode()).hexdigest(), timestamp),
+            )
+            self.conn.execute(
+                "DELETE FROM buyer_conversation_tokens WHERE conversation_id=? AND id NOT IN ("
+                "SELECT id FROM buyer_conversation_tokens WHERE conversation_id=? ORDER BY rowid DESC LIMIT ?)",
+                (row["conversation_id"], row["conversation_id"], BUYER_HANDOFF_TOKEN_KEEP),
+            )
+            self._audit(tenant_id, "conversation", row["conversation_id"], "handoff_code_exchanged", "buyer-web", f"site={site_key};product={product_id}")
+        return {"ok": True, "conversation_id": row["conversation_id"], "access_token": token}
 
     def list_messages(self, tenant_id: str, conversation_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -2323,10 +2428,13 @@ a{color:#c4b5fd;text-decoration:none}a:hover{color:#ede9fe;text-decoration:none}
 
 def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh", public: bool = False) -> str:
     header_html = "<header><strong>Industrial Pump Supplier <small>· DEMO</small></strong><nav><a href='#specifications'>Specifications / 参数</a><a href='#downloads'>Documents / 资料</a><a href='#product-rfq'>RFQ / 询价</a></nav></header>" if public else f"<header><strong><span class='brand-mark' aria-hidden='true'></span>Growave</strong><nav><a href='/admin'>{'管理概览' if lang == 'zh' else 'Overview'}</a><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/admin/sales'>{'销售工作台' if lang == 'zh' else 'Sales desk'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>"
+    # 公开页禁止把完整 URL（含可能的查询参数）经 Referer 传给外部资源；交接码只走 fragment，
+    # 本就不发送给服务器也不进 Referer，这里的策略是对公开页的额外防护。
+    referrer_meta = "<meta name='referrer' content='no-referrer'>" if public else ""
     return f"""<!doctype html>
 <html lang='{ 'en' if lang == 'en' else 'zh-CN' }'>
 <head>
-<meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
+<meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>{referrer_meta}
 <title>{esc(title)} · Growave</title>
 <style>
 {BASE_CSS}
@@ -2914,6 +3022,61 @@ class Handler(BaseHTTPRequestHandler):
                 {"conversation_id": conversation_id, "access_token": token, "status": "active"}, 201,
                 site["allowed_origin"] if self.headers.get("Origin") else None,
             )
+            return
+        if path == "/api/v1/buyer/handoff/exchange":
+            # 跨站会话交接：产品页（平台自身来源）用一次性交接码换取同一会话的新凭据。
+            # 只在平台页面来源上受理——请求带 Origin 且与请求 Host 不同源时直接拒绝，
+            # 且本端点永不返回跨域放行头；交接码本身是唯一秘密，长期会话凭据不进 URL。
+            payload = self.read_json()
+            if payload is None:
+                return
+            origin = self.headers.get("Origin")
+            same_host_page = bool(origin) and urlparse(origin).netloc == self.headers.get("Host") and urlparse(origin).scheme in {"http", "https"}
+            if origin and not same_host_page:
+                self.send_json({"error": "origin_not_allowed"}, 403)
+                return
+            site = self.db.get_buyer_site(self.headers.get("X-Site-Key", "").strip())
+            if not site:
+                self.send_json({"error": "site_not_found"}, 404)
+                return
+            code = payload.get("code")
+            product_id = payload.get("product_id")
+            if not isinstance(code, str) or not code.strip() or not isinstance(product_id, str) or not product_id.strip():
+                self.send_json({"error": "handoff_parameters_required"}, 422)
+                return
+            product = self.db.get_product(site["tenant_id"], product_id.strip())
+            if not product or product["status"] == "withdrawn" or not self.db.get_published_version(site["tenant_id"], product["id"]):
+                # 该站点企业下没有这个可公开型号（含跨企业、未发布、已撤回）：视为绑定不符，不发凭据
+                self.send_json({"error": "handoff_binding_mismatch"}, 403)
+                return
+            result = self.db.exchange_handoff_code(code.strip(), site["site_key"], product["id"], site["tenant_id"])
+            if not result["ok"]:
+                statuses = {"handoff_not_found": 404, "handoff_expired": 410, "handoff_already_used": 409, "handoff_binding_mismatch": 403}
+                self.send_json({"error": str(result["error"])}, statuses.get(str(result["error"]), 400))
+                return
+            self.send_json({"conversation_id": result["conversation_id"], "access_token": result["access_token"]}, 200)
+            return
+        api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/handoff-codes", path)
+        if api_match:
+            # 持有会话凭据的原官网聊天（已登记来源）为产品链接出具一次性交接码
+            access = self.api_conversation(api_match.group(1))
+            if not access:
+                return
+            payload = self.read_json()
+            if payload is None:
+                return
+            site, conversation = access
+            origin = site["allowed_origin"] if self.headers.get("Origin") else None
+            product_id = payload.get("product_id")
+            if not isinstance(product_id, str) or not product_id.strip():
+                self.send_json({"error": "product_required"}, 422, origin)
+                return
+            product = self.db.get_product(site["tenant_id"], product_id.strip())
+            if not product or product["status"] == "withdrawn" or not self.db.get_published_version(site["tenant_id"], product["id"]):
+                self.send_json({"error": "product_not_found"}, 404, origin)
+                return
+            code, expires_at = self.db.create_handoff_code(site["tenant_id"], site["site_key"], conversation["id"], product["id"])
+            self.send_json({"code": code, "expires_at": expires_at, "product_id": product["id"]}, 201, origin)
             return
         api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/messages", path)
         if api_match:
@@ -4538,6 +4701,7 @@ class Handler(BaseHTTPRequestHandler):
         inquiry_link = "<a class='button' href='#product-rfq'>Request a quote / 发起询价</a>" if site else "<p class='muted'>Open the seller's website link to request a quote.</p>"
         rfq_html = f"""<section class='card' id='product-rfq' data-site-key='{esc(site['site_key'])}' data-product-id='{esc(product['id'])}' style='margin-top:18px'>
 <h2>Request a quotation / 发起询价</h2><p class='muted'>You may send a request at any time. Please confirm an email or phone so the seller can reply.</p>
+<p id='product-rfq-session' class='muted' role='status'></p>
 <form id='product-rfq-form'><div class='form-grid'><label>Email <input name='email' type='email'></label><label>Phone <input name='phone' type='tel'></label><label>Quantity <input name='quantity'></label><label>Destination <input name='destination'></label><label class='full'>Requirements <textarea name='notes'></textarea></label></div><label><input name='contact_confirmed' type='checkbox' style='width:auto'> I confirm this reply contact may be used for this request.</label><button type='submit'>Submit RFQ</button></form><p id='product-rfq-result' role='status'></p></section>
 <script src='/reference-client/product-page.js' defer></script>""" if site else ""
         public_path = f"/s/{quote(site['site_key'])}/products/{esc(product['slug'])}" if site else f"/products/{esc(product['slug'])}"

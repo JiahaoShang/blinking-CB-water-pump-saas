@@ -74,6 +74,20 @@ def main() -> None:
     status, _, _ = call(args.base, "/api/v1/buyer/conversations", "POST", payload={"site_key": args.site_key})
     report("无 Origin 的非浏览器调用可用（同机集成/官网服务端转发场景）", status == 201, f"status={status}")
 
+    status, headers, body = call(args.base, "/api/v1/buyer/handoff/exchange", "POST",
+                                 origin=args.evil_origin, payload={"code": "unused-code", "product_id": "unused-product"},
+                                 extra_headers={"X-Site-Key": args.site_key})
+    report("交接交换接口拒绝陌生域名（不返回跨域放行头）",
+           status == 403 and b'"origin_not_allowed"' in body and "access-control-allow-origin" not in headers,
+           f"status={status} ACAO={headers.get('access-control-allow-origin')}")
+
+    status, headers, body = call(args.base, "/api/v1/buyer/handoff/exchange", "POST",
+                                 origin=args.base.rstrip("/"), payload={"code": "unused-code", "product_id": "unused-product"},
+                                 extra_headers={"X-Site-Key": args.site_key})
+    report("交接交换接口只在平台自身来源受理（垃圾参数被拒且不放行跨域头）",
+           status == 403 and b'"handoff_binding_mismatch"' in body and "access-control-allow-origin" not in headers,
+           f"status={status} ACAO={headers.get('access-control-allow-origin')}")
+
     print("结果：", "PASS — 跨域白名单放行/拒绝行为正确" if failed == 0 else f"FAIL — {failed} 项不通过")
     raise SystemExit(0 if failed == 0 else 1)
 

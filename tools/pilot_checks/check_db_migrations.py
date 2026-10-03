@@ -28,6 +28,8 @@ EXPECTED_COLUMNS = {
     "source_documents": ["scope", "scope_revision", "extraction_json", "extraction_note", "processed_at"],
     "product_fields": ["state", "origin", "review_note"],
     "human_tasks": ["question_message_id"],
+    "buyer_conversation_tokens": ["id", "conversation_id", "tenant_id", "token_hash", "source", "created_at"],
+    "buyer_handoff_codes": ["code_hash", "tenant_id", "site_key", "conversation_id", "product_id", "created_at", "expires_at", "used_at"],
 }
 EXPECTED_INDEXES = [
     "idx_messages_idempotency",
@@ -35,6 +37,8 @@ EXPECTED_INDEXES = [
     "idx_recommendations_idempotency",
     "idx_answers_question",
     "idx_human_tasks_question",
+    "idx_buyer_tokens_conversation",
+    "idx_handoff_codes_conversation",
 ]
 
 
