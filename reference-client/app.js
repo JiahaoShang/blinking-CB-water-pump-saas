@@ -23,8 +23,8 @@ let pendingQuestion = null;
 $('site-key').value = siteKey;
 
 const words = {
-  en: { connect: 'Connect', assistantTitle: 'Pump product assistant', assistantSubtitle: 'Technical information with sources', stopContact: 'Stop proactive contact', quote: 'Request a quote', refresh: 'Refresh replies', send: 'Send', needSite: 'Enter the website key from the seller workspace.', noSession: 'Connect before sending a message.', confirmed: 'Confirmed requirements', draft: 'Check these extracted values before matching', unknown: 'Unknown', confirm: 'Confirm requirements', find: 'Find products', noMatch: 'No reliable candidate. Ask an engineer to review your application.', ask: 'Product answer', greeting: "Hello! I'm your consulting assistant — feel free to ask me anything about our products.", placeholder: 'Describe your requirements (e.g. flow 3 m³/h, head 45 m) — or just ask a question', requestEngineer: 'Ask an engineer to review', rfq: 'RFQ', edit: 'Edit this RFQ', save: 'Submit RFQ', saveEdit: 'Save changes', contact: 'Reply email or phone', confirmContact: 'I confirm this reply contact can be used for this request', quantity: 'Quantity', destination: 'Destination', notes: 'Requirements and notes', error: 'The request did not complete. Your entries remain here; review the message and retry.', noDraft: 'Your message was saved, but the requirements were not extracted yet. Send again to retry — your text is kept.' },
-  zh: { connect: '连接', assistantTitle: '水泵产品助手', assistantSubtitle: '带出处的技术信息', stopContact: '停止主动联系', quote: '发起询价', refresh: '刷新回复', send: '发送', needSite: '请输入卖家系统提供的网站标识。', noSession: '请先连接，再发送消息。', confirmed: '已确认工况', draft: '请核对提取的工况后再选型', unknown: '不确定', confirm: '确认工况', find: '查找产品', noMatch: '暂无可靠候选，可请求工程师协助核实。', ask: '产品问答', greeting: '你好，我是您的咨询助手——您可以随时向我提出任何关于产品的问题。', placeholder: '描述工况（例如：流量 3 m³/h，扬程 45 m），或直接提问', requestEngineer: '请求工程师核实', rfq: '询价', edit: '编辑原 RFQ', save: '提交询价', saveEdit: '保存修改', contact: '可回复邮箱或电话', confirmContact: '我确认销售可通过上述方式回复本次请求', quantity: '数量', destination: '目的地', notes: '需求说明', error: '操作未完成。输入内容仍保留，请查看提示后重试。', noDraft: '消息已保存，但需求提取尚未完成；请再次发送重试，输入内容已保留。' },
+  en: { connect: 'Connect', assistantTitle: 'Pump product assistant', assistantSubtitle: 'Technical information with sources', stopContact: 'Stop proactive contact', quote: 'Request a quote', send: 'Send', needSite: 'Enter the website key from the seller workspace.', noSession: 'Connect before sending a message.', confirmed: 'Confirmed requirements', draft: 'Check these extracted values before matching', unknown: 'Unknown', confirm: 'Confirm requirements', find: 'Find products', noMatch: 'No reliable candidate. Ask an engineer to review your application.', ask: 'Product answer', greeting: "Hello! I'm your consulting assistant — feel free to ask me anything about our products.", placeholder: 'Describe your requirements (e.g. flow 3 m³/h, head 45 m) — or just ask a question', requestEngineer: 'Ask an engineer to review', replyHint: 'Reply using the message box below.', rfq: 'RFQ', edit: 'Edit this RFQ', save: 'Submit RFQ', saveEdit: 'Save changes', contact: 'Reply email or phone', confirmContact: 'I confirm this reply contact can be used for this request', quantity: 'Quantity', destination: 'Destination', notes: 'Requirements and notes', error: 'The request did not complete. Your entries remain here; review the message and retry.', noDraft: 'Your message was saved, but the requirements were not extracted yet. Send again to retry — your text is kept.' },
+  zh: { connect: '连接', assistantTitle: '水泵产品助手', assistantSubtitle: '带出处的技术信息', stopContact: '停止主动联系', quote: '发起询价', send: '发送', needSite: '请输入卖家系统提供的网站标识。', noSession: '请先连接，再发送消息。', confirmed: '已确认工况', draft: '请核对提取的工况后再选型', unknown: '不确定', confirm: '确认工况', find: '查找产品', noMatch: '暂无可靠候选，可请求工程师协助核实。', ask: '产品问答', greeting: '你好，我是您的咨询助手——您可以随时向我提出任何关于产品的问题。', placeholder: '描述工况（例如：流量 3 m³/h，扬程 45 m），或直接提问', requestEngineer: '请求工程师核实', replyHint: '请在下方输入框直接回复', rfq: '询价', edit: '编辑原 RFQ', save: '提交询价', saveEdit: '保存修改', contact: '可回复邮箱或电话', confirmContact: '我确认销售可通过上述方式回复本次请求', quantity: '数量', destination: '目的地', notes: '需求说明', error: '操作未完成。输入内容仍保留，请查看提示后重试。', noDraft: '消息已保存，但需求提取尚未完成；请再次发送重试，输入内容已保留。' },
 };
 const t = (key) => words[locale][key];
 function node(tag, className = '', value = '') { const n = document.createElement(tag); if (className) n.className = className; if (value) n.textContent = value; return n; }
@@ -54,7 +54,7 @@ async function connect() {
   if (saved?.conversationId && saved?.token) {
     conversationId = saved.conversationId;
     token = saved.token;
-    try { await refresh(); return; } catch (error) { showNotice(error.message); return; }
+    try { await refresh(); startPolling(); return; } catch (error) { showNotice(error.message); return; }
   }
   try {
     const started = await api('/conversations', 'POST', { site_key: siteKey, locale });
@@ -62,13 +62,69 @@ async function connect() {
     token = started.access_token;
     localStorage.setItem(sessionKey(), JSON.stringify({ conversationId, token }));
     await refresh();
+    startPolling();
   } catch (error) { showNotice(error.message); }
 }
 async function refresh() {
   if (!conversationId) { showNotice(t('noSession')); return; }
   current = await api(`/conversations/${conversationId}`);
+  for (const message of current.messages || []) seenMessageIds.add(message.id);
+  lastFingerprint = conversationFingerprint(current);
   showNotice('');
   render();
+}
+// 自动同步：像正常聊天一样，新回复在数秒内自动出现（无需手动刷新）。
+// 参考实现用轻量轮询（3 秒；真实站点可换 SSE/WebSocket）。窗口收起时改为在启动按钮上显示未读角标。
+const POLL_INTERVAL_MS = 3000;
+let pollTimer = null;
+let lastFingerprint = '';
+let unreadCount = 0;
+let seenMessageIds = new Set();
+let taskReplyInFlight = false;
+function conversationFingerprint(data) {
+  return JSON.stringify([
+    (data.messages || []).map((m) => m.id).join(','),
+    (data.answers || []).map((a) => `${a.id}:${a.status}`).join(','),
+    (data.human_tasks || []).map((t) => `${t.id}:${t.status}`).join(','),
+    (data.rfqs || []).map((r) => `${r.id}:${r.current_revision}`).join(','),
+    data.requirement?.revision_id || '',
+    data.recommendation?.recommendation_id || '',
+  ]);
+}
+function setBadge(count) {
+  unreadCount = count;
+  const badge = $('chat-badge');
+  badge.hidden = count <= 0;
+  badge.textContent = count > 9 ? '9+' : String(count);
+}
+function renderIfIdle() {
+  // 聊天区内有未提交的输入（如询价表单）时先不改动界面，下一轮轮询再试，避免清掉正在填写的内容。
+  const busy = [...log.querySelectorAll('input,textarea')].some((el) => String(el.value || '').trim());
+  if (busy) return false;
+  render();
+  return true;
+}
+async function poll() {
+  if (!conversationId) return;
+  try {
+    const data = await api(`/conversations/${conversationId}`);
+    const fingerprint = conversationFingerprint(data);
+    if (fingerprint === lastFingerprint) return;
+    const fresh = (data.messages || []).filter((message) => !seenMessageIds.has(message.id));
+    for (const message of data.messages || []) seenMessageIds.add(message.id);
+    const incoming = fresh.filter((message) => message.role !== 'buyer').length;
+    current = data;
+    if ($('chat-panel').hidden) {
+      lastFingerprint = fingerprint;
+      if (incoming) setBadge(unreadCount + incoming);
+    } else if (renderIfIdle()) {
+      lastFingerprint = fingerprint;
+    }
+  } catch (error) { /* 轮询失败静默重试；显式操作仍会给出错误提示。 */ }
+}
+function startPolling() {
+  // 极简测试桩可能不提供定时器：缺省时跳过轮询，不影响其余功能。
+  if (!pollTimer && typeof setInterval === 'function') pollTimer = setInterval(poll, POLL_INTERVAL_MS);
 }
 // 打开窗口即见的欢迎语：永远作为对话的第一条消息（语言跟随系统判定，可切换）。
 function appendGreeting() {
@@ -88,7 +144,6 @@ function applyLocale() {
   $('chat-language').textContent = locale === 'en' ? '中文' : 'EN';
   $('connect').textContent = t('connect');
   $('show-rfq').textContent = t('quote');
-  $('refresh').textContent = t('refresh');
   $('stop-contact').textContent = t('stopContact');
   $('chat-title').textContent = t('assistantTitle');
   $('chat-subtitle').textContent = t('assistantSubtitle');
@@ -269,15 +324,8 @@ function renderAnswers(answers, tasks) {
       card.append(node('span', 'pill', task.status));
       if (task.status === 'waiting_buyer') {
         card.append(node('p', '', task.followup_question || 'The engineer needs one more detail.'));
-        const form = node('form');
-        const reply = node('textarea'); reply.required = true; reply.rows = 2; reply.placeholder = locale === 'en' ? 'Your additional details' : '补充工况'; form.append(reply);
-        const submit = node('button', '', locale === 'en' ? 'Reply to engineer' : '回复工程师'); submit.type = 'submit'; form.append(submit);
-        form.addEventListener('submit', async (event) => {
-          event.preventDefault();
-          try { await api(`/conversations/${conversationId}/human-tasks/${task.id}/responses`, 'POST', { text: reply.value.trim() }); await refresh(); }
-          catch (error) { showNotice(error.message); }
-        });
-        card.append(form);
+        // 不再放独立表单：回复统一走底部输入框（与真人聊天一致），直接发送即作为对工程师的回复。
+        card.append(node('p', 'muted', t('replyHint')));
       }
     }
     else card.append(action(t('requestEngineer'), async () => {
@@ -323,10 +371,14 @@ function showRfqForm(rfq = null) {
   card.append(form); log.scrollTop = log.scrollHeight;
 }
 
-$('chat-launcher').addEventListener('click', () => { $('chat-panel').hidden = false; $('chat-launcher').setAttribute('aria-expanded', 'true'); $('site-key').focus(); });
+$('chat-launcher').addEventListener('click', () => {
+  $('chat-panel').hidden = false;
+  $('chat-launcher').setAttribute('aria-expanded', 'true');
+  setBadge(0);
+  if (conversationId) refresh().catch((error) => showNotice(error.message)); else $('site-key').focus();
+});
 $('chat-close').addEventListener('click', () => { $('chat-panel').hidden = true; $('chat-launcher').setAttribute('aria-expanded', 'false'); });
 $('connect').addEventListener('click', connect);
-$('refresh').addEventListener('click', () => refresh().catch((error) => showNotice(error.message)));
 $('show-rfq').addEventListener('click', () => showRfqForm());
 $('stop-contact').addEventListener('click', () => {
   if (!conversationId) { showNotice(t('noSession')); return; }
@@ -345,7 +397,20 @@ $('message-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!conversationId) { showNotice(t('noSession')); return; }
   const value = $('message').value.trim(); if (!value) return;
-  // 统一输入框：像提问 → 走「有据问答」（自动绑定当前推荐型号）；否则 → 走「需求识别」。
+  // 统一输入框分流（优先级从高到低）：
+  // ① 有工程师追问待回复 → 作为对工程师的回复（保持同一条对话线，避免买家补充内容误入其他管线）；
+  // ② 像提问 → 「有据问答」（自动绑定当前推荐型号）；③ 其余 → 「需求识别」。
+  const waitingTask = (current?.human_tasks || []).find((task) => task.status === 'waiting_buyer');
+  if (waitingTask) {
+    if (taskReplyInFlight) return;
+    taskReplyInFlight = true;
+    try {
+      await api(`/conversations/${conversationId}/human-tasks/${waitingTask.id}/responses`, 'POST', { text: value });
+      $('message').value = ''; await refresh();
+    } catch (error) { showNotice(error.message); }
+    finally { taskReplyInFlight = false; }
+    return;
+  }
   if (looksLikeQuestion(value)) {
     const productId = current?.recommendation?.results?.[0]?.product_id || null;
     const payload = { product_id: productId, question: value };
@@ -368,6 +433,8 @@ $('message-form').addEventListener('submit', async (event) => {
   catch (error) { showNotice(error.message); }
 });
 $('chat-language').addEventListener('click', () => { locale = locale === 'en' ? 'zh' : 'en'; applyLocale(); render(); });
+// 回到本页时立即同步一次（后台标签页定时器会被浏览器降频，回来时补一次）。
+document.addEventListener('visibilitychange', () => { if (!document.hidden && conversationId) poll(); });
 // 初次渲染：放置欢迎语，并按系统语言落地界面文案。
 applyLocale();
 render();

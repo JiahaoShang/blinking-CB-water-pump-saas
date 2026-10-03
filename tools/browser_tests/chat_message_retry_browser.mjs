@@ -98,12 +98,14 @@ const fetchImpl = async (input, init = {}) => {
 };
 
 const context = vm.createContext({
-  document: { getElementById: (id) => elements[id] || null, createElement: (tag) => new StubNode(tag) },
+  document: { getElementById: (id) => elements[id] || null, createElement: (tag) => new StubNode(tag), addEventListener() {}, hidden: false },
   location: { search: `?site_key=${config.siteKey}` },
   localStorage: storage,
   fetch: fetchImpl,
   crypto: { randomUUID },
   URLSearchParams,
+  setInterval: () => 0,
+  clearInterval: () => {},
   console,
 });
 vm.runInContext(source, context, { filename: 'reference-client/app.js' });
