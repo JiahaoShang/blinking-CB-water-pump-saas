@@ -48,6 +48,30 @@ class BuyerApiTests(unittest.TestCase):
         conn.close()
         return result
 
+    def html_get(self, path):
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        conn.request("GET", path)
+        response = conn.getresponse()
+        result = response.status, response.read().decode()
+        conn.close()
+        return result
+
+    def test_site_product_page_is_tenant_scoped_and_has_api_rfq_entry(self):
+        self.db.seed_demo_products("demo-tenant")
+        product = self.db.list_products("demo-tenant")[0]
+        self.db.approve_product("demo-tenant", product["id"])
+        self.db.publish_product("demo-tenant", product["id"])
+        page_path = f"/s/site-a/products/{product['slug']}"
+        status, page = self.html_get(page_path)
+        self.assertEqual(status, 200)
+        self.assertIn("id='product-rfq'", page)
+        self.assertIn("data-site-key='site-a'", page)
+        self.assertIn("data-product-id='" + product["id"] + "'", page)
+        self.assertNotIn("href='/admin'", page)
+        self.assertNotIn("mailto:sales@example.invalid", page)
+        self.assertEqual(self.html_get(f"/s/site-b/products/{product['slug']}")[0], 404)
+        self.assertEqual(self.html_get("/reference-client/product-page.js")[0], 200)
+
     def test_site_scoped_conversation_requires_private_token(self):
         status, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a", "locale": "en"})
         self.assertEqual(status, 201)
@@ -149,7 +173,7 @@ class BuyerApiTests(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertEqual(result["status"], "recommended")
         self.assertEqual(result["results"][0]["model"], "CB-80A")
-        self.assertTrue(result["results"][0]["detail_url"].startswith("/products/"))
+        self.assertTrue(result["results"][0]["detail_url"].startswith("/s/site-a/products/"))
         _, _, current = self.request("GET", path, headers=headers)
         self.assertEqual(current["requirement"]["status"], "confirmed")
         self.assertEqual(current["recommendation"]["recommendation_id"], result["recommendation_id"])

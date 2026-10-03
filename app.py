@@ -1619,7 +1619,8 @@ def answer_from_approved_material(
     return "grounded", answer, product_id, version["id"], [citation], ""
 
 
-def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh") -> str:
+def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh", public: bool = False) -> str:
+    header_html = "<header><strong>Industrial Pump Supplier</strong></header>" if public else f"<header><strong><span class='brand-mark' aria-hidden='true'></span>Growave</strong><nav><a href='/admin'>{'管理概览' if lang == 'zh' else 'Overview'}</a><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/admin/sales'>{'销售工作台' if lang == 'zh' else 'Sales desk'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>"
     return f"""<!doctype html>
 <html lang='{ 'en' if lang == 'en' else 'zh-CN' }'>
 <head>
@@ -1630,7 +1631,7 @@ def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh"
 *{{box-sizing:border-box}}html{{background:var(--bg)}}body{{min-height:100vh;margin:0;background-color:var(--bg);background-image:linear-gradient(rgba(139,92,246,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(139,92,246,.045) 1px,transparent 1px),radial-gradient(circle at 85% 0%,rgba(139,92,246,.15),transparent 28rem);background-size:48px 48px,48px 48px,100% 100%;color:var(--ink);font:15px/1.6 "Avenir Next","SF Pro Display","PingFang SC","Microsoft YaHei",sans-serif}}
 a{{color:#c4b5fd;text-decoration:none}}a:hover{{color:#ede9fe;text-decoration:none}}header{{position:sticky;top:0;z-index:10;background:rgba(8,7,15,.88);backdrop-filter:blur(18px);border-bottom:1px solid rgba(139,92,246,.18);color:var(--ink);padding:17px 32px;display:flex;justify-content:space-between;align-items:center;gap:22px}}header strong{{font-size:18px;letter-spacing:.08em}}header nav{{display:flex;gap:4px;align-items:center;justify-content:flex-end;flex-wrap:wrap}}header nav a{{color:var(--muted);padding:7px 10px;border-radius:9px}}header nav a:hover{{background:rgba(139,92,246,.12);color:var(--ink)}}main{{max-width:1240px;margin:0 auto;padding:54px 28px 80px}}h1{{font-size:38px;line-height:1.15;letter-spacing:-.035em;margin:0 0 8px}}h2{{font-size:21px;letter-spacing:-.02em;margin:0 0 14px}}h3{{font-size:16px;margin:20px 0 8px}}.muted{{color:var(--muted)}}.notice{{padding:13px 15px;border-radius:12px;background:rgba(103,232,197,.1);border:1px solid rgba(103,232,197,.22);color:#9af2da;margin:0 0 20px}}.error{{padding:13px 15px;border-radius:12px;background:rgba(255,143,163,.1);border:1px solid rgba(255,143,163,.23);color:#ffb1c0;margin:0 0 20px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}}.metric-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:18px}}.metric{{font-size:38px;font-weight:750;line-height:1.1;margin:8px 0;color:#fff}}.action-card{{display:block;color:var(--ink);transition:transform .2s ease,border-color .2s ease,background .2s ease}}.action-card:hover{{text-decoration:none;border-color:rgba(168,85,247,.75);background:rgba(32,24,52,.95);transform:translateY(-2px)}}.card{{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 18px 45px rgba(0,0,0,.2);backdrop-filter:blur(12px)}}.toolbar{{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:26px}}button,.button{{border:0;border-radius:10px;padding:10px 15px;background:linear-gradient(135deg,var(--accent),var(--accent-strong));color:#fff;font-weight:700;cursor:pointer;display:inline-block;box-shadow:0 8px 24px rgba(139,92,246,.24)}}button:hover,.button:hover{{filter:brightness(1.08);transform:translateY(-1px)}}button.secondary,.button.secondary{{background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.35);color:#ddd6fe;box-shadow:none}}button.warn,.button.warn{{background:rgba(246,197,106,.12);border:1px solid rgba(246,197,106,.35);color:var(--warn);box-shadow:none}}button.danger,.button.danger{{background:rgba(255,143,163,.1);border:1px solid rgba(255,143,163,.35);color:var(--danger);box-shadow:none}}form.inline{{display:inline}}label{{display:block;font-weight:700;margin:10px 0 5px;color:#ded8ed}}input,select,textarea{{width:100%;padding:10px 11px;border:1px solid #3a3152;border-radius:10px;font:inherit;color:var(--ink);background:#0f0d19}}input::placeholder,textarea::placeholder{{color:#716a85}}input:focus,select:focus,textarea:focus{{outline:2px solid rgba(168,85,247,.35);border-color:var(--accent)}}textarea{{min-height:76px;resize:vertical}}.form-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px}}.full{{grid-column:1/-1}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:12px 8px;border-bottom:1px solid var(--line);vertical-align:top}}th{{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}}.badge{{display:inline-flex;align-items:center;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:700;background:rgba(139,92,246,.13);border:1px solid rgba(139,92,246,.24);color:#d8ccff}}.badge.published,.badge.approved{{background:rgba(103,232,197,.1);border-color:rgba(103,232,197,.25);color:#9af2da}}.badge.pending_review{{background:rgba(246,197,106,.1);border-color:rgba(246,197,106,.25);color:#f7d991}}.badge.withdrawn{{background:rgba(255,143,163,.1);border-color:rgba(255,143,163,.25);color:#ffb1c0}}.field-state{{font-size:12px;color:var(--muted)}}.source{{display:flex;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)}}.product-hero{{background:linear-gradient(135deg,#17112d 0%,#31206a 52%,#5627a4 100%);color:white;border:1px solid rgba(196,181,253,.22);border-radius:22px;padding:36px;margin-bottom:20px;box-shadow:0 22px 60px rgba(69,35,132,.25)}}.product-hero .eyebrow{{text-transform:uppercase;letter-spacing:.14em;font-size:12px;opacity:.8}}.product-hero h1{{font-size:42px;margin:4px 0 8px}}.kv{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:24px}}.kv div{{background:rgba(8,7,15,.24);border:1px solid rgba(255,255,255,.14);padding:13px;border-radius:12px}}.kv b{{display:block;font-size:12px;opacity:.75}}.kv span{{font-size:19px;font-weight:700}}.footer-note{{margin-top:28px;padding:14px 16px;border-left:3px solid #a78bfa;background:rgba(167,139,250,.08);color:#c4b5fd;border-radius:0 10px 10px 0}}.brand-mark{{display:inline-block;width:10px;height:10px;margin-right:10px;border-radius:3px 8px 3px 8px;background:linear-gradient(135deg,#c4b5fd,#7c3aed);box-shadow:0 0 18px rgba(168,85,247,.75);transform:rotate(45deg)}}@media(max-width:700px){{header{{padding:15px 18px;align-items:flex-start;flex-direction:column}}header nav{{justify-content:flex-start;overflow:auto;flex-wrap:nowrap;width:100%;padding-bottom:2px}}main{{padding:34px 14px 60px}}.form-grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}h1{{font-size:30px}}.product-hero h1{{font-size:34px}}table{{font-size:13px}}}}
 </style></head><body>
-<header><strong><span class='brand-mark' aria-hidden='true'></span>Growave</strong><nav><a href='/admin'>{'管理概览' if lang == 'zh' else 'Overview'}</a><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/admin/sales'>{'销售工作台' if lang == 'zh' else 'Sales desk'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>
+{header_html}
 <main>{body}</main></body></html>"""
 
 
@@ -1773,7 +1774,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "site_not_found"}, 404)
             return None
         origin = self.headers.get("Origin")
-        if origin and origin != site["allowed_origin"]:
+        same_host_page = origin and urlparse(origin).netloc == self.headers.get("Host") and urlparse(origin).scheme in {"http", "https"}
+        if origin and origin != site["allowed_origin"] and not same_host_page:
             self.send_json({"error": "origin_not_allowed"}, 403)
             return None
         return site
@@ -1850,6 +1852,7 @@ class Handler(BaseHTTPRequestHandler):
             "/reference-client": ("index.html", "text/html; charset=utf-8"),
             "/reference-client/app.js": ("app.js", "text/javascript; charset=utf-8"),
             "/reference-client/style.css": ("style.css", "text/css; charset=utf-8"),
+            "/reference-client/product-page.js": ("product-page.js", "text/javascript; charset=utf-8"),
         }
         if path in reference_files:
             self.send_reference_file(*reference_files[path])
@@ -1957,9 +1960,25 @@ class Handler(BaseHTTPRequestHandler):
         if match:
             self.public_product(match.group(1), query)
             return
+        match = re.fullmatch(r"/s/([A-Za-z0-9_-]+)/products/([a-zA-Z0-9-]+)", path)
+        if match:
+            site = self.db.get_buyer_site(match.group(1))
+            if not site:
+                self.send_html(layout("产品不可用", "<div class='error'>网站入口不可用。</div>"), 404)
+                return
+            self.public_product(match.group(2), query, site)
+            return
         match = re.fullmatch(r"/products/([a-zA-Z0-9-]+)/sources/([a-f0-9]+)/?", path)
         if match:
             self.public_source(match.group(1), match.group(2))
+            return
+        match = re.fullmatch(r"/s/([A-Za-z0-9_-]+)/products/([a-zA-Z0-9-]+)/sources/([a-f0-9]+)", path)
+        if match:
+            site = self.db.get_buyer_site(match.group(1))
+            if not site:
+                self.send_html(layout("资料不可用", "<div class='error'>网站入口不可用。</div>", public=True), 404)
+                return
+            self.public_source(match.group(2), match.group(3), site)
             return
         if path.startswith("/files/"):
             self.send_html(layout("文件下载", "<div class='error'>演示环境不提供公开文件直链，请从企业后台下载或补充对象存储权限。</div>"), 404)
@@ -2062,6 +2081,8 @@ class Handler(BaseHTTPRequestHandler):
             values = json.loads(revision["values_json"])
             status, raw_results, missing = match_products(self.db, site["tenant_id"], values)
             results = [result for result in raw_results if result.get("status") in {"candidate", "needs_confirmation"}]
+            for result in results:
+                result["detail_url"] = f"/s/{quote(site['site_key'])}" + str(result["detail_url"])
             recommendation_id = self.db.save_recommendation(site["tenant_id"], conversation["id"], revision["id"], status, results)
             self.send_json(
                 {"recommendation_id": recommendation_id, "status": status, "results": results, "missing": missing}, 201,
@@ -2777,53 +2798,63 @@ class Handler(BaseHTTPRequestHandler):
 """
         self.send_html(layout("销售线索详情", body), 200)
 
-    def public_product(self, slug: str, query: dict[str, list[str]]) -> None:
-        product = self.db.get_product_by_slug(self.tenant_id, slug)
+    def public_product(self, slug: str, query: dict[str, list[str]], site: sqlite3.Row | None = None) -> None:
+        tenant_id = site["tenant_id"] if site else self.tenant_id
+        product = self.db.get_product_by_slug(tenant_id, slug)
         if not product or product["status"] == "withdrawn":
             self.send_html(layout("产品不可用", "<div class='error'>该产品页尚未发布，或已被撤回。</div><p><a href='/admin/products'>返回企业后台</a></p>"), 404)
             return
-        version = self.db.get_published_version(self.tenant_id, product["id"])
+        version = self.db.get_published_version(tenant_id, product["id"])
         if not version:
             self.send_html(layout("产品不可用", "<div class='error'>找不到已发布版本。</div>"), 404)
             return
         snapshot = json.loads(version["snapshot_json"])
-        sources = self.db.get_sources(self.tenant_id, product["id"])
-        allowed_source_ids = self.db.public_source_ids(self.tenant_id, product["id"])
+        sources = self.db.get_sources(tenant_id, product["id"])
+        allowed_source_ids = self.db.public_source_ids(tenant_id, product["id"])
         cited_source_ids = {field["source_document_id"] for field in snapshot["fields"]}
         lang = query.get("lang", ["en"])[0]
         field_cards = "".join(f"<div><b>{esc(field['label'])}</b><span>{esc(field['value'])} {esc(field['unit'])}</span></div>" for field in snapshot["fields"])
         missing_labels = [FIELD_LABELS[key] for key in snapshot.get("missing_fields", []) if key in FIELD_LABELS]
         missing_html = "<p class='muted'>" + ("Pending information: " if lang == "en" else "待补充信息：") + esc("、".join(missing_labels)) + "</p>" if missing_labels else ""
+        source_prefix = f"/s/{quote(site['site_key'])}" if site else ""
         source_links = "".join(
             f"<li>{esc(source['filename'])} · {esc(source['source_location'])} "
-            + (f"<a href='/products/{esc(product['slug'])}/sources/{esc(source['id'])}'>下载资料</a>" if source["storage_path"] else "<span class='muted'>仅登记元数据</span>")
+            + (f"<a href='{source_prefix}/products/{esc(product['slug'])}/sources/{esc(source['id'])}'>下载资料</a>" if source["storage_path"] else "<span class='muted'>仅登记元数据</span>")
             + "</li>"
             for source in sources if source["id"] in allowed_source_ids and source["id"] in cited_source_ids
         ) or "<li class='muted'>暂无公开资料附件</li>"
         title = f"{product['model']} | Industrial Pump"
+        inquiry_link = "<a class='button' href='#product-rfq'>Request a quote / 发起询价</a>" if site else "<p class='muted'>Open the seller's website link to request a quote.</p>"
+        rfq_html = f"""<section class='card' id='product-rfq' data-site-key='{esc(site['site_key'])}' data-product-id='{esc(product['id'])}' style='margin-top:18px'>
+<h2>Request a quotation / 发起询价</h2><p class='muted'>You may send a request at any time. Please confirm an email or phone so the seller can reply.</p>
+<form id='product-rfq-form'><div class='form-grid'><label>Email <input name='email' type='email'></label><label>Phone <input name='phone' type='tel'></label><label>Quantity <input name='quantity'></label><label>Destination <input name='destination'></label><label class='full'>Requirements <textarea name='notes'></textarea></label></div><label><input name='contact_confirmed' type='checkbox' style='width:auto'> I confirm this reply contact may be used for this request.</label><button type='submit'>Submit RFQ</button></form><p id='product-rfq-result' role='status'></p></section>
+<script src='/reference-client/product-page.js' defer></script>""" if site else ""
+        public_path = f"/s/{quote(site['site_key'])}/products/{esc(product['slug'])}" if site else f"/products/{esc(product['slug'])}"
         body = f"""
 <div class='product-hero'><div class='eyebrow'>Published product version {version['version']}</div><h1>{esc(product['model'])}</h1><p>{esc(product['name'])}</p><div class='kv'>{field_cards}</div>{missing_html}</div>
-<div class='grid'><section class='card'><h2>{'Application' if lang == 'en' else '适用场景'}</h2><p>{esc(product['use_case'])}</p><p class='muted'>{'The values above come from the approved product record and its cited source. Please confirm final sizing with an engineer.' if lang == 'en' else '以上参数来自已核准产品版本及其引用资料。正式选型前请与工程师确认。'}</p></section><section class='card'><h2>{'Source documents' if lang == 'en' else '来源资料'}</h2><ul>{source_links}</ul></section><section class='card'><h2>{'Next step' if lang == 'en' else '继续沟通'}</h2><p>{'Need help checking flow, head or medium compatibility?' if lang == 'en' else '需要核对流量、扬程或介质适用条件？'}</p><a class='button' href='mailto:sales@example.invalid?subject={quote(product['model'])}'>Ask sales / 询价</a></section></div>
-<div class='footer-note'>{'This is an initial technical display, not a price, stock, delivery or engineering-fit commitment.' if lang == 'en' else '这是初步技术展示，不代表价格、库存、交期或正式工程适配承诺。'} · <a href='/products/{esc(product['slug'])}?lang={'zh' if lang == 'en' else 'en'}'>{'切换中文' if lang == 'en' else 'Switch to English'}</a></div>
+<div class='grid'><section class='card'><h2>{'Application' if lang == 'en' else '适用场景'}</h2><p>{esc(product['use_case'])}</p><p class='muted'>{'The values above come from the approved product record and its cited source. Please confirm final sizing with an engineer.' if lang == 'en' else '以上参数来自已核准产品版本及其引用资料。正式选型前请与工程师确认。'}</p></section><section class='card'><h2>{'Source documents' if lang == 'en' else '来源资料'}</h2><ul>{source_links}</ul></section><section class='card'><h2>{'Next step' if lang == 'en' else '继续沟通'}</h2><p>{'Need help checking flow, head or medium compatibility?' if lang == 'en' else '需要核对流量、扬程或介质适用条件？'}</p>{inquiry_link}</section></div>
+{rfq_html}
+<div class='footer-note'>{'This is an initial technical display, not a price, stock, delivery or engineering-fit commitment.' if lang == 'en' else '这是初步技术展示，不代表价格、库存、交期或正式工程适配承诺。'} · <a href='{public_path}?lang={'zh' if lang == 'en' else 'en'}'>{'切换中文' if lang == 'en' else 'Switch to English'}</a></div>
 """
-        page = layout(title, body, lang=lang)
+        page = layout(title, body, lang=lang, public=True)
         json_ld = json.dumps({'@context': 'https://schema.org', '@type': 'Product', 'name': product['name'], 'model': product['model']}, ensure_ascii=False).replace("</", "<\\/")
         page = page.replace("</head>", f"<meta name='description' content='{esc(product['name'])} - approved industrial pump specifications'><script type='application/ld+json'>{json_ld}</script></head>")
         self.send_html(page, 200)
 
-    def public_source(self, slug: str, source_id: str) -> None:
-        product = self.db.get_product_by_slug(self.tenant_id, slug)
-        if not product or product["status"] == "withdrawn" or not self.db.get_published_version(self.tenant_id, product["id"]):
-            self.send_html(layout("资料不可用", "<div class='error'>产品未公开。</div>"), 404)
+    def public_source(self, slug: str, source_id: str, site: sqlite3.Row | None = None) -> None:
+        tenant_id = site["tenant_id"] if site else self.tenant_id
+        product = self.db.get_product_by_slug(tenant_id, slug)
+        if not product or product["status"] == "withdrawn" or not self.db.get_published_version(tenant_id, product["id"]):
+            self.send_html(layout("资料不可用", "<div class='error'>产品未公开。</div>", public=True), 404)
             return
         source = self.db.conn.execute(
             "SELECT * FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
-            (self.tenant_id, product["id"], source_id),
+            (tenant_id, product["id"], source_id),
         ).fetchone()
-        if not source or not source["storage_path"] or source_id not in self.db.public_source_ids(self.tenant_id, product["id"]):
+        if not source or not source["storage_path"] or source_id not in self.db.public_source_ids(tenant_id, product["id"]):
             self.send_html(layout("资料不可用", "<div class='error'>该来源资料没有可下载文件。</div>"), 404)
             return
-        version = self.db.get_published_version(self.tenant_id, product["id"])
+        version = self.db.get_published_version(tenant_id, product["id"])
         if source_id not in {field["source_document_id"] for field in json.loads(version["snapshot_json"])["fields"]}:
             self.send_html(layout("资料不可用", "<div class='error'>该来源资料未纳入当前公开版本。</div>"), 404)
             return

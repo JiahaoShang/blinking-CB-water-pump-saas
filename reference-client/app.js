@@ -115,7 +115,7 @@ function renderRecommendation(recommendation, requirement) {
       const item = node('p');
       item.append(node('strong', '', `${product.model} · ${product.status}`));
       const details = node('div', 'muted', (product.satisfies || []).join('; ') || (product.unknown || []).join('; ')); item.append(details);
-      const link = node('a', '', 'Open product detail ↗'); link.href = product.detail_url; link.target = '_blank'; link.rel = 'noopener'; item.append(link);
+      const link = node('a', '', 'Open product detail ↗'); link.href = product.detail_url.startsWith('/products/') ? `/s/${encodeURIComponent(siteKey)}${product.detail_url}` : product.detail_url; link.target = '_blank'; link.rel = 'noopener'; item.append(link);
       list.append(item);
     }
   };
