@@ -119,17 +119,17 @@ class PublicPageTests(unittest.TestCase):
                 def send_html(self, content, status=200):
                     self.captured = (content, status)
 
-                def send_bytes(self, *args):
+                def send_bytes(self, *args, **kwargs):
                     self.captured = ("file served", 200)
 
             fake = FakeHandler(db)
             Handler.public_product(fake, "t-public", {})
-            self.assertNotIn("下载资料", fake.captured[0])
+            self.assertNotIn(f"/sources/{source_id}'", fake.captured[0])
             Handler.public_source(fake, "t-public", source_id)
             self.assertEqual(fake.captured[1], 404)
             db.allow_public_source("demo-tenant", product_id, source_id, "demo-admin")
             Handler.public_product(fake, "t-public", {})
-            self.assertIn("下载资料", fake.captured[0])
+            self.assertIn(f"/sources/{source_id}'", fake.captured[0])
             Handler.public_source(fake, "t-public", source_id)
             self.assertEqual(fake.captured[1], 200)
             db.revoke_public_source("demo-tenant", product_id, source_id, "demo-admin")

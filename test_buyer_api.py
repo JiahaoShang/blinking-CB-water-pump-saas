@@ -1,4 +1,5 @@
 import http.client
+import hashlib
 import json
 import tempfile
 import threading
@@ -6,7 +7,7 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlencode
 
-from app import Database, Handler, make_server
+from app import Database, Handler, ROOT, make_server
 
 
 class BuyerApiTests(unittest.TestCase):
@@ -55,6 +56,39 @@ class BuyerApiTests(unittest.TestCase):
         result = response.status, response.read().decode()
         conn.close()
         return result
+
+    def raw_get(self, path):
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        conn.request("GET", path)
+        response = conn.getresponse()
+        result = response.status, dict(response.getheaders()), response.read()
+        conn.close()
+        return result
+
+    def test_public_image_preview_and_download_require_current_permission(self):
+        product_id = self.db.create_product("demo-tenant", "IMG-1", "Pump with approved image", "unreviewed use case")
+        source_id = self.db.add_source("demo-tenant", product_id, "pump.png", "PNG", "Image 1")
+        contents = b"\x89PNG\r\n\x1a\n" + b"demo-image"
+        upload = ROOT / "data" / "uploads" / f"{source_id}-pump.png"
+        upload.parent.mkdir(parents=True, exist_ok=True)
+        upload.write_bytes(contents)
+        self.addCleanup(upload.unlink, missing_ok=True)
+        self.db.conn.execute("UPDATE source_documents SET storage_path=?, sha256=? WHERE id=?", (f"data/uploads/{upload.name}", hashlib.sha256(contents).hexdigest(), source_id))
+        self.db.conn.commit()
+        self.db.save_field("demo-tenant", product_id, "flow_range", "10-30", "m³/h", source_id, "Image 1")
+        self.db.approve_product("demo-tenant", product_id)
+        self.db.publish_product("demo-tenant", product_id)
+        path = f"/s/site-a/products/img-1/sources/{source_id}"
+        self.assertEqual(self.raw_get(path + "?preview=1")[0], 404)
+        self.db.allow_public_source("demo-tenant", product_id, source_id, "demo-admin")
+        page = self.html_get("/s/site-a/products/img-1")[1]
+        self.assertIn(path + "?preview=1", page)
+        status, headers, body = self.raw_get(path + "?preview=1")
+        self.assertEqual((status, headers["Content-Type"], body), (200, "image/png", contents))
+        self.assertTrue(headers["Content-Disposition"].startswith("inline;"))
+        self.assertTrue(self.raw_get(path)[1]["Content-Disposition"].startswith("attachment;"))
+        self.db.revoke_public_source("demo-tenant", product_id, source_id, "demo-admin")
+        self.assertEqual(self.raw_get(path + "?preview=1")[0], 404)
 
     def test_site_product_page_is_tenant_scoped_and_has_api_rfq_entry(self):
         self.db.seed_demo_products("demo-tenant")

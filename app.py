@@ -1945,10 +1945,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Vary", "Origin")
         self.end_headers()
 
-    def send_bytes(self, content: bytes, content_type: str, filename: str, status: int = 200) -> None:
+    def send_bytes(self, content: bytes, content_type: str, filename: str, status: int = 200, inline: bool = False) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(filename)}")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Disposition", f"{'inline' if inline else 'attachment'}; filename*=UTF-8''{quote(filename)}")
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
@@ -2104,7 +2105,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         match = re.fullmatch(r"/products/([a-zA-Z0-9-]+)/sources/([a-f0-9]+)/?", path)
         if match:
-            self.public_source(match.group(1), match.group(2))
+            self.public_source(match.group(1), match.group(2), preview=query.get("preview", [""])[0] == "1")
             return
         match = re.fullmatch(r"/s/([A-Za-z0-9_-]+)/products/([a-zA-Z0-9-]+)/sources/([a-f0-9]+)", path)
         if match:
@@ -2112,7 +2113,7 @@ class Handler(BaseHTTPRequestHandler):
             if not site:
                 self.send_html(layout("资料不可用", "<div class='error'>网站入口不可用。</div>", public=True), 404)
                 return
-            self.public_source(match.group(2), match.group(3), site)
+            self.public_source(match.group(2), match.group(3), site, preview=query.get("preview", [""])[0] == "1")
             return
         if path.startswith("/files/"):
             self.send_html(layout("文件下载", "<div class='error'>演示环境不提供公开文件直链，请从企业后台下载或补充对象存储权限。</div>"), 404)
@@ -3046,12 +3047,16 @@ class Handler(BaseHTTPRequestHandler):
         missing_labels = [FIELD_LABELS[key] for key in snapshot.get("missing_fields", []) if key in FIELD_LABELS]
         missing_html = "<p class='muted'>" + ("Pending information: " if lang == "en" else "待补充信息：") + esc("、".join(missing_labels)) + "</p>" if missing_labels else ""
         source_prefix = f"/s/{quote(site['site_key'])}" if site else ""
+        published_sources = [source for source in sources if source["id"] in allowed_source_ids and source["id"] in cited_source_ids and source["storage_path"]]
+        def source_url(source: sqlite3.Row) -> str:
+            return f"{source_prefix}/products/{esc(product['slug'])}/sources/{esc(source['id'])}"
+        image_source = next((source for source in published_sources if Path(source["filename"]).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".avif"}), None)
+        hero_visual = f"<img src='{source_url(image_source)}?preview=1' alt='{esc(product['model'])} · {esc(image_source['filename'])}'>" if image_source else f"<span>{t('Approved product image pending', '已核准产品图片待补充')}</span>"
         source_links = "".join(
-            f"<li>{esc(source['filename'])} · {esc(source['source_location'])} "
-            + (f"<a href='{source_prefix}/products/{esc(product['slug'])}/sources/{esc(source['id'])}'>下载资料</a>" if source["storage_path"] else "<span class='muted'>仅登记元数据</span>")
-            + "</li>"
-            for source in sources if source["id"] in allowed_source_ids and source["id"] in cited_source_ids
-        ) or "<li class='muted'>暂无公开资料附件</li>"
+            f"<li>{esc(source['filename'])} · {esc(source['source_location'])} <a href='{source_url(source)}'>{t('Download', '下载')}</a>"
+            + (f" · <a href='{source_url(source)}?preview=1' target='_blank' rel='noopener'>{t('Preview', '预览')}</a>" if Path(source["filename"]).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".avif", ".pdf"} else "")
+            + "</li>" for source in published_sources
+        ) or f"<li class='muted'>{t('No approved public document', '暂无公开资料附件')}</li>"
         comparison_keys = ("flow_range", "head_range", "power", "material", "media")
         comparison_products = [product] + [item for item in self.db.list_products(tenant_id) if item["id"] != product["id"] and item["status"] == "published"][:2]
         comparison_versions = [(item, self.db.get_published_version(tenant_id, item["id"])) for item in comparison_products]
@@ -3070,7 +3075,7 @@ class Handler(BaseHTTPRequestHandler):
         mobile_cta_html = f"<a class='page-mobile-cta' href='#product-rfq'>{t('Request a quote', '发起询价')}</a>" if site else ""
         body = f"""
 <nav class='page-breadcrumb' aria-label='Breadcrumb'>{t('Home › Products › Pump', '首页 › 产品 › 水泵')} › {esc(product['model'])}</nav>
-<section class='page-hero' id='overview' data-section='hero'><div class='page-visual' role='img' aria-label='{t('Product image pending approval', '产品图片待核准')}'><span>{t('Approved product image pending', '已核准产品图片待补充')}</span></div><div><p class='page-eyebrow'>{t('Published product version', '已发布产品版本')} {version['version']} · {esc(version['published_at'])}</p><h1>{esc(product['model'])}</h1><p class='page-model'>{esc(product['name'])}</p><p class='muted'>{t('Check the sourced flow and head data before asking for a final duty-point review.', '请先核对有出处的流量与扬程，再请工程师确认最终工况。')}</p><div class='page-actions'>{inquiry_link}<a class='button secondary' href='#downloads'>{t('View documents', '查看资料')}</a><a class='button secondary' href='#faq'>{t('Read FAQ', '查看常见问题')}</a></div><div class='page-quick'>{hero_facts}</div>{missing_html}<p class='page-missing'>{t('MOQ, lead time and sample availability: ask the seller.', '起订量、交期、样品状态：请向卖方核实。')}</p></div></section>
+<section class='page-hero' id='overview' data-section='hero'><div class='page-visual' role='img' aria-label='{t('Approved product image', '已核准产品图片') if image_source else t('Product image pending approval', '产品图片待核准')}'>{hero_visual}</div><div><p class='page-eyebrow'>{t('Published product version', '已发布产品版本')} {version['version']} · {esc(version['published_at'])}</p><h1>{esc(product['model'])}</h1><p class='page-model'>{esc(product['name'])}</p><p class='muted'>{t('Check the sourced flow and head data before asking for a final duty-point review.', '请先核对有出处的流量与扬程，再请工程师确认最终工况。')}</p><div class='page-actions'>{inquiry_link}<a class='button secondary' href='#downloads'>{t('View documents', '查看资料')}</a><a class='button secondary' href='#faq'>{t('Read FAQ', '查看常见问题')}</a></div><div class='page-quick'>{hero_facts}</div>{missing_html}<p class='page-missing'>{t('MOQ, lead time and sample availability: ask the seller.', '起订量、交期、样品状态：请向卖方核实。')}</p></div></section>
 <nav class='page-anchors' aria-label='Product sections'><a href='#overview'>{t('Overview', '概览')}</a><a href='#specifications'>{t('Specifications', '参数')}</a><a href='#applications'>{t('Applications', '应用')}</a><a href='#customization'>{t('Customization', '定制')}</a><a href='#downloads'>{t('Documents', '资料')}</a><a href='#faq'>FAQ</a></nav>
 <section class='page-section' data-section='advantages'><h2>{t('What the approved record supports', '已核准资料能说明什么')}</h2><p>{t('Flow and head values below are shown with their source. Final suitability depends on the buyer’s operating point and conditions.', '下列流量、扬程值附有出处；最终适用性仍取决于买方工况。')}</p><div class='page-fact-pair'><div><b>{esc(field_label('flow_range'))}</b>{fact('flow_range')}</div><div><b>{esc(field_label('head_range'))}</b>{fact('head_range')}</div></div></section>
 <section class='page-section' id='specifications' data-section='specifications'><h2>{t('Technical specifications', '技术参数')}</h2><div class='page-groups'>{group_html}</div></section>
@@ -3090,7 +3095,7 @@ class Handler(BaseHTTPRequestHandler):
         page = page.replace("</head>", f"<meta name='description' content='{esc(product['name'])} - approved industrial pump specifications'><script type='application/ld+json'>{json_ld}</script><link rel='stylesheet' href='/reference-client/product-page.css'></head>")
         self.send_html(page, 200)
 
-    def public_source(self, slug: str, source_id: str, site: sqlite3.Row | None = None) -> None:
+    def public_source(self, slug: str, source_id: str, site: sqlite3.Row | None = None, preview: bool = False) -> None:
         tenant_id = site["tenant_id"] if site else self.tenant_id
         product = self.db.get_product_by_slug(tenant_id, slug)
         if not product or product["status"] == "withdrawn" or not self.db.get_published_version(tenant_id, product["id"]):
@@ -3112,7 +3117,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(layout("资料不可用", "<div class='error'>文件存储不可用，请联系管理员。</div>"), 404)
             return
         content_type = mimetypes.guess_type(source["filename"])[0] or "application/octet-stream"
-        self.send_bytes(target.read_bytes(), content_type, source["filename"])
+        previewable = content_type in {"image/png", "image/jpeg", "image/webp", "image/avif", "application/pdf"}
+        self.send_bytes(target.read_bytes(), content_type, source["filename"], inline=preview and previewable)
 
 
 def make_server(db_path: str | os.PathLike[str], host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:
