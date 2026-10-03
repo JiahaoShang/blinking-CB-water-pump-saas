@@ -4056,7 +4056,7 @@ class Handler(BaseHTTPRequestHandler):
     def admin_users(self, query: dict[str, list[str]]) -> None:
         role_labels = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}
         users = self.db.list_users(self.tenant_id)
-        rows = []
+        items = []
         for user in users:
             active = bool(user["active"])
             status = "启用" if active else "已停用"
@@ -4066,11 +4066,14 @@ class Handler(BaseHTTPRequestHandler):
                 if user["id"] == self.user_id
                 else f"<form method='post' action='/admin/users/{esc(user['id'])}/toggle' class='inline'><button class='{'danger' if active else 'secondary'}'>{action}</button></form>"
             )
-            rows.append(
-                f"<tr><td><b>{esc(user['display_name'])}</b><br><span class='muted'>{esc(user['email'])}</span></td>"
-                f"<td>{esc(role_labels.get(user['role'], user['role']))}</td><td><span class='badge {'approved' if active else 'withdrawn'}'>{status}</span></td>"
-                f"<td>{esc(user['created_at'])}</td><td>{action_html}</td></tr>"
+            items.append(
+                f"<div class='simple-item'><div><strong>{esc(user['display_name'])} <span class='badge'>"
+                f"{esc(role_labels.get(user['role'], user['role']))}</span> "
+                f"<span class='badge {'approved' if active else 'withdrawn'}'>{status}</span></strong>"
+                f"<small>{esc(user['email'])} · 创建于 {esc(user['created_at'])}</small></div>"
+                f"<div class='actions'>{action_html}</div></div>"
             )
+        items_html = "".join(items) or "<div class='muted-block'>暂无成员。</div>"
         notice = {
             "created": "<div class='notice'>成员账号已创建，可以使用新邮箱和密码登录。</div>",
             "updated": "<div class='notice'>成员账号状态已更新；停用账号的现有会话已失效。</div>",
@@ -4078,22 +4081,27 @@ class Handler(BaseHTTPRequestHandler):
         body = f"""
 <div class='toolbar'><div><h1>成员管理</h1><div class='muted'>管理当前企业的后台账号和最小角色权限。</div></div><a class='button secondary' href='/admin'>返回管理概览</a></div>
 {notice}
-<div class='grid'><section class='card'><h2>创建成员账号</h2><p class='muted'>密码只在创建时使用，不会在后台列表显示。生产环境应接入正式身份提供商。</p><form method='post' action='/admin/users'><label>姓名 *</label><input name='display_name' required placeholder='例如 Alex Chen'><label>邮箱 *</label><input name='email' type='email' required placeholder='alex@example.com'><label>角色 *</label><select name='role'><option value='sales'>销售</option><option value='engineer'>工程师</option><option value='admin'>管理员</option></select><label>初始密码 *</label><input name='password' type='password' minlength='8' required placeholder='至少 8 位'><p><button>创建账号</button></p></form></section><section class='card'><h2>角色说明</h2><p><b>管理员：</b>产品管理、成员管理、人工任务、RFQ 和销售工作台。</p><p><b>销售：</b>RFQ 和销售工作台。</p><p><b>工程师：</b>人工任务、RFQ 和销售工作台。</p><p class='footer-note'>账号属于当前企业；停用后不能继续登录，也不会改变历史 RFQ、任务或操作记录。</p></section></div>
-<section class='card' style='margin-top:18px'><h2>当前成员</h2><table><thead><tr><th>成员</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{''.join(rows) or "<tr><td colspan='5' class='muted'>暂无成员。</td></tr>"}</tbody></table></section>
+<section class='card'><div class='panel-title'><h2>成员列表</h2><span class='muted'>停用后不能登录，历史记录不受影响</span></div><div class='simple-list'>{items_html}</div>
+<details class='detail-toggle'><summary>创建成员账号</summary><div><p class='muted'>密码只在创建时使用，不会在后台列表显示。生产环境应接入正式身份提供商。</p><form method='post' action='/admin/users'><div class='form-grid'><div><label>姓名 *</label><input name='display_name' required placeholder='例如 Alex Chen'></div><div><label>邮箱 *</label><input name='email' type='email' required placeholder='alex@example.com'></div><div><label>角色 *</label><select name='role'><option value='sales'>销售</option><option value='engineer'>工程师</option><option value='admin'>管理员</option></select></div><div><label>初始密码 *</label><input name='password' type='password' minlength='8' required placeholder='至少 8 位'></div></div><p><button>创建账号</button></p></form></div></details>
+<details class='detail-toggle'><summary>查看角色说明</summary><div class='muted-block'><p><b>管理员：</b>产品管理、成员管理、人工任务、RFQ 和销售工作台。</p><p><b>销售：</b>RFQ 和销售工作台。</p><p><b>工程师：</b>人工任务、RFQ 和销售工作台。</p><p>账号属于当前企业；停用后不能继续登录，也不会改变历史 RFQ、任务或操作记录。</p></div></details></section>
 """
         self.send_html(self.console_page("成员管理", body, "users"), 200)
 
     def admin_sites(self, query: dict[str, list[str]]) -> None:
-        rows = "".join(
-            f"<tr><td><code>{esc(site['site_key'])}</code></td><td>{esc(site['allowed_origin'])}</td><td>{'启用' if site['active'] else '停用'}</td><td>{esc(site['created_at'])}</td></tr>"
-            for site in self.db.list_buyer_sites(self.tenant_id)
-        ) or "<tr><td colspan='4' class='muted'>尚未登记官网来源。</td></tr>"
+        sites = self.db.list_buyer_sites(self.tenant_id)
+        items = "".join(
+            f"<div class='simple-item'><div><strong>{esc(site['allowed_origin'])} "
+            f"<span class='badge {'approved' if site['active'] else 'withdrawn'}'>{'启用' if site['active'] else '停用'}</span></strong>"
+            f"<small>网站标识：<code>{esc(site['site_key'])}</code> · 登记于 {esc(site['created_at'])}</small></div></div>"
+            for site in sites
+        ) or "<div class='muted-block'>尚未登记官网来源。登记后官网聊天窗口才能与平台建立会话。</div>"
         notice = "<div class='notice'>官网来源已登记。网站标识可用于买方 API；它不是后台密钥。</div>" if query.get("notice", [""])[0] == "created" else ""
         body = f"""
 <div class='toolbar'><div><a href='/admin'>← 返回管理概览</a><h1>网站 API 接入</h1><p class='muted'>为企业自有官网聊天窗口登记允许的浏览器来源。会话私有数据仍需要单独的买方访问凭据。</p></div></div>
 {notice}
-<section class='grid'><div class='card'><h2>登记官网</h2><form method='post' action='/admin/sites'><label>官网来源 *</label><input name='allowed_origin' type='url' required placeholder='https://www.example.com'><p class='muted'>只填写协议、域名和可选端口；正式网站使用 HTTPS。本地测试可用 localhost。</p><button>生成网站标识</button></form></div><div class='card'><h2>接入说明</h2><p>把网站标识放在创建会话请求的 <code>site_key</code> 字段。后续请求使用 <code>X-Site-Key</code> 和该会话的 <code>Authorization: Bearer</code> 凭据。</p><p><a href='/reference-client' target='_blank'>打开参考网页聊天窗口</a>。本地演示时，先把此网页的来源登记为允许来源。</p><p class='muted'>这里是基础登记界面；完整接入文档、密钥轮换和自助安装尚未验收。</p></div></section>
-<section class='card' style='margin-top:18px'><h2>已登记网站</h2><table><thead><tr><th>网站标识</th><th>允许来源</th><th>状态</th><th>创建时间</th></tr></thead><tbody>{rows}</tbody></table></section>
+<section class='card'><div class='panel-title'><h2>已登记网站</h2><span class='muted'>只有登记过的来源才能创建买方会话</span></div><div class='simple-list'>{items}</div>
+<details class='detail-toggle' open><summary>登记新的官网来源</summary><div><form method='post' action='/admin/sites'><label>官网来源 *</label><input name='allowed_origin' type='url' required placeholder='https://www.example.com'><p class='muted'>只填写协议、域名和可选端口；正式网站使用 HTTPS。本地测试可用 localhost。</p><button>生成网站标识</button></form></div></details>
+<details class='detail-toggle'><summary>查看接入说明</summary><div class='muted-block'><p>把网站标识放在创建会话请求的 <code>site_key</code> 字段。后续请求使用 <code>X-Site-Key</code> 和该会话的 <code>Authorization</code> 凭据。</p><p><a href='/reference-client' target='_blank'>打开参考网页聊天窗口</a>。本地演示时，先把此网页的来源登记为允许来源。</p><p>这里是基础登记界面；完整接入文档、密钥轮换和自助安装尚未验收。</p></div></details></section>
 """
         self.send_html(self.console_page("网站 API 接入", body, "sites"), 200)
 

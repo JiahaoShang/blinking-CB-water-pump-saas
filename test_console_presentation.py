@@ -103,6 +103,19 @@ class ConsolePresentationTests(unittest.TestCase):
         self.assertIn("class='focus'", rfq_page)
         self.assertIn("待补充", rfq_page)
 
+    def test_team_and_sites_pages_use_wireframe_blocks(self):
+        admin = self.login()
+        _, _, users_page = self.request("GET", "/admin/users", cookie=admin)
+        self.assertIn("class='simple-item'", users_page)
+        self.assertIn("创建成员账号", users_page)
+        self.assertNotIn("<table>", users_page)
+        self.db.register_buyer_site("demo-tenant", "site-x", "https://shop.example.com")
+        _, _, sites_page = self.request("GET", "/admin/sites", cookie=admin)
+        self.assertIn("class='simple-item'", sites_page)
+        self.assertIn("https://shop.example.com", sites_page)
+        self.assertIn("登记新的官网来源", sites_page)
+        self.assertNotIn("<table>", sites_page)
+
     def test_products_list_with_next_step_rows(self):
         self.db.seed_demo_products("demo-tenant")
         cookie = self.login()
