@@ -61,7 +61,7 @@ def main() -> None:
                 continue
             if item.get("scope") not in ("exact_model", "series"):
                 gaps.append(f"{label}: 归属 scope={item.get('scope')} 不在可公开范围")
-            source = conn.execute("SELECT sha256, storage_path, scope FROM source_documents WHERE id=?", (item["id"],)).fetchone()
+            source = conn.execute("SELECT sha256, storage_path, scope, scope_revision FROM source_documents WHERE id=?", (item["id"],)).fetchone()
             if not source or not source["storage_path"]:
                 gaps.append(f"{label}: 缺少本地存储路径")
                 continue
@@ -69,6 +69,11 @@ def main() -> None:
                 gaps.append(
                     f"{label}: 归属口径与发布快照不一致（快照 {item.get('scope')} / 当前 {source['scope']}）；"
                     "该文件不应再按旧版本公开，需重新核准并发布新版本"
+                )
+            elif item.get("scope_revision") is not None and source["scope_revision"] != item.get("scope_revision"):
+                gaps.append(
+                    f"{label}: 归属修订与发布快照不一致（快照 r{item.get('scope_revision')} / 当前 r{source['scope_revision']}）；"
+                    "该文件在归属修正后未重新发布，不应再按旧版本公开，需重新核准并发布新版本"
                 )
             file_path = ROOT / source["storage_path"]
             if not file_path.is_file():

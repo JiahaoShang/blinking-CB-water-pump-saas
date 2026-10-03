@@ -25,7 +25,7 @@ EXPECTED_COLUMNS = {
     "messages": ["idempotency_key", "request_hash", "result_revision_id"],
     "recommendations": ["tentative_viewed", "idempotency_key"],
     "requirement_revisions": ["idempotency_key", "request_hash"],
-    "source_documents": ["scope", "extraction_json", "extraction_note", "processed_at"],
+    "source_documents": ["scope", "scope_revision", "extraction_json", "extraction_note", "processed_at"],
     "product_fields": ["state", "origin", "review_note"],
     "human_tasks": ["question_message_id"],
 }

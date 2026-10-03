@@ -80,6 +80,24 @@ class PilotCheckScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("归属口径与发布快照不一致", result.stdout)
 
+    def test_public_permission_check_detects_stale_attribution_revision(self):
+        """归属文本相同但修订落后（修正后改回原值、未重新发布）必须 FAIL。"""
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("INSERT INTO products(id, tenant_id, model, name, use_case, slug, status, created_at, updated_at) VALUES ('p3', 'demo-tenant', 'CYCLE-1', '归属回环样例', 'demo', 'cycle-1', 'published', '2026-10-03', '2026-10-03')")
+        conn.execute(
+            "INSERT INTO product_versions(id, tenant_id, product_id, version, snapshot_json, status, created_by, created_at, published_at) "
+            "VALUES ('v31', 'demo-tenant', 'p3', 1, ?, 'published', 'test', '2026-10-03', '2026-10-03')",
+            ('{"product": {"model": "CYCLE-1"}, "fields": [], "public_sources": [{"id": "s3", "filename": "cycle.png", "scope": "exact_model", "scope_revision": 0}]}',),
+        )
+        conn.execute("INSERT INTO source_documents(id, tenant_id, product_id, filename, file_type, source_location, storage_path, scope, scope_revision, created_at) VALUES ('s3', 'demo-tenant', 'p3', 'cycle.png', 'image', 'demo', 'README.md', 'exact_model', 2, '2026-10-03')")
+        conn.execute("INSERT INTO public_source_permissions(source_id, tenant_id, product_id, approved_by, approved_at) VALUES ('s3', 'demo-tenant', 'p3', 'test', '2026-10-03')")
+        conn.commit()
+        conn.close()
+        result = run_script(str(CHECKS / "check_public_permissions.py"), "--db", str(self.db_path))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("归属修订与发布快照不一致", result.stdout)
+        self.assertIn("快照 r0 / 当前 r2", result.stdout)
+
     def test_cors_check_against_live_server(self):
         server = make_server(self.db_path, port=0)
         server.RequestHandlerClass.db.register_buyer_site("demo-tenant", "site-a", "https://seller-a.example")

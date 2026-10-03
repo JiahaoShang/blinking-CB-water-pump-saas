@@ -302,6 +302,7 @@ class Database:
                 storage_path TEXT,
                 processing_status TEXT NOT NULL DEFAULT 'registered',
                 scope TEXT NOT NULL DEFAULT 'unknown',
+                scope_revision INTEGER NOT NULL DEFAULT 0,
                 extraction_json TEXT NOT NULL DEFAULT '[]',
                 extraction_note TEXT NOT NULL DEFAULT '',
                 processed_at TEXT,
@@ -504,6 +505,7 @@ class Database:
         source_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(source_documents)")}
         for column, definition in (
             ("scope", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ("scope_revision", "INTEGER NOT NULL DEFAULT 0"),
             ("extraction_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("extraction_note", "TEXT NOT NULL DEFAULT ''"),
             ("processed_at", "TEXT"),
@@ -772,32 +774,38 @@ class Database:
     def public_downloadable_ids(self, tenant_id: str, product_id: str) -> set[str]:
         """Source ids the current published version may actually expose to the public.
 
-        All three conditions must hold: the file is listed in the current published
+        Three conditions must hold: the file is listed in the current published
         snapshot, it still has a live public-download permission, and its live
-        attribution scope equals the scope recorded in that snapshot. Correcting a
-        scope revokes the permission and invalidates the old version's mapping
-        (see set_source_scope), so an outdated “本型号/系列” label can never keep
-        being served from a stale snapshot.
+        attribution state matches what that snapshot captured at publish time —
+        both the scope label (“本型号/系列”) and the monotonic ``scope_revision``
+        that every real scope change advances. Comparing the revision as well means
+        a file whose scope was corrected and later edited back to the same words
+        can never resume service from the stale snapshot (the text matches but the
+        revision does not). Renewed public display therefore requires a fresh
+        permission approval plus a new published version (see set_source_scope).
         """
         version = self.get_published_version(tenant_id, product_id)
         if not version:
             return set()
-        snapshot_scopes = {
-            entry["id"]: entry.get("scope")
+        # Snapshots published before revision capture default to revision 0: any
+        # later scope change bumps the live revision, so those old versions are
+        # still invalidated by the comparison below.
+        snapshot_state = {
+            entry["id"]: (entry.get("scope"), entry.get("scope_revision", 0))
             for entry in json.loads(version["snapshot_json"]).get("public_sources", [])
         }
         allowed = self.public_source_ids(tenant_id, product_id)
-        live_scopes = {
-            row["id"]: row["scope"]
+        live_state = {
+            row["id"]: (row["scope"], row["scope_revision"])
             for row in self.conn.execute(
-                "SELECT id, scope FROM source_documents WHERE tenant_id=? AND product_id=?",
+                "SELECT id, scope, scope_revision FROM source_documents WHERE tenant_id=? AND product_id=?",
                 (tenant_id, product_id),
             )
         }
         return {
             source_id
-            for source_id, snapshot_scope in snapshot_scopes.items()
-            if source_id in allowed and live_scopes.get(source_id) == snapshot_scope
+            for source_id, snapshot in snapshot_state.items()
+            if source_id in allowed and live_state.get(source_id) == snapshot
         }
 
     def allow_public_source(self, tenant_id: str, product_id: str, source_id: str, actor: str) -> None:
@@ -1544,12 +1552,15 @@ class Database:
         """Correct a source file's attribution scope.
 
         A scope correction changes what the published snapshot's scope label
-        (“本型号/系列”) means for this file. When the file currently carries a
+        (“本型号/系列”) means for this file, so every real change also advances a
+        monotonic per-file ``scope_revision``. When the file currently carries a
         public-download permission, that permission is revoked immediately, so the
         old version stops serving the file on the public page, the download route
-        and the public JSON (all consult public_downloadable_ids). Renewed public
-        display requires a fresh permission approval plus a new published version
-        that records the corrected scope.
+        and the public JSON (all consult public_downloadable_ids, which compares the
+        snapshot's captured scope *and* revision). Even if the scope text is later
+        changed back to its earlier value, the advanced revision no longer matches
+        the stale snapshot — renewed display still requires a fresh permission
+        approval plus a new published version that records the corrected state.
         """
         if scope not in SOURCE_SCOPES:
             raise ValueError("文件归属范围无效")
@@ -1566,6 +1577,7 @@ class Database:
         if scope == "unknown" and source_id in public_ids:
             raise ValueError("该文件已开放公开下载；请先撤销公开许可，再标记为归属未核对")
         public_permission_revoked = source_id in public_ids
+        new_revision = int(source["scope_revision"] or 0) + 1
         if public_permission_revoked:
             # 归属口径已变，旧快照不得继续以旧口径公开该文件；重新公开须走
             # 重新核准 + 重新发布（见 public_downloadable_ids 的三重条件）。
@@ -1575,10 +1587,13 @@ class Database:
             )
             self._audit(
                 tenant_id, "source_document", source_id, "public_permission_revoked_on_scope_change",
-                actor, f"{previous_scope} -> {scope}",
+                actor, f"{previous_scope} -> {scope} (归属修订 r{new_revision})",
             )
-        self.conn.execute("UPDATE source_documents SET scope=? WHERE id=?", (scope, source_id))
-        self._audit(tenant_id, "source_document", source_id, "scope_updated", actor, f"{previous_scope} -> {scope}")
+        self.conn.execute(
+            "UPDATE source_documents SET scope=?, scope_revision=? WHERE id=?",
+            (scope, new_revision, source_id),
+        )
+        self._audit(tenant_id, "source_document", source_id, "scope_updated", actor, f"{previous_scope} -> {scope} (归属修订 r{new_revision})")
         self.conn.commit()
         return {"changed": True, "public_permission_revoked": public_permission_revoked}
 
@@ -1803,6 +1818,7 @@ class Database:
                 "filename": source["filename"],
                 "file_type": source["file_type"],
                 "scope": source["scope"],
+                "scope_revision": source["scope_revision"],
                 "sha256": source["sha256"],
                 "source_location": source["source_location"],
                 "created_at": source["created_at"],
@@ -3801,6 +3817,11 @@ class Handler(BaseHTTPRequestHandler):
         field_table = "".join(field_rows) or "<tr><td colspan='4' class='muted'>尚未登记字段。</td></tr>"
         source_options = "<option value=''>请选择来源</option>" + "".join(f"<option value='{esc(source['id'])}'>{esc(source['filename'])} · {esc(source['source_location'])}</option>" for source in sources)
         public_source_ids = self.db.public_source_ids(self.tenant_id, product_id)
+        # Files that the current published version can actually serve right now
+        # (snapshot membership + live permission + matching scope/revision). A
+        # correction loses the third condition until the next publish, so the
+        # labels below distinguish "live in this version" from "republish needed".
+        servable_source_ids = self.db.public_downloadable_ids(self.tenant_id, product_id)
 
         source_blocks = []
         for source in sources:
@@ -3825,9 +3846,15 @@ class Handler(BaseHTTPRequestHandler):
             if source["storage_path"]:
                 extract_button = f"<form method='post' action='/admin/products/{product_id}/sources/{source['id']}/extract' class='inline'><button class='secondary'>按内容重新解析</button></form>"
                 if source["id"] in public_source_ids:
+                    if source["id"] in servable_source_ids:
+                        inclusion_html = " <span class='field-state'>已纳入当前公开版本</span>"
+                    elif source["id"] in published_source_ids:
+                        inclusion_html = " <span class='field-state'>当前版本快照已失效（归属修正过）；重新公开需发布新版本</span>"
+                    else:
+                        inclusion_html = " <span class='field-state'>将在下次发布后收录</span>"
                     perm_html = (
                         f"<form method='post' action='/admin/products/{product_id}/sources/{source['id']}/revoke-public' class='inline'><button class='danger'>撤销公开下载</button></form>"
-                        + (" <span class='field-state'>已纳入当前公开版本</span>" if source["id"] in published_source_ids else " <span class='field-state'>将在下次发布后收录</span>")
+                        + inclusion_html
                     )
                 elif source["scope"] != "unknown":
                     perm_html = (
@@ -3843,6 +3870,7 @@ class Handler(BaseHTTPRequestHandler):
                 "<div class='source' style='display:block'><div style='display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap'>"
                 f"<span><b>{esc(source['filename'])}</b><br><span class='muted'>{esc(source['file_type'])} · {esc(source['source_location'])}</span></span>"
                 f"<span class='field-state'>{esc(processing_labels.get(source['processing_status'], source['processing_status']))} · 归属：{esc(SOURCE_SCOPES.get(source['scope'], source['scope']))}"
+                + (f" · 归属修订 r{source['scope_revision']}" if source["scope_revision"] else "")
                 + (f" · 校验码 {esc((source['sha256'] or '')[:10])}…" if source["sha256"] else "")
                 + "</span></div>"
                 + (f"<p class='field-state' style='margin:6px 0 0'>{esc(source['extraction_note'])}</p>" if source["extraction_note"] else "")

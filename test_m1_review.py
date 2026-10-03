@@ -417,8 +417,99 @@ class PublicScopeCorrectionTests(unittest.TestCase):
         result = self.db.set_source_scope("demo-tenant", product_id, source_id, "exact_model")
         self.assertEqual(result, {"changed": False, "public_permission_revoked": False})
         self.assertEqual(self.db.public_downloadable_ids("demo-tenant", product_id), {source_id})
+        revision = self.db.conn.execute("SELECT scope_revision FROM source_documents WHERE id=?", (source_id,)).fetchone()["scope_revision"]
+        self.assertEqual(revision, 0, "同一归属的重复保存不得推进归属修订")
         with self.assertRaises(ValueError):
             self.db.set_source_scope("demo-tenant", product_id, source_id, "unknown")  # 已公开不能改回未核对
+
+    def test_exact_series_exact_cycle_requires_fresh_publication(self):
+        """残留缺陷复现：归属文本改回原值也不能让旧快照恢复公开。
+
+        exact->series->exact 两步修正后，仅重新核准许可（未重新发布），旧版本
+        仍不得恢复任何出口；重新发布 v2 后按新快照恢复。"""
+        product_id, slug, source_id, contents = self._publish_with_file("SCP-CYCLE1", "exact_model")
+        self.assertEqual(
+            self.db.set_source_scope("demo-tenant", product_id, source_id, "series"),
+            {"changed": True, "public_permission_revoked": True},
+        )
+        self._assert_old_version_safe(slug, source_id)
+        self.assertEqual(
+            self.db.set_source_scope("demo-tenant", product_id, source_id, "exact_model"),
+            {"changed": True, "public_permission_revoked": False},
+        )
+        # 重新核准公开许可（文本与快照一致），但归属修订已经从 r0 前进到 r2
+        self.db.allow_public_source("demo-tenant", product_id, source_id, "demo-admin")
+        row = self.db.conn.execute("SELECT scope, scope_revision FROM source_documents WHERE id=?", (source_id,)).fetchone()
+        self.assertEqual((row["scope"], row["scope_revision"]), ("exact_model", 2))
+        version = self.db.get_published_version("demo-tenant", product_id)
+        self.assertEqual(json.loads(version["snapshot_json"])["public_sources"][0]["scope_revision"], 0)
+        self.assertEqual(self.db.public_downloadable_ids("demo-tenant", product_id), set())
+        self._assert_old_version_safe(slug, source_id)
+
+        # 重新发布 v2：新快照记录当前修订，按修正后状态恢复三个出口
+        self.assertEqual(self.db.publish_product("demo-tenant", product_id), 2)
+        surfaces = self._surfaces(slug, source_id)
+        self.assertIn("SCP-CYCLE1-drawing.png", surfaces["page"])
+        self.assertIn(f"<img src='/s/site-a/products/{slug}/sources/{source_id}?preview=1'", surfaces["page"])
+        self.assertEqual(surfaces["download_status"], 200)
+        self.assertEqual(surfaces["download_body"], contents)
+        self.assertEqual(surfaces["json"]["page_version"], 2)
+        self.assertEqual([item["scope"] for item in surfaces["json"]["public_sources"]], ["exact_model"])
+        new_snapshot = json.loads(self.db.get_published_version("demo-tenant", product_id)["snapshot_json"])
+        self.assertEqual(new_snapshot["public_sources"][0]["scope_revision"], 2)
+        # 发布历史保留：v1 记录旧修订 r0，v2 记录修正后 r2
+        versions = [
+            (row["version"], row["status"],
+             json.loads(row["snapshot_json"])["public_sources"][0]["scope"],
+             json.loads(row["snapshot_json"])["public_sources"][0].get("scope_revision", 0))
+            for row in self.db.conn.execute("SELECT * FROM product_versions WHERE product_id=? ORDER BY version", (product_id,))
+        ]
+        self.assertEqual(versions, [(1, "withdrawn", "exact_model", 0), (2, "published", "exact_model", 2)])
+        audit = self.db.list_entity_audit("demo-tenant", [source_id])
+        updates = [item["details"] for item in audit if item["action"] == "scope_updated"]
+        self.assertEqual(len(updates), 2)
+        self.assertTrue(updates[0].endswith("(归属修订 r1)"))
+        self.assertTrue(updates[1].endswith("(归属修订 r2)"))
+
+    def test_series_exact_series_cycle_republish_before_repermission_keeps_file_hidden(self):
+        """series->exact->series 循环，并覆盖“重新核准前先发布”的顺序。
+
+        未重新核准时发布的新版本不得收录该文件；发布后补核准也仍不公开，
+        必须再次发布才恢复（系列归属，不进本型号图库）。"""
+        product_id, slug, source_id, contents = self._publish_with_file("SCP-CYCLE2", "series")
+        self.assertEqual(
+            self.db.set_source_scope("demo-tenant", product_id, source_id, "exact_model"),
+            {"changed": True, "public_permission_revoked": True},
+        )
+        self._assert_old_version_safe(slug, source_id)
+        self.assertEqual(
+            self.db.set_source_scope("demo-tenant", product_id, source_id, "series"),
+            {"changed": True, "public_permission_revoked": False},
+        )
+        # 未重新核准即发布 v2：文件不在快照内，旧版本不得借此恢复
+        self.assertEqual(self.db.publish_product("demo-tenant", product_id), 2)
+        surfaces = self._surfaces(slug, source_id)
+        self.assertEqual(surfaces["download_status"], 404)
+        self.assertEqual(surfaces["json"]["page_version"], 2)
+        self.assertEqual(surfaces["json"]["public_sources"], [])
+        self.assertNotIn(f"/sources/{source_id}", surfaces["page"])
+        # 发布之后补核准：仍不公开（快照不含该文件），需再次发布
+        self.db.allow_public_source("demo-tenant", product_id, source_id, "demo-admin")
+        self.assertEqual(self.db.public_downloadable_ids("demo-tenant", product_id), set())
+        self._assert_old_version_safe(slug, source_id)
+        self.assertEqual(self.db.publish_product("demo-tenant", product_id), 3)
+        surfaces = self._surfaces(slug, source_id)
+        self.assertIn("SCP-CYCLE2-drawing.png", surfaces["page"])
+        self.assertIn("<span class='file-chip'>系列资料（非本型号专属）</span>", surfaces["page"])
+        self.assertEqual(surfaces["download_status"], 200)
+        self.assertEqual(surfaces["download_body"], contents)
+        self.assertEqual(surfaces["json"]["page_version"], 3)
+        self.assertEqual([item["scope"] for item in surfaces["json"]["public_sources"]], ["series"])
+        versions = [
+            (row["version"], row["status"])
+            for row in self.db.conn.execute("SELECT version, status FROM product_versions WHERE product_id=? ORDER BY version", (product_id,))
+        ]
+        self.assertEqual(versions, [(1, "withdrawn"), (2, "withdrawn"), (3, "published")])
 
 
 if __name__ == "__main__":
