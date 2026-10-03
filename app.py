@@ -47,9 +47,9 @@ COMMERCIAL_QUESTION_TOKENS = (
     "price", "cost", "quote", "价格", "报价", "库存", "stock", "delivery",
     "lead time", "shipping", "交期", "交货", "到货", "认证", "certificate", "certification",
 )
-COMMERCIAL_REFUSAL_ANSWER = "关于价格、库存、交期或认证，我手上的核准资料还无法确认。若您希望工程师核实，可点击下方按钮；提交后可回到本对话查看回复。"
-NO_PUBLISHED_PRODUCT_ANSWER = "目前没有可引用的已发布产品资料，我还不能确认这个问题。若您希望继续核实，可请求工程师查看。"
-NO_APPROVED_BASIS_ANSWER = "现有核准资料没有足够依据回答这个问题，参数还需要核实。若您愿意，我可以在您点击请求后请工程师查看。"
+COMMERCIAL_REFUSAL_ANSWER = "关于价格、库存、交期或认证，我手上的核准资料还无法确认。"
+NO_PUBLISHED_PRODUCT_ANSWER = "目前没有可引用的已发布产品资料，我还不能确认这个问题。"
+NO_APPROVED_BASIS_ANSWER = "现有核准资料没有足够依据回答这个问题，参数还需要核实。"
 REQUIREMENT_LABELS = {
     "category": "品类",
     "use_case": "用途",

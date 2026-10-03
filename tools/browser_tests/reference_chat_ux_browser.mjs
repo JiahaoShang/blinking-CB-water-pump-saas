@@ -270,7 +270,9 @@ try {
     await chat.connect();
     // 无产品上下文提问 → 需人工回答卡 → 请求工程师（创建人工任务）
     await chat.submitMessage('Can this handle my application?');
+    const afterQuestionText = chat.logText();
     await chat.click('Ask an engineer to review');
+    const requestedStateText = chat.logText();
     const data = await buyerConversation(config.taskConversationId, config.taskToken);
     taskOne = (data.human_tasks || []).find((task) => task.status === 'pending');
     if (!taskOne) throw new Error(`未找到待处理人工任务: ${JSON.stringify(data.human_tasks)}`);
@@ -284,6 +286,7 @@ try {
     await chat.submitMessage('flow 50 m3/h, head 30 m');
     results.waiting_task_reply = {
       taskId: taskOne.id,
+      afterQuestionText, requestedStateText,
       afterFollowupText, textareaCount,
       afterReplyText: chat.logText(),
       requests: chat.journal.slice(beforeReply),

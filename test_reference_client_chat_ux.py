@@ -84,6 +84,14 @@ class ReferenceChatSourceContractTests(unittest.TestCase):
         html = (ROOT / "reference-client" / "index.html").read_text(encoding="utf-8")
         self.assertNotIn('id="refresh"', html)
         self.assertIn('id="chat-badge"', html)
+        # 回答消息（有据/待核实）不再作为气泡重复卡片内容
+        self.assertIn("grounded-answer", source)
+        self.assertIn("unresolved-question", source)
+        # 兜底文案不再写死邀请语（动向与入口只由界面按真实状态给出）
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertNotIn("可请求工程师查看", app_source)
+        self.assertNotIn("我可以在您点击请求后请工程师查看", app_source)
+        self.assertNotIn("若您希望工程师核实，可点击下方按钮", app_source)
 
 
 class ReferenceChatBrowserTests(unittest.TestCase):
@@ -237,9 +245,29 @@ class ReferenceChatBrowserTests(unittest.TestCase):
         self.assertEqual(task_calls[0]["requestBody"]["text"], "flow 50 m3/h, head 30 m")
         self.assertEqual([record for record in posts if record["url"].endswith("/messages")], [])
         self.assertEqual([record for record in posts if record["url"].endswith("/questions")], [])
-        # 回复以买家气泡进入聊天，任务回到待处理
+        # 回复以买家气泡进入聊天，任务回到待处理（卡片状态文案同步更新）
         self.assertIn("flow 50 m3/h, head 30 m", item["afterReplyText"])
-        self.assertIn("pending", item["afterReplyText"])
+        self.assertIn("Engineer review requested", item["afterReplyText"])
+
+    def test_needs_human_card_states_and_no_duplication(self):
+        results = self.results["results"]
+        item = results["waiting_task_reply"]
+        # ① 不能回答时给出的是明确的选择入口：问句 + 按钮；尚不显示「已转交」文案，也没有原始状态徽标
+        self.assertIn("Would you like an engineer to verify this?", item["afterQuestionText"])
+        self.assertIn("Ask an engineer to review", item["afterQuestionText"])
+        self.assertNotIn("Engineer review requested", item["afterQuestionText"])
+        self.assertNotIn("pending", item["afterQuestionText"])
+        # ② 点击请求后：状态改为「已转交」，请求按钮消失（不留陈旧邀请语）
+        self.assertIn("Engineer review requested", item["requestedStateText"])
+        self.assertNotIn("Ask an engineer to review", item["requestedStateText"])
+        # ③ 工程师追问只出现一次（消息气泡）；卡片不再重复同一问句
+        self.assertEqual(item["afterFollowupText"].count("Please confirm the flow and head"), 1, item["afterFollowupText"])
+        self.assertIn("The engineer needs more details", item["afterFollowupText"])
+        # ④ 回答正文只出现一次：待核实回答不再以气泡重复卡片内容；有据回答同验
+        self.assertEqual(item["afterFollowupText"].count("我还不能确认"), 1, item["afterFollowupText"])
+        question = results["question_route"]
+        answer = [record for record in question["requests"] if record["url"].endswith("/questions")][0]["responseBody"]["answer"]
+        self.assertEqual(question["logText"].count(answer), 1, question["logText"])
 
     def test_realtime_sync_and_unread_badge(self):
         results = self.results["results"]
