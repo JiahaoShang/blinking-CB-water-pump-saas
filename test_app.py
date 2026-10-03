@@ -457,14 +457,30 @@ class SalesWorkspaceTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_sales_update_persists_and_records_operator(self):
-        self.db.update_lead("demo-tenant", self.rfq_id, "technical_review", "Alex", "2026-10-01", "Ask engineer to confirm medium compatibility", "demo-sales")
+        self.db.update_lead("demo-tenant", self.rfq_id, "technical_review", "2026-10-01", "Ask engineer to confirm medium compatibility", "demo-sales")
         lead = self.db.get_lead_for_rfq("demo-tenant", self.rfq_id)
         self.assertEqual(lead["stage"], "technical_review")
-        self.assertEqual(lead["owner"], "Alex")
+        self.assertIsNone(lead["owner"])
         self.assertEqual(lead["next_follow_up"], "2026-10-01")
         self.assertIn("engineer", lead["note"])
         audit = self.db.list_entity_audit("demo-tenant", [lead["id"]])
         self.assertTrue(any(item["action"] == "updated" and item["actor"] == "demo-sales" for item in audit))
+
+    def test_claim_and_assignment_keep_one_owner_across_conversation_rfqs(self):
+        first = self.db.get_rfq("demo-tenant", self.rfq_id)
+        other_rfq, _ = self.db.create_rfq("demo-tenant", first["conversation_id"], "second-purchase", {"contact_email": "buyer@example.com"}, "Another purchase")
+        self.db.claim_conversation_leads("demo-tenant", self.rfq_id, "demo-sales@example.invalid")
+        self.assertEqual(self.db.get_lead_for_rfq("demo-tenant", self.rfq_id)["owner"], "demo-sales@example.invalid")
+        self.assertEqual(self.db.get_lead_for_rfq("demo-tenant", other_rfq)["owner"], "demo-sales@example.invalid")
+        third_rfq, _ = self.db.create_rfq("demo-tenant", first["conversation_id"], "third-purchase", {"contact_email": "buyer@example.com"}, "Another model")
+        self.assertEqual(self.db.get_lead_for_rfq("demo-tenant", third_rfq)["owner"], "demo-sales@example.invalid")
+        with self.assertRaises(ValueError):
+            self.db.claim_conversation_leads("demo-tenant", other_rfq, "demo-engineer@example.invalid")
+        self.db.create_user("demo-tenant", "sales-two@example.invalid", "Second sales", "sales", "test-pass-123", "demo-admin@example.invalid")
+        self.db.assign_conversation_leads("demo-tenant", self.rfq_id, "sales-two@example.invalid", "demo-admin@example.invalid")
+        self.assertEqual({self.db.get_lead_for_rfq("demo-tenant", rfq_id)["owner"] for rfq_id in (self.rfq_id, other_rfq, third_rfq)}, {"sales-two@example.invalid"})
+        with self.assertRaises(ValueError):
+            self.db.assign_conversation_leads("demo-tenant", self.rfq_id, "demo-engineer@example.invalid", "demo-sales@example.invalid")
 
     def test_sales_records_are_tenant_scoped(self):
         self.db.ensure_tenant("other-tenant")
@@ -472,7 +488,7 @@ class SalesWorkspaceTests(unittest.TestCase):
         self.assertEqual(len(self.db.list_sales_records("demo-tenant")), 1)
 
     def test_admin_summary_counts_current_tenant_and_overdue_leads(self):
-        self.db.update_lead("demo-tenant", self.rfq_id, "technical_review", "Alex", "2020-01-01", "Follow up", "demo-sales")
+        self.db.update_lead("demo-tenant", self.rfq_id, "technical_review", "2020-01-01", "Follow up", "demo-sales")
         summary = self.db.get_admin_summary("demo-tenant")
         self.assertEqual(summary["rfqs_total"], 1)
         self.assertEqual(summary["leads_active"], 1)

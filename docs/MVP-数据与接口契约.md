@@ -86,3 +86,5 @@ tenant ─ conversation ─ original_message ─ requirement_revision
 **2026-10-03 人工答复补记**：工程师发布原会话答复时，任务状态、人工消息和审计记录在同一事务提交；失败回滚后仍为待处理，重复发布被拒绝。买方会话 API 返回消息来源，参考聊天据此显示人工身份。尚未实现“同一任务追问→待买方补充→买方回答后继续处理”的完整 M5 状态链。
 
 **2026-10-03 追问续办补记**：上段所列追问缺口已在参考客户端补齐。卖家 `POST /admin/tasks/{id}/followup` 保存工程师追问并将任务设为 `waiting_buyer`；买方凭原会话凭据调用 `POST /api/v1/buyer/conversations/{id}/human-tasks/{task_id}/responses` 补充，任务返回 `pending`。追问和回复保存在原会话消息中，来源包含同一任务 ID，双方刷新后仍可追溯；最终答复仍走原任务。状态与消息在同一事务内更新。跨来源正式官网以及旧 `/inquiry` 页面尚未因此自动验收。
+
+**2026-10-03 销售负责人补记**：`POST /admin/sales/{rfq_id}/claim` 仅本企业销售可领取尚未分配的会话，`POST /admin/sales/{rfq_id}/assign` 仅管理员可将会话分配/改派给本企业有效销售成员。同会话的多份 RFQ 各保留状态，但共享负责人；新 RFQ 继承已有负责人。旧数据库中若曾在不同 RFQ 手填不同负责人，迁移核查尚未完成；当前仍用多行同步保持约束，未改为独立会话负责人表。

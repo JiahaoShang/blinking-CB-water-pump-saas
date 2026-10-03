@@ -249,6 +249,26 @@ class BuyerApiTests(unittest.TestCase):
         _, _, current = self.request("GET", path, headers=headers)
         self.assertEqual(current["rfqs"][0]["id"], first["rfq_id"])
 
+    def test_sales_claim_and_admin_assignment_have_separate_permissions(self):
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}", "Idempotency-Key": "sales-claim-rfq"}
+        _, _, submitted = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.test"}}, headers)
+        rfq_id = submitted["rfq_id"]
+        _, sales_headers, _ = self.form_request("POST", "/login", {"email": "demo-sales@example.invalid", "password": "demo-sales"})
+        sales_cookie = sales_headers["Set-Cookie"].split(";", 1)[0]
+        _, _, sales_page = self.form_request("GET", f"/admin/sales/{rfq_id}", cookie=sales_cookie)
+        self.assertIn("领取这条会话", sales_page)
+        self.assertNotIn("分配或改派", sales_page)
+        self.assertEqual(self.form_request("POST", f"/admin/sales/{rfq_id}/claim", {}, sales_cookie)[0], 303)
+        self.assertEqual(self.db.get_lead_for_rfq("demo-tenant", rfq_id)["owner"], "demo-sales@example.invalid")
+        self.assertEqual(self.form_request("POST", f"/admin/sales/{rfq_id}/assign", {"owner_email": "demo-sales@example.invalid"}, sales_cookie)[0], 400)
+        _, admin_headers, _ = self.form_request("POST", "/login", {"email": "demo-admin@example.invalid", "password": "demo-admin"})
+        admin_cookie = admin_headers["Set-Cookie"].split(";", 1)[0]
+        _, _, admin_page = self.form_request("GET", f"/admin/sales/{rfq_id}", cookie=admin_cookie)
+        self.assertIn("分配或改派", admin_page)
+        self.assertEqual(self.form_request("POST", f"/admin/sales/{rfq_id}/assign", {"owner_email": "demo-sales@example.invalid"}, admin_cookie)[0], 303)
+
     def test_buyer_edits_same_rfq_with_seller_history_and_stale_revision_conflict(self):
         self.db.seed_demo_products("demo-tenant")
         product = self.db.list_products("demo-tenant")[0]
@@ -276,6 +296,7 @@ class BuyerApiTests(unittest.TestCase):
         class SellerView:
             db = self.db
             tenant_id = "demo-tenant"
+            user_role = "sales"
             html = ""
 
             def send_html(self, content, status=200):

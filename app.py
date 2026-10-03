@@ -1023,9 +1023,13 @@ class Database:
             (secrets.token_hex(12), tenant_id, rfq_id, json.dumps(self.rfq_current_content(initial), ensure_ascii=False), timestamp),
         )
         lead_id = secrets.token_hex(12)
+        existing_owner = self.conn.execute(
+            "SELECT owner FROM leads WHERE tenant_id=? AND conversation_id=? AND owner IS NOT NULL LIMIT 1",
+            (tenant_id, conversation_id),
+        ).fetchone()
         self.conn.execute(
-            "INSERT INTO leads(id, tenant_id, rfq_id, conversation_id, stage, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (lead_id, tenant_id, rfq_id, conversation_id, "new" if status == "submitted" else "needs_info", timestamp, timestamp),
+            "INSERT INTO leads(id, tenant_id, rfq_id, conversation_id, stage, owner, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (lead_id, tenant_id, rfq_id, conversation_id, "new" if status == "submitted" else "needs_info", existing_owner["owner"] if existing_owner else None, timestamp, timestamp),
         )
         self._audit(tenant_id, "rfq", rfq_id, "submitted", "buyer-web", f"status={status};lead={lead_id}")
         self.conn.commit()
@@ -1035,6 +1039,28 @@ class Database:
         return self.conn.execute(
             "SELECT * FROM leads WHERE tenant_id=? AND rfq_id=?", (tenant_id, rfq_id)
         ).fetchone()
+
+    def claim_conversation_leads(self, tenant_id: str, rfq_id: str, actor_email: str) -> None:
+        user = self.conn.execute("SELECT role, active FROM users WHERE tenant_id=? AND email=?", (tenant_id, actor_email)).fetchone()
+        lead = self.get_lead_for_rfq(tenant_id, rfq_id)
+        if not user or not user["active"] or user["role"] != "sales" or not lead:
+            raise ValueError("没有可领取的线索")
+        with self.conn:
+            owners = {row["owner"] for row in self.conn.execute("SELECT owner FROM leads WHERE tenant_id=? AND conversation_id=? AND owner IS NOT NULL", (tenant_id, lead["conversation_id"]))}
+            if owners:
+                raise ValueError("该会话已由销售负责")
+            self.conn.execute("UPDATE leads SET owner=?, updated_at=? WHERE tenant_id=? AND conversation_id=? AND owner IS NULL", (actor_email, now_iso(), tenant_id, lead["conversation_id"]))
+            self._audit(tenant_id, "lead", lead["id"], "claimed", actor_email, f"conversation={lead['conversation_id']}")
+
+    def assign_conversation_leads(self, tenant_id: str, rfq_id: str, owner_email: str, actor_email: str) -> None:
+        actor = self.conn.execute("SELECT role, active FROM users WHERE tenant_id=? AND email=?", (tenant_id, actor_email)).fetchone()
+        owner = self.conn.execute("SELECT role, active FROM users WHERE tenant_id=? AND email=?", (tenant_id, owner_email)).fetchone()
+        lead = self.get_lead_for_rfq(tenant_id, rfq_id)
+        if not actor or not actor["active"] or actor["role"] != "admin" or not owner or not owner["active"] or owner["role"] != "sales" or not lead:
+            raise ValueError("管理员只能分配给本企业的有效销售成员")
+        with self.conn:
+            self.conn.execute("UPDATE leads SET owner=?, updated_at=? WHERE tenant_id=? AND conversation_id=?", (owner_email, now_iso(), tenant_id, lead["conversation_id"]))
+            self._audit(tenant_id, "lead", lead["id"], "assigned", actor_email, f"conversation={lead['conversation_id']};owner={owner_email}")
 
     def list_sales_records(self, tenant_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -1093,7 +1119,6 @@ class Database:
         tenant_id: str,
         rfq_id: str,
         stage: str,
-        owner: str,
         next_follow_up: str,
         note: str,
         actor: str = "demo-sales",
@@ -1106,10 +1131,10 @@ class Database:
             raise ValueError("线索不存在")
         timestamp = now_iso()
         self.conn.execute(
-            "UPDATE leads SET stage=?, owner=?, next_follow_up=?, note=?, updated_at=? WHERE tenant_id=? AND rfq_id=?",
-            (stage, owner.strip() or None, next_follow_up.strip() or None, note.strip(), timestamp, tenant_id, rfq_id),
+            "UPDATE leads SET stage=?, next_follow_up=?, note=?, updated_at=? WHERE tenant_id=? AND rfq_id=?",
+            (stage, next_follow_up.strip() or None, note.strip(), timestamp, tenant_id, rfq_id),
         )
-        self._audit(tenant_id, "lead", lead["id"], "updated", actor, f"rfq={rfq_id};stage={stage};owner={owner};next_follow_up={next_follow_up}")
+        self._audit(tenant_id, "lead", lead["id"], "updated", actor, f"rfq={rfq_id};stage={stage};next_follow_up={next_follow_up}")
         self.conn.commit()
 
     def list_entity_audit(self, tenant_id: str, entity_ids: list[str]) -> list[sqlite3.Row]:
@@ -1342,11 +1367,12 @@ class Database:
                 tenant_id,
                 rfq_id,
                 inquiry.get("stage", "new"),
-                inquiry.get("owner", ""),
                 inquiry.get("next_follow_up", ""),
                 inquiry.get("lead_note", ""),
                 actor,
             )
+            if inquiry.get("owner") and tenant_id == "demo-tenant":
+                self.assign_conversation_leads(tenant_id, rfq_id, "demo-sales@example.invalid", "demo-admin@example.invalid")
             if created_tasks == 0 and fixture.get("human_task"):
                 human_task = fixture["human_task"]
                 task_message_id = self.save_message(tenant_id, conversation_id, "buyer", human_task["question"], "demo-fixture")
@@ -2431,8 +2457,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/update", path)
             if match:
-                self.db.update_lead(self.tenant_id, match.group(1), str(form.get("stage", "new")), str(form.get("owner", "")), str(form.get("next_follow_up", "")), str(form.get("note", "")), self.actor)
+                self.db.update_lead(self.tenant_id, match.group(1), str(form.get("stage", "new")), str(form.get("next_follow_up", "")), str(form.get("note", "")), self.actor)
                 self.redirect(f"/admin/sales/{match.group(1)}?notice=updated")
+                return
+            match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/(claim|assign)", path)
+            if match:
+                if match.group(2) == "claim":
+                    self.db.claim_conversation_leads(self.tenant_id, match.group(1), self.actor)
+                else:
+                    self.db.assign_conversation_leads(self.tenant_id, match.group(1), str(form.get("owner_email", "")), self.actor)
+                self.redirect(f"/admin/sales/{match.group(1)}?notice=assigned")
                 return
             match = re.fullmatch(r"/admin/users/([a-f0-9]+)/toggle", path)
             if match:
@@ -2858,7 +2892,10 @@ class Handler(BaseHTTPRequestHandler):
         audit_rows = self.db.list_entity_audit(self.tenant_id, [rfq["id"], lead["id"]])
         audit_html = "".join(f"<div class='field-state'>{esc(item['created_at'])} · {esc(item['action'])} · {esc(item['actor'])} · {esc(item['details'])}</div>" for item in audit_rows) or "<p class='muted'>暂无操作记录。</p>"
         stage_options = "".join(f"<option value='{key}' {'selected' if lead['stage'] == key else ''}>{label}</option>" for key, label in {"new": "新线索", "needs_info": "待补充", "technical_review": "技术确认中", "quote_ready": "可进入报价", "paused": "暂缓", "closed": "已关闭"}.items())
-        notice = "<div class='notice'>销售状态已保存，刷新后仍会保留。</div>" if query.get("notice", [""])[0] == "updated" else ""
+        notice = "<div class='notice'>销售状态已保存，刷新后仍会保留。</div>" if query.get("notice", [""])[0] == "updated" else "<div class='notice'>负责人已更新，同会话的 RFQ 使用同一负责人。</div>" if query.get("notice", [""])[0] == "assigned" else ""
+        claim_action = f"<form method='post' action='/admin/sales/{rfq_id}/claim'><button>领取这条会话</button></form>" if not lead["owner"] and self.user_role == "sales" else ""
+        sales_options = "".join(f"<option value='{esc(user['email'])}' {'selected' if lead['owner'] == user['email'] else ''}>{esc(user['display_name'])} · {esc(user['email'])}</option>" for user in self.db.list_users(self.tenant_id) if user["role"] == "sales" and user["active"])
+        assign_action = f"<form method='post' action='/admin/sales/{rfq_id}/assign'><label>分配给销售</label><select name='owner_email'>{sales_options}</select><button>分配或改派</button></form>" if self.user_role == "admin" and sales_options else ""
         if recommendation:
             recommendation_html = f"<p><b>推荐型号：</b>{esc(recommendation.get('model'))}</p><p><b>产品版本：</b>v{esc(recommendation.get('product_version'))}</p><p><b>满足项：</b>{esc('；'.join(recommendation.get('satisfies', [])) or '—')}</p><p><b>冲突项：</b>{esc('；'.join(recommendation.get('conflicts', [])) or '—')}</p><a href='{esc(recommendation.get('detail_url', '#'))}' target='_blank'>打开产品页</a>"
         else:
@@ -2866,7 +2903,7 @@ class Handler(BaseHTTPRequestHandler):
         body = f"""
 <div class='toolbar'><div><a href='/admin/sales'>← 返回销售工作台</a><h1>销售线索 {esc(rfq['id'])}</h1><div class='muted'>RFQ 状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])}</div></div></div>
 {notice}
-<div class='grid'><section class='card'><h2>线索处理</h2><form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>负责人</label><input name='owner' value='{esc(lead['owner'] or '')}' placeholder='例如 Alex / 售前工程师'><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}'><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
+<div class='grid'><section class='card'><h2>线索处理</h2><p><b>会话负责人：</b>{esc(lead['owner'] or '未领取')}</p>{claim_action}{assign_action}<form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}'><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
 <section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>
 <div class='grid' style='margin-top:18px'><section class='card'><h2>推荐快照</h2>{recommendation_html}</section><section class='card'><h2>问答与人工任务</h2>{answer_rows}{task_rows}</section></div>
 <section class='card' style='margin-top:18px'><h2>操作记录</h2>{audit_html}</section>
