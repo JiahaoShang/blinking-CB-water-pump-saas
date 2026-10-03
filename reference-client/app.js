@@ -10,13 +10,21 @@ if (apiBase && !/^https?:\/\/[^/\s]+$/i.test(apiBase)) apiBase = '';
 let conversationId = '';
 let token = '';
 let current = null;
-let locale = 'en';
+function systemPrefersChinese() {
+  try {
+    const languages = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || 'en'];
+    return languages.some((value) => String(value || '').toLowerCase().startsWith('zh'));
+  } catch (error) { return false; }
+}
+// 首次打开按系统（浏览器）语言选择中英文；仍可用右上角按钮随时切换。
+let locale = systemPrefersChinese() ? 'zh' : 'en';
 let pendingMessage = null;
+let pendingQuestion = null;
 $('site-key').value = siteKey;
 
 const words = {
-  en: { connect: 'Connect', quote: 'Request a quote', refresh: 'Refresh replies', send: 'Send', needSite: 'Enter the website key from the seller workspace.', noSession: 'Connect before sending a message.', confirmed: 'Confirmed requirements', draft: 'Check these extracted values before matching', unknown: 'Unknown', confirm: 'Confirm requirements', find: 'Find products', noMatch: 'No reliable candidate. Ask an engineer to review your application.', ask: 'Ask a product question', requestEngineer: 'Ask an engineer to review', rfq: 'RFQ', edit: 'Edit this RFQ', save: 'Submit RFQ', saveEdit: 'Save changes', contact: 'Reply email or phone', confirmContact: 'I confirm this reply contact can be used for this request', quantity: 'Quantity', destination: 'Destination', notes: 'Requirements and notes', error: 'The request did not complete. Your entries remain here; review the message and retry.', noDraft: 'Your message was saved, but the requirements were not extracted yet. Send again to retry — your text is kept.' },
-  zh: { connect: '连接', quote: '发起询价', refresh: '刷新回复', send: '发送', needSite: '请输入卖家系统提供的网站标识。', noSession: '请先连接，再发送消息。', confirmed: '已确认工况', draft: '请核对提取的工况后再选型', unknown: '不确定', confirm: '确认工况', find: '查找产品', noMatch: '暂无可靠候选，可请求工程师协助核实。', ask: '提出产品问题', requestEngineer: '请求工程师核实', rfq: '询价', edit: '编辑原 RFQ', save: '提交询价', saveEdit: '保存修改', contact: '可回复邮箱或电话', confirmContact: '我确认销售可通过上述方式回复本次请求', quantity: '数量', destination: '目的地', notes: '需求说明', error: '操作未完成。输入内容仍保留，请查看提示后重试。', noDraft: '消息已保存，但需求提取尚未完成；请再次发送重试，输入内容已保留。' },
+  en: { connect: 'Connect', assistantTitle: 'Pump product assistant', assistantSubtitle: 'Technical information with sources', stopContact: 'Stop proactive contact', quote: 'Request a quote', refresh: 'Refresh replies', send: 'Send', needSite: 'Enter the website key from the seller workspace.', noSession: 'Connect before sending a message.', confirmed: 'Confirmed requirements', draft: 'Check these extracted values before matching', unknown: 'Unknown', confirm: 'Confirm requirements', find: 'Find products', noMatch: 'No reliable candidate. Ask an engineer to review your application.', ask: 'Product answer', greeting: "Hello! I'm your consulting assistant — feel free to ask me anything about our products.", placeholder: 'Describe your requirements (e.g. flow 3 m³/h, head 45 m) — or just ask a question', requestEngineer: 'Ask an engineer to review', rfq: 'RFQ', edit: 'Edit this RFQ', save: 'Submit RFQ', saveEdit: 'Save changes', contact: 'Reply email or phone', confirmContact: 'I confirm this reply contact can be used for this request', quantity: 'Quantity', destination: 'Destination', notes: 'Requirements and notes', error: 'The request did not complete. Your entries remain here; review the message and retry.', noDraft: 'Your message was saved, but the requirements were not extracted yet. Send again to retry — your text is kept.' },
+  zh: { connect: '连接', assistantTitle: '水泵产品助手', assistantSubtitle: '带出处的技术信息', stopContact: '停止主动联系', quote: '发起询价', refresh: '刷新回复', send: '发送', needSite: '请输入卖家系统提供的网站标识。', noSession: '请先连接，再发送消息。', confirmed: '已确认工况', draft: '请核对提取的工况后再选型', unknown: '不确定', confirm: '确认工况', find: '查找产品', noMatch: '暂无可靠候选，可请求工程师协助核实。', ask: '产品问答', greeting: '你好，我是您的咨询助手——您可以随时向我提出任何关于产品的问题。', placeholder: '描述工况（例如：流量 3 m³/h，扬程 45 m），或直接提问', requestEngineer: '请求工程师核实', rfq: '询价', edit: '编辑原 RFQ', save: '提交询价', saveEdit: '保存修改', contact: '可回复邮箱或电话', confirmContact: '我确认销售可通过上述方式回复本次请求', quantity: '数量', destination: '目的地', notes: '需求说明', error: '操作未完成。输入内容仍保留，请查看提示后重试。', noDraft: '消息已保存，但需求提取尚未完成；请再次发送重试，输入内容已保留。' },
 };
 const t = (key) => words[locale][key];
 function node(tag, className = '', value = '') { const n = document.createElement(tag); if (className) n.className = className; if (value) n.textContent = value; return n; }
@@ -62,8 +70,34 @@ async function refresh() {
   showNotice('');
   render();
 }
+// 打开窗口即见的欢迎语：永远作为对话的第一条消息（语言跟随系统判定，可切换）。
+function appendGreeting() {
+  log.append(node('div', 'bubble assistant', t('greeting')));
+}
+// 统一输入框的分流：带问号或典型疑问词的消息按「产品提问」（有据问答）处理，
+// 其余按「需求描述」交给需求识别。规则刻意保守——宁可多走需求识别，也不误吞工况描述。
+function looksLikeQuestion(text) {
+  const value = String(text).trim();
+  if (!value) return false;
+  if (/[?？]/.test(value)) return true;
+  if (/^(what|which|how|can|could|do|does|is|are|will|would|should|why|when|where|who|may)\b/i.test(value)) return true;
+  if (/(请问|问一下|想问|咨询一下|是否|能否|能不能|可不可以|如何|怎么|多少|多大|什么型号|哪种|哪款|哪一个)/.test(value)) return true;
+  return false;
+}
+function applyLocale() {
+  $('chat-language').textContent = locale === 'en' ? '中文' : 'EN';
+  $('connect').textContent = t('connect');
+  $('show-rfq').textContent = t('quote');
+  $('refresh').textContent = t('refresh');
+  $('stop-contact').textContent = t('stopContact');
+  $('chat-title').textContent = t('assistantTitle');
+  $('chat-subtitle').textContent = t('assistantSubtitle');
+  $('message-form').querySelector('button').textContent = t('send');
+  $('message').placeholder = t('placeholder');
+}
 function render() {
   log.replaceChildren();
+  appendGreeting();
   if (!current) return;
   $('stop-contact').hidden = Boolean(current.contact_preference?.stop_proactive_contact);
   if (current.contact_preference?.stop_proactive_contact) {
@@ -78,7 +112,6 @@ function render() {
   }
   renderRequirements(current.requirement);
   renderRecommendation(current.recommendation, current.requirement);
-  renderQuestionForm(current.recommendation);
   renderAnswers(current.answers || [], current.human_tasks || []);
   renderRfqs(current.rfqs || []);
   log.scrollTop = log.scrollHeight;
@@ -223,7 +256,9 @@ async function openProductDetail(event, link, product) {
 }
 function renderAnswers(answers, tasks) {
   for (const answer of answers) {
-    const card = appendCard(answer.status === 'grounded' ? t('ask') : t('requestEngineer'));
+    // 多候选场景下点明回答对应的型号，避免买家把另一个型号的数据当成答案。
+    const titleBase = answer.status === 'grounded' ? t('ask') : t('requestEngineer');
+    const card = appendCard(answer.model ? `${answer.model} · ${titleBase}` : titleBase);
     card.append(node('p', 'muted', answer.text));
     if (answer.status === 'grounded') {
       for (const citation of answer.citations || []) card.append(node('small', '', `${citation.label || 'Source'} · ${citation.filename || ''} · ${citation.location || ''}`));
@@ -250,29 +285,6 @@ function renderAnswers(answers, tasks) {
       catch (error) { showNotice(error.message); }
     }));
   }
-}
-function renderQuestionForm(recommendation) {
-  if (!conversationId) return;
-  const card = appendCard(t('ask'));
-  const form = node('form');
-  const select = node('select'); select.name = 'product_id';
-  const empty = node('option', '', 'General question / 一般问题'); empty.value = ''; select.append(empty);
-  for (const product of recommendation?.results || []) {
-    const option = node('option', '', product.model); option.value = product.product_id; select.append(option);
-  }
-  const label = node('label'); label.append(node('span', '', 'Product context / 产品')); label.append(select); form.append(label);
-  const question = node('textarea'); question.name = 'question'; question.required = true; question.rows = 2; question.placeholder = 'e.g. What is the flow range?'; form.append(question);
-  const submit = node('button', '', t('ask')); submit.type = 'submit'; form.append(submit);
-  let pendingQuestion = null;
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const payload = { product_id: select.value || null, question: question.value.trim() };
-    const signature = JSON.stringify(payload);
-    if (!pendingQuestion || pendingQuestion.signature !== signature) pendingQuestion = { key: crypto.randomUUID(), signature };
-    try { await api(`/conversations/${conversationId}/questions`, 'POST', payload, { 'Idempotency-Key': pendingQuestion.key }); pendingQuestion = null; await refresh(); }
-    catch (error) { showNotice(error.message); }
-  });
-  card.append(form);
 }
 function renderRfqs(rfqs) {
   for (const rfq of rfqs) {
@@ -333,6 +345,18 @@ $('message-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!conversationId) { showNotice(t('noSession')); return; }
   const value = $('message').value.trim(); if (!value) return;
+  // 统一输入框：像提问 → 走「有据问答」（自动绑定当前推荐型号）；否则 → 走「需求识别」。
+  if (looksLikeQuestion(value)) {
+    const productId = current?.recommendation?.results?.[0]?.product_id || null;
+    const payload = { product_id: productId, question: value };
+    const signature = JSON.stringify(payload);
+    if (!pendingQuestion || pendingQuestion.signature !== signature) pendingQuestion = { key: crypto.randomUUID(), signature };
+    try {
+      await api(`/conversations/${conversationId}/questions`, 'POST', payload, { 'Idempotency-Key': pendingQuestion.key });
+      pendingQuestion = null; $('message').value = ''; await refresh();
+    } catch (error) { showNotice(error.message); }
+    return;
+  }
   if (!pendingMessage || pendingMessage.text !== value) pendingMessage = { key: crypto.randomUUID(), text: value };
   try {
     const saved = await api(`/conversations/${conversationId}/messages`, 'POST', { text: value }, { 'Idempotency-Key': pendingMessage.key });
@@ -343,4 +367,7 @@ $('message-form').addEventListener('submit', async (event) => {
   }
   catch (error) { showNotice(error.message); }
 });
-$('chat-language').addEventListener('click', () => { locale = locale === 'en' ? 'zh' : 'en'; $('chat-language').textContent = locale === 'en' ? '中文' : 'EN'; $('connect').textContent = t('connect'); $('show-rfq').textContent = t('quote'); $('refresh').textContent = t('refresh'); $('message-form').querySelector('button').textContent = t('send'); render(); });
+$('chat-language').addEventListener('click', () => { locale = locale === 'en' ? 'zh' : 'en'; applyLocale(); render(); });
+// 初次渲染：放置欢迎语，并按系统语言落地界面文案。
+applyLocale();
+render();

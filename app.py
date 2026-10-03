@@ -3426,7 +3426,7 @@ class Handler(BaseHTTPRequestHandler):
                 for row in self.db.list_messages(site["tenant_id"], conversation["id"])
             ]
             answers = [
-                {"id": row["id"], "question_message_id": row["question_message_id"], "status": row["answer_status"], "text": row["answer_text"], "citations": json.loads(row["citations_json"])}
+                {"id": row["id"], "question_message_id": row["question_message_id"], "product_id": row["product_id"], "model": row["model"], "status": row["answer_status"], "text": row["answer_text"], "citations": json.loads(row["citations_json"])}
                 for row in self.db.list_answers(site["tenant_id"], conversation["id"])
             ]
             human_tasks = [
