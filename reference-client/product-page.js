@@ -6,6 +6,9 @@ if (rfqSection) {
   const result = document.getElementById('product-rfq-result');
   const sessionStatus = document.getElementById('product-rfq-session');
   const sessionStorageKey = `pump_reference_session_${siteKey}`;
+  // 失败交接的隔离状态只存 sessionStorage（标签页级），随标签页关闭而消失。
+  const handoffFailedKey = `pump_product_handoff_failed_${siteKey}`;
+  const isolatedSessionKey = `pump_product_handoff_session_${siteKey}`;
   const submissionStorageKey = `pump_product_rfq_key_${siteKey}_${productId}`;
 
   async function request(path, method = 'GET', payload = null, token = '', key = '') {
@@ -28,46 +31,76 @@ if (rfqSection) {
     if (sessionStatus) sessionStatus.textContent = message;
   }
 
-  // 官网聊天（另一来源）打开本页时，用一次性交接码接回原会话：交接码只经 URL
-  // fragment 传递（不发送给服务器、不进 Referer），读取后立即从地址栏清除；
-  // 再在平台自身来源上换取同一会话的凭据。长期会话凭据只写入本来源 localStorage，
-  // 绝不出现在 URL、日志或页面 HTML 中。
-  const fragment = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : location.hash);
-  const handoffCode = fragment.get('handoff') || '';
-  if (handoffCode) history.replaceState(null, '', location.pathname + location.search);
+  async function startSession(storage, key) {
+    const created = await request('/conversations', 'POST', { site_key: siteKey, locale: document.documentElement.lang === 'zh-CN' ? 'zh' : 'en' });
+    const session = { conversationId: created.conversation_id, token: created.access_token };
+    storage.setItem(key, JSON.stringify(session));
+    return session;
+  }
 
-  async function buyerSession() {
+  // 无码直访行为不变：优先复用本浏览器已保存的会话，否则提交时新建并保存。
+  async function persistedSession() {
     const saved = JSON.parse(localStorage.getItem(sessionStorageKey) || 'null');
     if (saved?.conversationId && saved?.token) {
       await request(`/conversations/${saved.conversationId}`, 'GET', null, saved.token);
       return saved;
     }
-    const created = await request('/conversations', 'POST', { site_key: siteKey, locale: document.documentElement.lang === 'zh-CN' ? 'zh' : 'en' });
-    const session = { conversationId: created.conversation_id, token: created.access_token };
-    localStorage.setItem(sessionStorageKey, JSON.stringify(session));
-    return session;
+    return startSession(localStorage, sessionStorageKey);
   }
 
-  // 交接先于一切：成功即持原会话凭据；失败绝不按公开链接、会话 ID 或邮箱关联旧会话，
-  // 只显示明确提示并按直访者处理（提交时建立自己的新会话）。
+  // 失败交接后的独立会话：只读写本标签页 sessionStorage，绝不读取 localStorage 或
+  // sessionStorage 中更早已保存的其他会话；并存标签页看不到它，也就不会把各自的
+  // 询价误写进这个新会话。
+  async function isolatedSession() {
+    const saved = JSON.parse(sessionStorage.getItem(isolatedSessionKey) || 'null');
+    if (saved?.conversationId && saved?.token) {
+      await request(`/conversations/${saved.conversationId}`, 'GET', null, saved.token);
+      return saved;
+    }
+    return startSession(sessionStorage, isolatedSessionKey);
+  }
+
+  let handoffState = 'direct'; // 'direct' | 'connected' | 'failed'
+  function buyerSession() {
+    return handoffState === 'failed' ? isolatedSession() : persistedSession();
+  }
+
+  function handoffFailureMessage(code) {
+    const en = { handoff_not_found: 'the link is not recognised', handoff_already_used: 'the link has already been used', handoff_expired: 'the link has expired', handoff_binding_mismatch: 'the link does not match this product page', origin_not_allowed: 'the link is not valid at this site', site_not_found: 'the link is not valid at this site' };
+    const zh = { handoff_not_found: '链接无效或不存在', handoff_already_used: '链接已被使用', handoff_expired: '链接已过期', handoff_binding_mismatch: '链接与当前产品页不匹配', origin_not_allowed: '链接在此站点无效', site_not_found: '链接在此站点无效' };
+    return `This handoff link could not reconnect the original conversation (${en[code] || code}). Requests sent from this page will start a new, independent conversation. / 此交接链接无法接回原会话（${zh[code] || code}）。在本页提交的询价将建立独立的新会话。`;
+  }
+
+  // 跨站交接先于一切，三种情形（完整语义见 docs/MVP-数据与接口契约.md §3.1）：
+  // - 成功：接回原会话——凭据写入 localStorage（同源部署与既有行为兼容），页内 RFQ 并入原会话；
+  // - 有码但兑换失败：本标签页按独立新访客处理——不读取、不复用任何已存会话，提交时建立
+  //   独立新会话（只存本标签页 sessionStorage）；失败标记只作用于本标签页，刷新不失效；
+  // - 无码直访：保持既有行为（优先复用已保存的会话，否则提交时新建并保存到 localStorage）。
+  // 交接码只经 URL fragment 传递（不发送给服务器、不进 Referer），读取后立即从地址栏清除；
+  // 长期会话凭据只写入浏览器本站存储，绝不出现在 URL、日志或页面 HTML 中。
+  const fragment = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : location.hash);
+  const handoffCode = fragment.get('handoff') || '';
+  if (handoffCode) history.replaceState(null, '', location.pathname + location.search);
+
   const ready = (async () => {
-    let handoffError = '';
     if (handoffCode) {
       try {
         const exchanged = await request('/handoff/exchange', 'POST', { code: handoffCode, product_id: productId });
         localStorage.setItem(sessionStorageKey, JSON.stringify({ conversationId: exchanged.conversation_id, token: exchanged.access_token }));
+        sessionStorage.removeItem(handoffFailedKey);
+        handoffState = 'connected';
         status('Connected to your original conversation. / 已连接原会话。');
-        return;
       } catch (error) {
-        handoffError = error.message;
+        handoffState = 'failed';
+        sessionStorage.setItem(handoffFailedKey, '1');
+        status(handoffFailureMessage(error.message));
       }
-    }
-    const saved = JSON.parse(localStorage.getItem(sessionStorageKey) || 'null');
-    if (saved?.conversationId) {
-      if (handoffError) status(`The handoff link is unavailable (${handoffError}); continuing with this browser's saved session. / 交接链接不可用（${handoffError}），已使用本浏览器保存的会话。`);
       return;
     }
-    if (handoffError) status(`This link could not reconnect the original conversation (${handoffError}). You can still send a request; the seller will see it as a new conversation. / 未能接回原会话（${handoffError}）；仍可提交询价，卖家将看到新会话。`);
+    if (sessionStorage.getItem(handoffFailedKey) === '1') {
+      handoffState = 'failed';
+      status('This tab continues as a new visitor: the earlier handoff link could not reconnect the original conversation. Requests sent from this page start a new, independent conversation. / 本标签页继续以新访客处理：此前的交接链接未能接回原会话，在本页提交的询价将建立独立的新会话。');
+    }
   })();
 
   form.addEventListener('submit', async (event) => {
@@ -103,7 +136,9 @@ if (rfqSection) {
         notes: String(values.get('notes') || '').trim(),
       }, session.token, key);
       sessionStorage.removeItem(submissionStorageKey);
-      result.textContent = `RFQ ${saved.rfq_id.slice(0, 8)} received. The seller can review it with your existing conversation. / 询价已提交。`;
+      result.textContent = handoffState === 'failed'
+        ? `RFQ ${saved.rfq_id.slice(0, 8)} received as a new, independent conversation. / 询价已提交（独立新会话）。`
+        : `RFQ ${saved.rfq_id.slice(0, 8)} received. The seller can review it with your existing conversation. / 询价已提交。`;
     } catch (error) {
       result.textContent = `The RFQ was not confirmed: ${error.message}. Your entries remain here. / 提交未确认，请核对后重试。`;
       submit.disabled = false;
