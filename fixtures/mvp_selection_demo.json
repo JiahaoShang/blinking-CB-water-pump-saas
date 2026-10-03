@@ -27,6 +27,16 @@
       "kind": "synthetic_sparse_record",
       "source": "This JSON fixture; only identity and category exist",
       "known_gap": "No technical fact supports relevance or suitability"
+    },
+    {
+      "key": "d",
+      "model": "SYN-PUMP-D",
+      "kind": "synthetic_comparison_display_only",
+      "source": "This JSON fixture; invented values for three-column detail-page UI comparison only",
+      "flow_range_m3h": [0.8, 3.5],
+      "head_range_m": [30, 70],
+      "power_kw": 1.1,
+      "known_gap": "No real manufacturer product, curve, material, medium proof or CAD; not eligible for live recommendation"
     }
   ],
   "scenarios": [
