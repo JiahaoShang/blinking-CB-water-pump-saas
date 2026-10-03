@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from urllib.parse import urlencode
 
 from app import Database, Handler, make_server
 
@@ -36,6 +37,17 @@ class BuyerApiTests(unittest.TestCase):
         conn.close()
         return result
 
+    def form_request(self, method, path, form=None, cookie=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        if cookie:
+            headers["Cookie"] = cookie
+        conn.request(method, path, urlencode(form or {}) if form is not None else None, headers)
+        response = conn.getresponse()
+        result = response.status, dict(response.getheaders()), response.read().decode()
+        conn.close()
+        return result
+
     def test_site_scoped_conversation_requires_private_token(self):
         status, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a", "locale": "en"})
         self.assertEqual(status, 201)
@@ -58,6 +70,24 @@ class BuyerApiTests(unittest.TestCase):
         self.assertTrue(saved["message_id"])
         status, _, body = self.request("GET", path, headers=headers)
         self.assertEqual(body["messages"][0]["content"], "Flow 3 m3/h, head 45 m")
+
+    def test_admin_registers_site_in_ui_and_sales_cannot_change_it(self):
+        status, headers, _ = self.form_request("POST", "/login", {"email": "demo-admin@example.invalid", "password": "demo-admin"})
+        self.assertEqual(status, 303)
+        admin_cookie = headers["Set-Cookie"].split(";", 1)[0]
+        self.assertEqual(self.form_request("GET", "/admin/sites", cookie=admin_cookie)[0], 200)
+        status, _, _ = self.form_request("POST", "/admin/sites", {"allowed_origin": "https://factory.example"}, admin_cookie)
+        self.assertEqual(status, 303)
+        _, _, page = self.form_request("GET", "/admin/sites", cookie=admin_cookie)
+        self.assertIn("https://factory.example", page)
+        self.assertEqual(len(self.db.list_buyer_sites("demo-tenant")), 2)
+        new_site = next(site for site in self.db.list_buyer_sites("demo-tenant") if site["allowed_origin"] == "https://factory.example")
+        self.assertEqual(self.request("POST", "/api/v1/buyer/conversations", {"site_key": new_site["site_key"]}, {"Origin": "https://factory.example"})[0], 201)
+
+        _, headers, _ = self.form_request("POST", "/login", {"email": "demo-sales@example.invalid", "password": "demo-sales"})
+        sales_cookie = headers["Set-Cookie"].split(";", 1)[0]
+        self.assertEqual(self.form_request("POST", "/admin/sites", {"allowed_origin": "https://wrong.example"}, sales_cookie)[0], 403)
+        self.assertEqual(len(self.db.list_buyer_sites("demo-tenant")), 2)
 
     def test_registered_origin_is_required_for_browser_calls(self):
         status, _, _ = self.request(

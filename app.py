@@ -358,7 +358,9 @@ class Database:
         self.conn.commit()
 
     def register_buyer_site(self, tenant_id: str, site_key: str, allowed_origin: str) -> None:
-        if not site_key.strip() or not allowed_origin.startswith(("https://", "http://localhost:", "http://127.0.0.1:")):
+        parsed = urlparse(allowed_origin.strip())
+        local_http = parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"}
+        if not site_key.strip() or not parsed.hostname or (parsed.scheme != "https" and not local_http) or parsed.username or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
             raise ValueError("需要网站标识和允许的 HTTPS 来源")
         self.ensure_tenant(tenant_id)
         self.conn.execute(
@@ -366,6 +368,16 @@ class Database:
             (site_key.strip(), tenant_id, allowed_origin.rstrip("/"), now_iso()),
         )
         self.conn.commit()
+
+    def create_buyer_site(self, tenant_id: str, allowed_origin: str) -> str:
+        site_key = secrets.token_urlsafe(18)
+        self.register_buyer_site(tenant_id, site_key, allowed_origin)
+        return site_key
+
+    def list_buyer_sites(self, tenant_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM buyer_sites WHERE tenant_id=? ORDER BY created_at DESC, site_key", (tenant_id,)
+        ).fetchall()
 
     def get_buyer_site(self, site_key: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -1698,6 +1710,8 @@ class Handler(BaseHTTPRequestHandler):
             allowed = {"admin"}
         elif path.startswith("/admin/users"):
             allowed = {"admin"}
+        elif path.startswith("/admin/sites"):
+            allowed = {"admin"}
         elif path.startswith("/admin/products"):
             allowed = {"admin"}
         elif path.startswith("/admin/tasks"):
@@ -1876,6 +1890,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/admin/users":
             self.admin_users(query)
+            return
+        if path == "/admin/sites":
+            self.admin_sites(query)
             return
         if path == "/admin/products":
             self.admin_products(query)
@@ -2205,6 +2222,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.actor,
                 )
                 self.redirect("/admin/users?notice=created")
+                return
+            if path == "/admin/sites":
+                self.db.create_buyer_site(self.tenant_id, str(form.get("allowed_origin", "")))
+                self.redirect("/admin/sites?notice=created")
                 return
             if path == "/admin/demo/seed":
                 summary = self.db.seed_demo_workspace(self.tenant_id, self.actor)
@@ -2550,6 +2571,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.user_role == "admin":
             quick_links.append(("/admin/products", "维护产品资料", "核准字段、发布版本或撤回公开页"))
             quick_links.append(("/admin/users", "管理成员账号", "创建销售/工程师账号并控制后台访问"))
+            quick_links.append(("/admin/sites", "网站 API 接入", "登记企业官网来源并获取公开的网站标识"))
         quick_html = "".join(f"<a class='card action-card' href='{href}'><h2>{title}</h2><p class='muted'>{description}</p></a>" for href, title, description in quick_links)
         pending_tasks = self.db.list_human_tasks(self.tenant_id, "pending")[:5]
         task_rows = "".join(
@@ -2601,6 +2623,20 @@ class Handler(BaseHTTPRequestHandler):
 <section class='card' style='margin-top:18px'><h2>当前成员</h2><table><thead><tr><th>成员</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{''.join(rows) or "<tr><td colspan='5' class='muted'>暂无成员。</td></tr>"}</tbody></table></section>
 """
         self.send_html(layout("成员管理", body), 200)
+
+    def admin_sites(self, query: dict[str, list[str]]) -> None:
+        rows = "".join(
+            f"<tr><td><code>{esc(site['site_key'])}</code></td><td>{esc(site['allowed_origin'])}</td><td>{'启用' if site['active'] else '停用'}</td><td>{esc(site['created_at'])}</td></tr>"
+            for site in self.db.list_buyer_sites(self.tenant_id)
+        ) or "<tr><td colspan='4' class='muted'>尚未登记官网来源。</td></tr>"
+        notice = "<div class='notice'>官网来源已登记。网站标识可用于买方 API；它不是后台密钥。</div>" if query.get("notice", [""])[0] == "created" else ""
+        body = f"""
+<div class='toolbar'><div><a href='/admin'>← 返回管理概览</a><h1>网站 API 接入</h1><p class='muted'>为企业自有官网聊天窗口登记允许的浏览器来源。会话私有数据仍需要单独的买方访问凭据。</p></div></div>
+{notice}
+<section class='grid'><div class='card'><h2>登记官网</h2><form method='post' action='/admin/sites'><label>官网来源 *</label><input name='allowed_origin' type='url' required placeholder='https://www.example.com'><p class='muted'>只填写协议、域名和可选端口；正式网站使用 HTTPS。本地测试可用 localhost。</p><button>生成网站标识</button></form></div><div class='card'><h2>接入说明</h2><p>把网站标识放在创建会话请求的 <code>site_key</code> 字段。后续请求使用 <code>X-Site-Key</code> 和该会话的 <code>Authorization: Bearer</code> 凭据。</p><p class='muted'>这里是基础登记界面；完整接入文档、密钥轮换和自助安装尚未验收。</p></div></section>
+<section class='card' style='margin-top:18px'><h2>已登记网站</h2><table><thead><tr><th>网站标识</th><th>允许来源</th><th>状态</th><th>创建时间</th></tr></thead><tbody>{rows}</tbody></table></section>
+"""
+        self.send_html(layout("网站 API 接入", body), 200)
 
     def admin_tasks(self, query: dict[str, list[str]]) -> None:
         tasks = self.db.list_human_tasks(self.tenant_id, query.get("status", [""])[0] or None)
