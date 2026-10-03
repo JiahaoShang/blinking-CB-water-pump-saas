@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from app import Database, Handler, answer_from_approved_material, confirm_requirement_values, curve_head_at_flow, extract_requirement_values, layout, match_products, performance_points_from_text
@@ -232,6 +233,23 @@ class GroundedAnswerTests(unittest.TestCase):
         self.assertIn("工程师", task["response"])
         field = self.db.get_fields("demo-tenant", self.product["id"])[0]
         self.assertNotEqual(field["value"], "工程师需要根据当前项目条件确认价格和交期。")
+
+    def test_engineer_reply_failure_keeps_task_pending_and_retry_delivers_once(self):
+        conversation_id = self.db.create_conversation("demo-tenant")
+        question_id = self.db.save_message("demo-tenant", conversation_id, "buyer", "Is this item in stock?")
+        task_id = self.db.create_human_task("demo-tenant", conversation_id, question_id, "Is this item in stock?", "库存需要核实", {})
+        with patch.object(self.db, "save_message", side_effect=OSError("message write failed")):
+            with self.assertRaises(OSError):
+                self.db.resolve_human_task("demo-tenant", task_id, "Please contact sales for current stock.")
+        self.assertEqual(self.db.get_human_task("demo-tenant", task_id)["status"], "pending")
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 1)
+
+        self.db.resolve_human_task("demo-tenant", task_id, "Please contact sales for current stock.")
+        self.assertEqual(self.db.get_human_task("demo-tenant", task_id)["status"], "resolved")
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 2)
+        with self.assertRaises(ValueError):
+            self.db.resolve_human_task("demo-tenant", task_id, "duplicate")
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 2)
 
 
 class RfqTests(unittest.TestCase):

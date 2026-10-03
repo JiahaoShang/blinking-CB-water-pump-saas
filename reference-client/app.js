@@ -61,6 +61,7 @@ function render() {
   if (!current) return;
   for (const message of current.messages || []) {
     const bubble = node('div', `bubble ${message.role === 'buyer' ? 'buyer' : 'assistant'}`, message.content);
+    if (message.source === 'human-engineer') bubble.prepend(node('small', '', locale === 'en' ? 'Engineer reply' : '工程师回复'));
     log.append(bubble);
   }
   renderRequirements(current.requirement);

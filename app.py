@@ -609,11 +609,11 @@ class Database:
 
     def list_messages(self, tenant_id: str, conversation_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT * FROM messages WHERE tenant_id=? AND conversation_id=? ORDER BY created_at, id",
+            "SELECT * FROM messages WHERE tenant_id=? AND conversation_id=? ORDER BY rowid",
             (tenant_id, conversation_id),
         ).fetchall()
 
-    def save_message(self, tenant_id: str, conversation_id: str, role: str, content: str, source: str = "buyer-web") -> str:
+    def save_message(self, tenant_id: str, conversation_id: str, role: str, content: str, source: str = "buyer-web", commit: bool = True) -> str:
         if not self.get_conversation(tenant_id, conversation_id):
             raise ValueError("会话不存在")
         content = content.strip()
@@ -625,7 +625,8 @@ class Database:
             (message_id, tenant_id, conversation_id, role, content, source, now_iso()),
         )
         self.conn.execute("UPDATE conversations SET updated_at=? WHERE tenant_id=? AND id=?", (now_iso(), tenant_id, conversation_id))
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return message_id
 
     def get_revisions(self, tenant_id: str, conversation_id: str) -> list[sqlite3.Row]:
@@ -807,17 +808,21 @@ class Database:
         task = self.get_human_task(tenant_id, task_id)
         if not task:
             raise ValueError("人工任务不存在")
+        if task["status"] != "pending":
+            raise ValueError("人工任务已处理")
         response = response.strip()
         if not response:
             raise ValueError("人工回复不能为空")
         timestamp = now_iso()
-        self.conn.execute(
-            "UPDATE human_tasks SET status='resolved', response=?, assigned_to=?, updated_at=?, resolved_at=? WHERE tenant_id=? AND id=?",
-            (response, actor, timestamp, timestamp, tenant_id, task_id),
-        )
-        self.save_message(tenant_id, task["conversation_id"], "assistant", f"工程师回复：{response}", "human-engineer")
-        self._audit(tenant_id, "human_task", task_id, "resolved", actor)
-        self.conn.commit()
+        with self.conn:
+            updated = self.conn.execute(
+                "UPDATE human_tasks SET status='resolved', response=?, assigned_to=?, updated_at=?, resolved_at=? WHERE tenant_id=? AND id=? AND status='pending'",
+                (response, actor, timestamp, timestamp, tenant_id, task_id),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("人工任务已处理")
+            self.save_message(tenant_id, task["conversation_id"], "assistant", f"工程师回复：{response}", "human-engineer", commit=False)
+            self._audit(tenant_id, "human_task", task_id, "resolved", actor)
 
     def latest_confirmed_revision(self, tenant_id: str, conversation_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -1864,7 +1869,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             site, conversation = access
             messages = [
-                {"id": row["id"], "role": row["role"], "content": row["content"], "created_at": row["created_at"]}
+                {"id": row["id"], "role": row["role"], "source": row["source"], "content": row["content"], "created_at": row["created_at"]}
                 for row in self.db.list_messages(site["tenant_id"], conversation["id"])
             ]
             answers = [

@@ -201,6 +201,17 @@ class BuyerApiTests(unittest.TestCase):
         self.assertEqual(len(self.db.list_human_tasks("demo-tenant")), 1)
         _, _, current = self.request("GET", path, headers=headers)
         self.assertEqual(current["human_tasks"][0]["status"], "pending")
+        self.assertFalse(any(message["source"] == "human-engineer" for message in current["messages"]))
+
+        status, login_headers, _ = self.form_request("POST", "/login", {"email": "demo-engineer@example.invalid", "password": "demo-engineer"})
+        self.assertEqual(status, 303)
+        engineer_cookie = login_headers["Set-Cookie"].split(";", 1)[0]
+        task_id = current["human_tasks"][0]["id"]
+        self.assertEqual(self.form_request("POST", f"/admin/tasks/{task_id}/reply", {"response": "Please confirm the requested quantity before a price is issued."}, engineer_cookie)[0], 303)
+        _, _, current = self.request("GET", path, headers=headers)
+        self.assertEqual(current["human_tasks"][0]["status"], "resolved")
+        self.assertEqual(current["messages"][-1]["source"], "human-engineer")
+        self.assertIn("requested quantity", current["messages"][-1]["content"])
 
     def test_rfq_from_api_requires_confirmed_contact_and_rejects_changed_retry(self):
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
