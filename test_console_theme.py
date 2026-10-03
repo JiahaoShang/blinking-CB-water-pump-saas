@@ -74,6 +74,23 @@ class ConsoleThemeTests(unittest.TestCase):
         self.assertIn("class='form-alert'", page2)
         self.assertIn("邮箱或密码不正确", page2)
 
+    def test_brand_logo_asset_served_and_referenced(self):
+        """品牌标：控制台与登录页引用真实 logo 资产，且路由可提供 PNG。"""
+        cookie = self.login()
+        _, _, page = self.request("GET", "/admin", cookie=cookie)
+        self.assertIn("src='/assets/brand.png'", page)
+        _, _, login_page = self.request("GET", "/login")
+        self.assertIn("src='/assets/brand.png'", login_page)
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        conn.request("GET", "/assets/brand.png")
+        response = conn.getresponse()
+        data = response.read()
+        conn.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "image/png")
+        self.assertTrue(data.startswith(b"\x89PNG"))
+        self.assertGreater(len(data), 1000)
+
     def test_permission_denied_uses_reason_card(self):
         cookie = self.login("demo-sales@example.invalid", "demo-sales")
         status, _, page = self.request("GET", "/admin/users", cookie=cookie)
