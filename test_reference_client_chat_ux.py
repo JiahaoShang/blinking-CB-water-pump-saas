@@ -84,14 +84,18 @@ class ReferenceChatSourceContractTests(unittest.TestCase):
         html = (ROOT / "reference-client" / "index.html").read_text(encoding="utf-8")
         self.assertNotIn('id="refresh"', html)
         self.assertIn('id="chat-badge"', html)
-        # 回答消息（有据/待核实）不再作为气泡重复卡片内容
+        # 有据回答消息不再作为气泡重复卡片内容；待核实回答保留气泡陈述（见浏览器断言）
         self.assertIn("grounded-answer", source)
-        self.assertIn("unresolved-question", source)
+        # 转交确认以消息流形式播报（客户端按语言本地化）；悬浮按钮文案本地化
+        self.assertIn("human-request", source)
+        self.assertIn("launcher", source)
+        self.assertIn('id="chat-launcher-label"', (ROOT / "reference-client" / "index.html").read_text(encoding="utf-8"))
         # 兜底文案不再写死邀请语（动向与入口只由界面按真实状态给出）
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
         self.assertNotIn("可请求工程师查看", app_source)
         self.assertNotIn("我可以在您点击请求后请工程师查看", app_source)
         self.assertNotIn("若您希望工程师核实，可点击下方按钮", app_source)
+        self.assertIn("HUMAN_REQUEST_ACK", app_source)
 
 
 class ReferenceChatBrowserTests(unittest.TestCase):
@@ -197,6 +201,10 @@ class ReferenceChatBrowserTests(unittest.TestCase):
         self.assertEqual(results["greeting_zh"]["languageLabel"], "EN")
         # 手动切换语言后欢迎语随之切换
         self.assertIn("consulting assistant", results["after_toggle"]["logText"])
+        # 悬浮启动按钮文案：按系统语言本地化，切换后随之切换
+        self.assertEqual(results["greeting_en"]["launcherLabel"], "Ask me about products")
+        self.assertEqual(results["greeting_zh"]["launcherLabel"], "向我提问产品问题")
+        self.assertEqual(results["after_toggle"]["launcherLabel"], "Ask me about products")
         for key in ("greeting_en", "greeting_zh"):
             self.assertNotIn("Ask a product question", results[key]["logText"])
             self.assertNotIn("提出产品问题", results[key]["logText"])
@@ -252,17 +260,25 @@ class ReferenceChatBrowserTests(unittest.TestCase):
     def test_needs_human_card_states_and_no_duplication(self):
         results = self.results["results"]
         item = results["waiting_task_reply"]
-        # ① 不能回答时给出的是明确的选择入口：问句 + 按钮；尚不显示「已转交」文案，也没有原始状态徽标
+        # ① 不能回答时给出的是明确的选择入口：问句卡片 + 按钮；尚不显示「已转交」文案，也没有原始状态徽标
         self.assertIn("Would you like an engineer to verify this?", item["afterQuestionText"])
         self.assertIn("Ask an engineer to review", item["afterQuestionText"])
         self.assertNotIn("Engineer review requested", item["afterQuestionText"])
         self.assertNotIn("pending", item["afterQuestionText"])
-        # ② 点击请求后：状态改为「已转交」，请求按钮消失（不留陈旧邀请语）
+        # 正文只出现一次（气泡陈述；选择卡不重复正文）
+        self.assertEqual(item["afterQuestionText"].count("我还不能确认"), 1, item["afterQuestionText"])
+        # ② 点击请求后：卡片整体消失，消息流出现一次「已转交」状态；请求按钮不再出现
         self.assertIn("Engineer review requested", item["requestedStateText"])
+        self.assertEqual(item["requestedStateText"].count("Engineer review requested"), 1, item["requestedStateText"])
         self.assertNotIn("Ask an engineer to review", item["requestedStateText"])
-        # ③ 工程师追问只出现一次（消息气泡）；卡片不再重复同一问句
+        self.assertNotIn("Would you like an engineer to verify this?", item["requestedStateText"])
+        # ③ 工程师追问只出现一次（消息气泡，含输入框提示）；卡片不再参与，追问文案不重复
         self.assertEqual(item["afterFollowupText"].count("Please confirm the flow and head"), 1, item["afterFollowupText"])
-        self.assertIn("The engineer needs more details", item["afterFollowupText"])
+        self.assertIn("Reply using the message box below", item["afterFollowupText"])
+        self.assertEqual(item["afterFollowupText"].count("Reply using the message box below"), 1, item["afterFollowupText"])
+        self.assertNotIn("The engineer needs more details", item["afterFollowupText"])
+        # 转交后产品问答卡不再显示（有据回答卡不受影响，见场景 4 断言）
+        self.assertNotIn("Product answer", item["afterFollowupText"])
         # ④ 回答正文只出现一次：待核实回答不再以气泡重复卡片内容；有据回答同验
         self.assertEqual(item["afterFollowupText"].count("我还不能确认"), 1, item["afterFollowupText"])
         question = results["question_route"]
@@ -282,9 +298,11 @@ class ReferenceChatBrowserTests(unittest.TestCase):
         self.assertFalse(badge["hidden"])
         self.assertEqual(badge["text"], "1")
         self.assertTrue(badge["panelHidden"])
-        # 重新打开：角标清空、回复内容可见
+        # 重新打开：角标清空、回复内容可见（标签「Engineer reply」呈现，正文不再带中文前缀）
         self.assertTrue(item["badgeAfterOpen"]["hidden"])
         self.assertIn("6-8 weeks", item["reopenedText"])
+        self.assertNotIn("工程师回复：", item["reopenedText"])
+        self.assertIn("Engineer reply", item["reopenedText"])
 
 
 if __name__ == "__main__":

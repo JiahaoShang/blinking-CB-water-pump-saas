@@ -50,6 +50,7 @@ COMMERCIAL_QUESTION_TOKENS = (
 COMMERCIAL_REFUSAL_ANSWER = "关于价格、库存、交期或认证，我手上的核准资料还无法确认。"
 NO_PUBLISHED_PRODUCT_ANSWER = "目前没有可引用的已发布产品资料，我还不能确认这个问题。"
 NO_APPROVED_BASIS_ANSWER = "现有核准资料没有足够依据回答这个问题，参数还需要核实。"
+HUMAN_REQUEST_ACK = "已转交工程师核实——答复会直接出现在这里。"
 REQUIREMENT_LABELS = {
     "category": "品类",
     "use_case": "用途",
@@ -1240,11 +1241,20 @@ class Database:
             "product_version_id": answer["product_version_id"],
             "answer_so_far": answer["answer_text"],
         }
-        return self.create_human_task(
+        task_id = self.create_human_task(
             tenant_id, conversation_id, answer["question_message_id"], question["content"],
             "资料未覆盖或需要工程判断", context, answer["product_id"], answer["product_version_id"],
             revision["id"] if revision else None, recommendation["id"] if recommendation else None,
         )
+        # 向会话写一条「已转交」状态消息（消息流里播报一次即可；重复请求不再追加）。
+        # 参考客户端按语言本地化显示；旧 /inquiry 页按原文显示。
+        ack_source = f"human-request:{task_id}"
+        if not self.conn.execute(
+            "SELECT 1 FROM messages WHERE tenant_id=? AND conversation_id=? AND source=?",
+            (tenant_id, conversation_id, ack_source),
+        ).fetchone():
+            self.save_message(tenant_id, conversation_id, "assistant", HUMAN_REQUEST_ACK, ack_source)
+        return task_id
 
     def list_human_tasks(self, tenant_id: str, status: str | None = None) -> list[sqlite3.Row]:
         query = (

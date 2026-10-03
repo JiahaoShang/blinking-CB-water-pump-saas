@@ -59,7 +59,7 @@ const mockQueue = [];
 const runFailures = [];
 
 const elements = {};
-for (const id of ['chat-log', 'chat-notice', 'chat-panel', 'site-key', 'message', 'connect', 'refresh', 'show-rfq', 'stop-contact', 'chat-launcher', 'chat-close', 'chat-language', 'chat-title', 'chat-subtitle']) {
+for (const id of ['chat-log', 'chat-notice', 'chat-panel', 'site-key', 'message', 'connect', 'refresh', 'show-rfq', 'stop-contact', 'chat-launcher', 'chat-launcher-label', 'chat-close', 'chat-language', 'chat-title', 'chat-subtitle']) {
   elements[id] = new StubNode(id === 'message' ? 'textarea' : 'div');
 }
 const messageForm = new StubNode('form');

@@ -23,8 +23,8 @@ let pendingQuestion = null;
 $('site-key').value = siteKey;
 
 const words = {
-  en: { connect: 'Connect', assistantTitle: 'Pump product assistant', assistantSubtitle: 'Technical information with sources', stopContact: 'Stop proactive contact', quote: 'Request a quote', send: 'Send', needSite: 'Enter the website key from the seller workspace.', noSession: 'Connect before sending a message.', confirmed: 'Confirmed requirements', draft: 'Check these extracted values before matching', unknown: 'Unknown', confirm: 'Confirm requirements', find: 'Find products', noMatch: 'No reliable candidate. Ask an engineer to review your application.', ask: 'Product answer', greeting: "Hello! I'm your consulting assistant — feel free to ask me anything about our products.", placeholder: 'Describe your requirements (e.g. flow 3 m³/h, head 45 m) — or just ask a question', requestEngineer: 'Ask an engineer to review', askEngineer: 'Would you like an engineer to verify this?', engineerRequested: 'Engineer review requested — the reply will appear right here.', engineerWaiting: 'The engineer needs more details.', engineerResolved: 'Verification complete — see the engineer reply above.', replyHint: 'Reply using the message box below.', rfq: 'RFQ', edit: 'Edit this RFQ', save: 'Submit RFQ', saveEdit: 'Save changes', contact: 'Reply email or phone', confirmContact: 'I confirm this reply contact can be used for this request', quantity: 'Quantity', destination: 'Destination', notes: 'Requirements and notes', error: 'The request did not complete. Your entries remain here; review the message and retry.', noDraft: 'Your message was saved, but the requirements were not extracted yet. Send again to retry — your text is kept.' },
-  zh: { connect: '连接', assistantTitle: '水泵产品助手', assistantSubtitle: '带出处的技术信息', stopContact: '停止主动联系', quote: '发起询价', send: '发送', needSite: '请输入卖家系统提供的网站标识。', noSession: '请先连接，再发送消息。', confirmed: '已确认工况', draft: '请核对提取的工况后再选型', unknown: '不确定', confirm: '确认工况', find: '查找产品', noMatch: '暂无可靠候选，可请求工程师协助核实。', ask: '产品问答', greeting: '你好，我是您的咨询助手——您可以随时向我提出任何关于产品的问题。', placeholder: '描述工况（例如：流量 3 m³/h，扬程 45 m），或直接提问', requestEngineer: '请求工程师核实', askEngineer: '需要工程师帮您核实吗？', engineerRequested: '已转交工程师核实——答复会直接出现在这里。', engineerWaiting: '工程师需要补充信息。', engineerResolved: '本次核实已完成——工程师答复见上方消息。', replyHint: '请在下方输入框直接回复', rfq: '询价', edit: '编辑原 RFQ', save: '提交询价', saveEdit: '保存修改', contact: '可回复邮箱或电话', confirmContact: '我确认销售可通过上述方式回复本次请求', quantity: '数量', destination: '目的地', notes: '需求说明', error: '操作未完成。输入内容仍保留，请查看提示后重试。', noDraft: '消息已保存，但需求提取尚未完成；请再次发送重试，输入内容已保留。' },
+  en: { connect: 'Connect', assistantTitle: 'Pump product assistant', assistantSubtitle: 'Technical information with sources', stopContact: 'Stop proactive contact', quote: 'Request a quote', send: 'Send', needSite: 'Enter the website key from the seller workspace.', noSession: 'Connect before sending a message.', confirmed: 'Confirmed requirements', draft: 'Check these extracted values before matching', unknown: 'Unknown', confirm: 'Confirm requirements', find: 'Find products', noMatch: 'No reliable candidate. Ask an engineer to review your application.', ask: 'Product answer', greeting: "Hello! I'm your consulting assistant — feel free to ask me anything about our products.", placeholder: 'Describe your requirements (e.g. flow 3 m³/h, head 45 m) — or just ask a question', requestEngineer: 'Ask an engineer to review', askEngineer: 'Would you like an engineer to verify this?', engineerRequested: 'Engineer review requested — the reply will appear right here.', replyHint: 'Reply using the message box below.', launcher: 'Ask me about products', rfq: 'RFQ', edit: 'Edit this RFQ', save: 'Submit RFQ', saveEdit: 'Save changes', contact: 'Reply email or phone', confirmContact: 'I confirm this reply contact can be used for this request', quantity: 'Quantity', destination: 'Destination', notes: 'Requirements and notes', error: 'The request did not complete. Your entries remain here; review the message and retry.', noDraft: 'Your message was saved, but the requirements were not extracted yet. Send again to retry — your text is kept.' },
+  zh: { connect: '连接', assistantTitle: '水泵产品助手', assistantSubtitle: '带出处的技术信息', stopContact: '停止主动联系', quote: '发起询价', send: '发送', needSite: '请输入卖家系统提供的网站标识。', noSession: '请先连接，再发送消息。', confirmed: '已确认工况', draft: '请核对提取的工况后再选型', unknown: '不确定', confirm: '确认工况', find: '查找产品', noMatch: '暂无可靠候选，可请求工程师协助核实。', ask: '产品问答', greeting: '你好，我是您的咨询助手——您可以随时向我提出任何关于产品的问题。', placeholder: '描述工况（例如：流量 3 m³/h，扬程 45 m），或直接提问', requestEngineer: '请求工程师核实', askEngineer: '需要工程师帮您核实吗？', engineerRequested: '已转交工程师核实——答复会直接出现在这里。', replyHint: '请在下方输入框直接回复', launcher: '向我提问产品问题', rfq: '询价', edit: '编辑原 RFQ', save: '提交询价', saveEdit: '保存修改', contact: '可回复邮箱或电话', confirmContact: '我确认销售可通过上述方式回复本次请求', quantity: '数量', destination: '目的地', notes: '需求说明', error: '操作未完成。输入内容仍保留，请查看提示后重试。', noDraft: '消息已保存，但需求提取尚未完成；请再次发送重试，输入内容已保留。' },
 };
 const t = (key) => words[locale][key];
 function node(tag, className = '', value = '') { const n = document.createElement(tag); if (className) n.className = className; if (value) n.textContent = value; return n; }
@@ -147,6 +147,7 @@ function applyLocale() {
   $('stop-contact').textContent = t('stopContact');
   $('chat-title').textContent = t('assistantTitle');
   $('chat-subtitle').textContent = t('assistantSubtitle');
+  $('chat-launcher-label').textContent = t('launcher');
   $('message-form').querySelector('button').textContent = t('send');
   $('message').placeholder = t('placeholder');
 }
@@ -160,12 +161,20 @@ function render() {
     banner.append(node('p', 'muted', current.contact_preference.reason || ''));
   }
   for (const message of current.messages || []) {
-    // 有据回答 / 待核实回答由下方答案卡完整呈现（含出处、状态与操作入口）；
-    // 这类消息不再作为普通气泡渲染，避免同一段文字在聊天里出现两遍。
-    if (message.source === 'grounded-answer' || message.source === 'unresolved-question') continue;
-    const bubble = node('div', `bubble ${message.role === 'buyer' ? 'buyer' : 'assistant'}`, message.content);
+    // 有据回答由下方答案卡完整呈现（含出处），不再以气泡重复；
+    // 待核实回答保留气泡（一句「不能确认」的陈述），「请求工程师」入口只在尚无任务时出现一次。
+    if (message.source === 'grounded-answer') continue;
+    let localized = message.source?.startsWith('human-request') ? t('engineerRequested') : message.content;
+    // 工程师回复消息自带「工程师回复：」前缀（供旧页面直接消费）；参考窗已用标签呈现，去掉前缀避免重复。
+    if (message.source === 'human-engineer') localized = localized.replace(/^工程师回复：/, '');
+    const bubble = node('div', `bubble ${message.role === 'buyer' ? 'buyer' : 'assistant'}`, localized);
     if (message.source === 'human-engineer') bubble.prepend(node('small', '', locale === 'en' ? 'Engineer reply' : '工程师回复'));
-    if (message.source?.startsWith('engineer-followup:')) bubble.prepend(node('small', '', locale === 'en' ? 'Engineer question' : '工程师追问'));
+    if (message.source?.startsWith('engineer-followup:')) {
+      bubble.prepend(node('small', '', locale === 'en' ? 'Engineer question' : '工程师追问'));
+      const task = (current.human_tasks || []).find((item) => item.id === message.source.split(':')[1]);
+      // 仅当仍在等待买家补充时，在追问气泡下方提示用输入框回复；回复后提示自动消失。
+      if (task && task.status === 'waiting_buyer') bubble.append(node('small', '', t('replyHint')));
+    }
     log.append(bubble);
   }
   renderRequirements(current.requirement);
@@ -314,31 +323,22 @@ async function openProductDetail(event, link, product) {
 }
 function renderAnswers(answers, tasks) {
   for (const answer of answers) {
-    // 多候选场景下点明回答对应的型号，避免买家把另一个型号的数据当成答案。
-    const card = appendCard(answer.model ? `${answer.model} · ${t('ask')}` : t('ask'));
-    card.append(node('p', 'muted', answer.text));
     if (answer.status === 'grounded') {
+      // 多候选场景下点明回答对应的型号，避免买家把另一个型号的数据当成答案。
+      const card = appendCard(answer.model ? `${answer.model} · ${t('ask')}` : t('ask'));
+      card.append(node('p', 'muted', answer.text));
       for (const citation of answer.citations || []) card.append(node('small', '', `${citation.label || 'Source'} · ${citation.filename || ''} · ${citation.location || ''}`));
       continue;
     }
-    // 不能回答时的动向只由这里按真实状态播报（回答正文不再写死邀请语，避免与状态矛盾）：
-    // 未请求 → 明确的选择入口；已转交 / 等补充 / 已完成 → 状态说明。
-    // 工程师追问的问句已作为消息气泡显示在聊天中，这里不再重复。
+    // 待核实回答：正文已在气泡中；卡片只在「还没有任何动作」时出现一次（选择入口）。
+    // 一旦转交（或已有任务），卡片不再显示——后续动向由消息流播报（已转交状态、工程师追问与答复）。
     const task = tasks.find((item) => item.question_message_id === answer.question_message_id);
-    if (!task) {
-      card.append(node('p', '', t('askEngineer')));
-      card.append(action(t('requestEngineer'), async () => {
-        try { await api(`/conversations/${conversationId}/human-requests`, 'POST', { answer_id: answer.id, reply_path: 'conversation' }); await refresh(); }
-        catch (error) { showNotice(error.message); }
-      }));
-    } else if (task.status === 'waiting_buyer') {
-      card.append(node('p', '', t('engineerWaiting')));
-      card.append(node('p', 'muted', t('replyHint')));
-    } else if (task.status === 'pending') {
-      card.append(node('p', '', t('engineerRequested')));
-    } else {
-      card.append(node('p', '', t('engineerResolved')));
-    }
+    if (task) continue;
+    const card = appendCard(t('askEngineer'));
+    card.append(action(t('requestEngineer'), async () => {
+      try { await api(`/conversations/${conversationId}/human-requests`, 'POST', { answer_id: answer.id, reply_path: 'conversation' }); await refresh(); }
+      catch (error) { showNotice(error.message); }
+    }));
   }
 }
 function renderRfqs(rfqs) {

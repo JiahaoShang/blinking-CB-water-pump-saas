@@ -86,7 +86,7 @@ function makeStorage(initial = {}) {
   };
 }
 
-const IDS = ['chat-log', 'chat-notice', 'chat-launcher', 'chat-panel', 'chat-close', 'chat-language',
+const IDS = ['chat-log', 'chat-notice', 'chat-launcher', 'chat-launcher-label', 'chat-panel', 'chat-close', 'chat-language',
   'chat-badge', 'connect', 'site-key', 'show-rfq', 'stop-contact', 'message-form', 'message', 'chat-title', 'chat-subtitle'];
 
 function openChat({ language, languages, session = {} }) {
@@ -183,7 +183,7 @@ function openChat({ language, languages, session = {} }) {
     panelHidden: () => elements['chat-panel'].hidden,
     textareaCount: () => countTags(elements['chat-log'], 'TEXTAREA'),
     snapshot() {
-      return { logText: this.logText(), languageLabel: this.languageLabel(), messageValue: elements['message'].value };
+      return { logText: this.logText(), languageLabel: this.languageLabel(), launcherLabel: elements['chat-launcher-label'].textContent, messageValue: elements['message'].value };
     },
     stop() {
       for (const timer of timers) clearInterval(timer);
