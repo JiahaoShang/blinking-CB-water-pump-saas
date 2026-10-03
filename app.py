@@ -2271,6 +2271,36 @@ CONSOLE_CSS = """
 .console .topbar a:hover{background:rgba(139,92,246,.12)}
 .console .menu-btn{display:none;border:1px solid var(--line);background:rgba(139,92,246,.08);color:var(--ink);border-radius:9px;padding:6px 11px;font-size:16px;line-height:1;box-shadow:none}
 .console main{max-width:1160px;width:100%;margin:0 auto;padding:34px 30px 70px}
+/* 线稿式展示组件：主任务在前，证据与历史按需展开 */
+.console .focus{display:flex;justify-content:space-between;gap:18px;align-items:center;background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.32);border-left:4px solid var(--accent);border-radius:14px;padding:18px 20px;margin:0 0 20px}
+.console .focus .focus-label{color:#c4b5fd;font-size:12px;font-weight:700;letter-spacing:.08em}
+.console .focus strong{display:block;font-size:19px;line-height:1.4;margin:6px 0 4px;color:#fff}
+.console .focus p{font-size:13px;color:var(--muted);margin:0;max-width:640px}
+.console .focus .actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end;flex-shrink:0}
+.console .panel-title{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin:0 0 12px}
+.console .panel-title h2{margin:0}
+.console .panel-title .muted{font-size:12px}
+.console .simple-list{display:grid}
+.console .simple-item{display:flex;gap:16px;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding:14px 0}
+.console .simple-item:first-child{padding-top:2px}
+.console .simple-item:last-child{border-bottom:0;padding-bottom:2px}
+.console .simple-item strong{display:block;font-size:14px}
+.console .simple-item small{display:block;color:var(--muted);font-size:12px;margin-top:3px}
+.console .simple-item .actions{flex-shrink:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.console .compact-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0 0 10px}
+.console .compact-facts>div{padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:rgba(20,17,33,.55)}
+.console .compact-facts small{display:block;color:var(--muted);font-size:12px}
+.console .compact-facts strong{font-size:15px}
+.console .summary-strip{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}
+.console .summary-strip span{font-size:12px;background:rgba(139,92,246,.08);border:1px solid var(--line);border-radius:999px;padding:5px 11px;color:#cfc7e6}
+.console .muted-block{background:rgba(20,17,33,.6);border:1px solid var(--line);border-radius:10px;padding:13px 15px;font-size:13px;color:var(--muted)}
+.console .guide{font-size:12px;color:var(--muted);margin-top:8px}
+.console .detail-toggle{border-top:1px solid var(--line);margin-top:14px;padding-top:12px;font-size:13px}
+.console .detail-toggle summary{cursor:pointer;color:#c4b5fd;font-weight:700;list-style:none}
+.console .detail-toggle summary::-webkit-details-marker{display:none}
+.console .detail-toggle summary:after{content:'⌄';float:right;color:var(--muted)}
+.console .detail-toggle[open] summary:after{content:'⌃'}
+.console .detail-toggle>div{padding-top:12px}
 @media(max-width:850px){
 .console{grid-template-columns:1fr}
 .console .side{position:fixed;left:0;top:0;width:242px;transform:translateX(-105%);transition:transform .18s ease;box-shadow:none}
@@ -2278,6 +2308,10 @@ CONSOLE_CSS = """
 .console .menu-btn{display:inline-block}
 .console .topbar{padding:8px 14px}
 .console main{padding:24px 16px 60px}
+.console .focus{flex-direction:column;align-items:flex-start}
+.console .focus .actions{justify-content:flex-start}
+.console .simple-item{flex-direction:column;align-items:flex-start;gap:8px}
+.console .compact-facts{grid-template-columns:1fr}
 }
 """
 
@@ -3578,27 +3612,36 @@ class Handler(BaseHTTPRequestHandler):
         notice_html = "<div class='notice'>示例资料已登记为候选值，请逐个核对后核准，再发布到买方产品页。</div>" if notice == "demo" else ""
         if notice == "lowara":
             notice_html = f"<div class='notice'>Lowara 资料已加载：新增 {esc(query.get('created', ['0'])[0])} 个内部演示型号。来源文件只登记元数据，外部再发布授权仍待确认。</div>"
-        row_parts = []
+        item_parts = []
         for product in products:
+            published = self.db.get_published_version(self.tenant_id, product["id"])
+            if product["status"] == "pending_review":
+                next_label, hint = "继续核对资料", "有候选字段待逐项处理；未核准内容不会进入公开页"
+            elif product["status"] == "approved":
+                next_label, hint = "检查并发布", "字段已核准，可核对并发布公开版本"
+            elif product["status"] == "published":
+                next_label, hint = "查看与管理", f"已发布 v{published['version']}；修改字段后会回到待核对" if published else "已发布"
+            elif product["status"] == "withdrawn":
+                next_label, hint = "查看与管理", "公开页已撤回；处理字段后可重新发布"
+            else:
+                next_label, hint = "继续完善", "登记来源并逐项核准字段"
             public_link = (
-                f"<a class='button secondary' href='/products/{esc(product['slug'])}' target='_blank'>打开买方页</a>"
-                if product["status"] != "withdrawn" and self.db.get_published_version(self.tenant_id, product["id"])
-                else "<span class='muted'>未公开</span>"
+                f"<a class='button secondary' href='/products/{esc(product['slug'])}' target='_blank'>买方页 ↗</a>"
+                if product["status"] != "withdrawn" and published
+                else ""
             )
-            row_parts.append(
-                f"<tr><td><a href='/admin/products/{product['id']}'>{esc(product['model'])}</a><br><span class='muted'>{esc(product['name'])}</span></td>"
-                f"<td>{status_badge(product['status'])}</td><td>{product['approved_count']} 个字段已核准 / {product['source_count']} 份来源</td>"
-                f"<td>{public_link}</td></tr>"
+            item_parts.append(
+                f"<div class='simple-item'><div><strong>{esc(product['model'])} · {esc(product['name'])} {status_badge(product['status'])}</strong>"
+                f"<small>{esc(hint)} · {product['approved_count']} 个字段已核准 · {product['source_count']} 份来源</small></div>"
+                f"<div class='actions'>{public_link}<a class='button' href='/admin/products/{product['id']}'>{esc(next_label)}</a></div></div>"
             )
-        rows = "".join(row_parts) or "<tr><td colspan='4' class='muted'>还没有产品，请先导入示例或新建型号。</td></tr>"
+        items_html = "".join(item_parts) or "<div class='muted-block'>还没有产品，请先导入示例或新建型号。</div>"
         body = f"""
 <div class='toolbar'><div><h1>{'产品资料与发布' if lang == 'zh' else 'Products & publishing'}</h1><div class='muted'>企业：示例水泵企业（演示） · 当前操作员：管理员</div></div><div><form method='post' action='/admin/products/seed' class='inline'><button class='secondary'>导入两款示例水泵</button></form> <form method='post' action='/admin/products/seed-lowara' class='inline'><button class='secondary'>加载 Lowara 资料</button></form></div></div>
 {notice_html}
-<div class='grid'>
-<section class='card'><h2>新建产品型号</h2><form method='post' action='/admin/products'><label>型号 *</label><input name='model' placeholder='例如 CB-80A' required><label>产品名称</label><input name='name' placeholder='买方页面显示名称'><label>主要用途</label><textarea name='use_case' placeholder='例如清水循环、化工介质输送'></textarea><p><button>创建草稿</button></p></form></section>
-<section class='card'><h2>当前切片</h2><p>产品资料登记 → 来源文件 → 字段候选值 → 人工核准 → 版本发布 → 固定买方页面。</p><p class='muted'>未核准字段不会进入公开页；重新编辑已发布字段会回到待核准状态。Lowara 数据仅用于内部 Demo，外部再发布授权待确认。</p></section>
-</div>
-<section class='card' style='margin-top:18px'><h2>产品列表</h2><table><thead><tr><th>型号</th><th>状态</th><th>资料完整度</th><th>买方页面</th></tr></thead><tbody>{rows}</tbody></table></section>
+<section class='card'><div class='panel-title'><h2>产品列表</h2><span class='muted'>选择产品后完成核对与发布</span></div><div class='simple-list'>{items_html}</div>
+<details class='detail-toggle'><summary>新建产品型号</summary><div><form method='post' action='/admin/products'><label>型号 *</label><input name='model' placeholder='例如 CB-80A' required><label>产品名称</label><input name='name' placeholder='买方页面显示名称'><label>主要用途</label><textarea name='use_case' placeholder='例如清水循环、化工介质输送'></textarea><p><button>创建草稿</button></p></form></div></details>
+<details class='detail-toggle'><summary>查看流程说明</summary><div class='muted-block'>产品资料登记 → 来源文件 → 字段候选值 → 人工核准 → 版本发布 → 固定买方页面。未核准字段不会进入公开页；重新编辑已发布字段会回到待核准状态。Lowara 数据仅用于内部 Demo，外部再发布授权待确认。</div></details></section>
 """
         self.send_html(self.console_page("产品资料与发布", body, "products", lang=lang), 200)
 
@@ -3748,14 +3791,48 @@ class Handler(BaseHTTPRequestHandler):
             f"当前已发布版本 v{esc(published_version['version'])} · 公开文件 {len(published_source_ids)} 份（文件清单随版本冻结）"
             if published_version else "尚未发布；完成核对后可发布有限信息页"
         )
+        pending_count = len(pending_fields)
+        if not sources:
+            focus_label, focus_title, focus_text = "当前任务 · 登记来源", "先登记这个型号的来源资料", "上传参数表等文件后，系统按内容抽取候选字段；不支持的格式会明确失败并保留手工录入。"
+            focus_actions = "<a class='button' href='#sources'>去登记来源 →</a>"
+        elif pending_count:
+            focus_label, focus_title, focus_text = "当前任务 · 字段核对", f"核对 {pending_count} 项候选字段", "逐项核准或驳回；未核准内容不会进入公开页、匹配或问答。"
+            focus_actions = "<a class='button' href='#fields'>去逐项核对 →</a>"
+        elif product["status"] == "pending_review":
+            focus_label, focus_title, focus_text = "当前任务 · 完成核对", "候选字段已全部处理", "完成字段核对后即可发布公开版本。"
+            focus_actions = f"<form method='post' action='/admin/products/{product_id}/finalize-review' class='inline'><button>完成字段核对</button></form>"
+        elif product["status"] == "approved":
+            focus_label, focus_title, focus_text = "当前任务 · 发布", "内容已就绪，可发布公开新版本", "发布将冻结当前已核准事实与已开放文件清单；旧询价保留原版本快照。"
+            focus_actions = f"<form method='post' action='/admin/products/{product_id}/publish' class='inline'><button>发布新版本</button></form>"
+        elif product["status"] == "published" and published_version:
+            focus_label, focus_title, focus_text = "当前状态 · 已发布", f"公开版本 v{published_version['version']} 正在运行", "修改字段后会回到待核对；重新发布生成新版本。"
+            focus_actions = f"<a class='button secondary' href='/products/{esc(product['slug'])}' target='_blank'>查看买方页 ↗</a>"
+        else:
+            focus_label, focus_title, focus_text = "当前状态", "继续完善资料", "登记来源并逐项核准后才能发布。"
+            focus_actions = "<a class='button' href='#sources'>去登记来源 →</a>"
+        focus_html = f"<div class='focus'><div><span class='focus-label'>{esc(focus_label)}</span><strong>{esc(focus_title)}</strong><p>{esc(focus_text)}</p></div><div class='actions'>{focus_actions}</div></div>"
+        summary_strip = (
+            "<div class='summary-strip'>"
+            f"<span>状态：{status_badge(product['status'])}</span>"
+            f"<span>已核准字段：{sum(1 for field in fields if field['state'] == 'approved')} 项</span>"
+            f"<span>来源文件：{len(sources)} 份</span>"
+            f"<span>公开版本：{'v' + str(published_version['version']) if published_version else '未发布'}</span>"
+            "</div>"
+        )
+        view_page_link = (
+            f"<a class='button secondary' href='/products/{esc(product['slug'])}' target='_blank'>查看买方页 ↗</a>"
+            if published_version and product["status"] != "withdrawn" else ""
+        )
         body = f"""
-<div class='toolbar'><div><a href='/admin/products'>← 返回产品列表</a><h1>{esc(product['model'])}</h1><div class='muted'>{esc(product['name'])} · {status_badge(product['status'])}</div></div><div>{action_buttons}</div></div>
+<div class='toolbar'><div><a href='/admin/products'>← 返回产品列表</a><h1>{esc(product['model'])}</h1><div class='muted'>{esc(product['name'])} · {status_badge(product['status'])}</div></div><div>{view_page_link}</div></div>
 {notice_banner}
+{focus_html}
+{summary_strip}
 {missing_html}
-{pending_html}
-<div class='grid'><section class='card'><h2>产品基本信息</h2><p><b>主要用途：</b>{esc(product['use_case']) or '未填写'}</p><p><b>固定买方链接：</b>{('/products/' + esc(product['slug'])) if published_version else '发布后生成'}</p><p class='muted'>{version_line}</p><p class='muted'>型号是产品通用事实；买方本次工况将在后续会话中单独保存，不写回这里。</p><p class='muted'>核准动作按字段逐项执行；未被逐项核准或已被驳回的内容不会进入匹配、问答和公开页。</p></section>
-<section class='card'><h2>登记来源资料</h2>{source_rows}<p class='muted'>文件默认不对外下载。上传后的文本/CSV 会按内容识别已知字段标签；PDF、图片、CAD 等不支持的格式会明确失败，请人工录入。开放公开下载前必须确认文件归属。</p><hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>MARKDOWN</option><option>TXT</option><option>IMAGE</option><option>DXF</option><option>STEP</option><option>OTHER</option></select></div><div><label>文件归属 *</label><select name='scope' required><option value=''>请选择文件归属</option><option value='exact_model'>本型号专属文件</option><option value='series'>系列级资料（非本型号专属）</option><option value='unknown'>归属待核对（不上公开页）</option></select></div><div class='full'><label>原文位置 *</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section></div>
-<section class='card' style='margin-top:18px'><h2>字段核对（逐项）</h2><p class='muted'>候选字段需逐项核准或驳回；驳回保留原值并记录原因。已核准关键字段被修改后会回到待核对，需重新核准并发布新版本；缺项不会被推测值填充。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th><th>操作</th></tr></thead><tbody>{field_table}</tbody></table><hr><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置 *</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></section>
+<section class='card' id='fields'><div class='panel-title'><h2>字段核对（逐项）</h2><span class='muted'>待处理 {pending_count} 项</span></div>{pending_html}<p class='muted'>候选字段需逐项核准或驳回；驳回保留原值并记录原因。已核准关键字段被修改后会回到待核对，需重新核准并发布新版本；缺项不会被推测值填充。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th><th>操作</th></tr></thead><tbody>{field_table}</tbody></table><details class='detail-toggle'><summary>手动补充 / 修改字段值</summary><div><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置 *</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></div></details></section>
+<section class='card' style='margin-top:18px'><div class='panel-title'><h2>发布与版本</h2><span class='muted'>{version_line}</span></div><div class='actions' style='display:flex;gap:8px;flex-wrap:wrap'>{action_buttons}</div><p class='muted'>发布将冻结当前已核准事实与已开放公开文件清单；撤回后买方页不可访问，已提交的询价保留原版本快照。</p></section>
+<section class='card' style='margin-top:18px' id='sources'><h2>登记来源资料</h2>{source_rows}<p class='muted'>文件默认不对外下载。上传后的文本/CSV 会按内容识别已知字段标签；PDF、图片、CAD 等不支持的格式会明确失败，请人工录入。开放公开下载前必须确认文件归属。</p><hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>MARKDOWN</option><option>TXT</option><option>IMAGE</option><option>DXF</option><option>STEP</option><option>OTHER</option></select></div><div><label>文件归属 *</label><select name='scope' required><option value=''>请选择文件归属</option><option value='exact_model'>本型号专属文件</option><option value='series'>系列级资料（非本型号专属）</option><option value='unknown'>归属待核对（不上公开页）</option></select></div><div class='full'><label>原文位置 *</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section>
+<details class='detail-toggle' style='margin-top:18px'><summary>查看产品基本信息</summary><div class='muted-block'><p><b>主要用途：</b>{esc(product['use_case']) or '未填写'}</p><p><b>固定买方链接：</b>{('/products/' + esc(product['slug'])) if published_version else '发布后生成'}</p><p>型号是产品通用事实；买方本次工况将在后续会话中单独保存，不写回这里。</p><p>核准动作按字段逐项执行；未被逐项核准或已被驳回的内容不会进入匹配、问答和公开页。</p></div></details>
 """
         self.send_html(self.console_page(f"{product['model']} · 字段核对", body, "products"), 200)
 
@@ -3921,6 +3998,34 @@ class Handler(BaseHTTPRequestHandler):
                 ("进行中线索", summary["leads_active"], f"逾期跟进 {summary['leads_overdue']}"),
             )
         )
+        role = self.user_role
+        todos: list[tuple[str, str, str, str]] = []
+        if role == "admin" and summary["products_needs_review"]:
+            todos.append(("产品资料核对", f"{summary['products_needs_review']} 个产品有候选字段待逐项处理；未核准内容不会进入公开页与推荐", "/admin/products", "去核对"))
+        if role in {"admin", "engineer"} and summary["tasks_pending"]:
+            todos.append(("待答技术问题", f"{summary['tasks_pending']} 条买家问题在等待人工答复；答复会回到买家的原会话", "/admin/tasks?status=pending", "去处理"))
+        if role in {"admin", "sales"} and summary["rfqs_needs_info"]:
+            todos.append(("待补充询价", f"{summary['rfqs_needs_info']} 份 RFQ 缺少数量/目的地/交期等商务信息", "/admin/rfqs", "去查看"))
+        if role in {"admin", "sales"} and summary["leads_overdue"]:
+            todos.append(("逾期跟进线索", f"{summary['leads_overdue']} 条线索的跟进日期已过，建议尽快处理", "/admin/sales", "去跟进"))
+        if todos:
+            head_title, head_meta, head_href, head_action = todos[0]
+            focus_html = (
+                f"<div class='focus'><div><span class='focus-label'>当前待办 · {esc(head_title)}</span><strong>{esc(head_meta)}</strong>"
+                f"<p>处理完这一项后，可继续查看下方其余待办或左侧导航。</p></div>"
+                f"<div class='actions'><a class='button' href='{head_href}'>{esc(head_action)} →</a></div></div>"
+            )
+        else:
+            focus_html = (
+                "<div class='focus'><div><span class='focus-label'>当前状态</span><strong>没有需要立即处理的事项</strong>"
+                "<p>可打开左侧导航或下方常用入口继续查看；自助会话不会仅因产生对话就进入销售队列。</p></div>"
+                "<div class='actions'><a class='button secondary' href='/admin/sales'>查看销售工作台</a></div></div>"
+            )
+        todo_html = "".join(
+            f"<div class='simple-item'><div><strong>{esc(title)}</strong><small>{esc(meta)}</small></div>"
+            f"<div class='actions'><a class='button secondary' href='{href}'>{esc(action)}</a></div></div>"
+            for title, meta, href, action in todos
+        ) or "<div class='muted-block'>当前岗位没有待办。待办只显示需要采取行动的事项，一般记录请从左侧导航进入对应模块。</div>"
         quick_links = [
             ("/admin/sales", "打开销售工作台", "查看待跟进线索、负责人和完整上下文"),
             ("/admin/rfqs", "查看 RFQ", "检查买方提交的询价和待补充字段"),
@@ -3931,24 +4036,18 @@ class Handler(BaseHTTPRequestHandler):
             quick_links.append(("/admin/products", "维护产品资料", "核准字段、发布版本或撤回公开页"))
             quick_links.append(("/admin/users", "管理成员账号", "创建销售/工程师账号并控制后台访问"))
             quick_links.append(("/admin/sites", "网站 API 接入", "登记企业官网来源并获取公开的网站标识"))
-        quick_html = "".join(f"<a class='card action-card' href='{href}'><h2>{title}</h2><p class='muted'>{description}</p></a>" for href, title, description in quick_links)
-        pending_tasks = self.db.list_human_tasks(self.tenant_id, "pending")[:5]
-        task_rows = "".join(
-            f"<tr><td><a href='/admin/tasks/{task['id']}'>{esc(task['question'])}</a></td><td>{esc(task['model'] or '未指定型号')}</td><td>{esc(task['created_at'])}</td></tr>"
-            for task in pending_tasks
-        ) or "<tr><td colspan='3' class='muted'>暂无待处理人工任务。</td></tr>"
-        records = self.db.list_sales_records(self.tenant_id)[:5]
-        stage_labels = {"new": "新线索", "needs_info": "待补充", "technical_review": "技术确认中", "quote_ready": "可进入报价", "paused": "暂缓", "closed": "已关闭"}
-        lead_rows = "".join(
-            f"<tr><td><a href='/admin/sales/{record['id']}'>{esc(record['id'])}</a></td><td>{esc(stage_labels.get(record['stage'], record['stage'] or '未分配'))}</td><td>{esc(record['owner'] or '未分配')}</td><td>{esc(record['next_follow_up'] or '未安排')}</td></tr>"
-            for record in records
-        ) or "<tr><td colspan='4' class='muted'>暂无销售线索。</td></tr>"
+        quick_html = "".join(
+            f"<div class='simple-item'><div><strong>{esc(title)}</strong><small>{esc(description)}</small></div>"
+            f"<div class='actions'><a class='button secondary' href='{href}'>进入</a></div></div>"
+            for href, title, description in quick_links
+        )
         body = f"""
-<div class='toolbar'><div><h1>管理概览</h1><div class='muted'>当前企业：示例水泵企业（演示） · 当前账号：{esc(self.actor)}（{role_label}）</div></div><div><form method='post' action='/admin/demo/seed' class='inline'><button class='secondary'>加载演示数据</button></form> <form method='post' action='/admin/lowara/seed' class='inline'><button class='secondary'>加载 Lowara 资料</button></form> <a class='button secondary' href='/logout'>退出登录</a></div></div>
+<div class='toolbar'><div><h1>管理概览</h1><div class='muted'>当前企业：示例水泵企业（演示） · 当前账号：{esc(self.actor)}（{role_label}）</div></div><div><form method='post' action='/admin/demo/seed' class='inline'><button class='secondary'>加载演示数据</button></form> <form method='post' action='/admin/lowara/seed' class='inline'><button class='secondary'>加载 Lowara 资料</button></form></div></div>
 {demo_notice}
-<section class='metric-grid'>{cards}</section>
-<section class='grid' style='margin-top:18px'>{quick_html}</section>
-<div class='grid' style='margin-top:18px'><section class='card'><h2>待处理人工任务</h2><table><thead><tr><th>问题</th><th>型号</th><th>创建时间</th></tr></thead><tbody>{task_rows}</tbody></table></section><section class='card'><h2>最近销售线索</h2><table><thead><tr><th>记录</th><th>阶段</th><th>负责人</th><th>跟进日期</th></tr></thead><tbody>{lead_rows}</tbody></table></section></div>
+{focus_html}
+<div class='grid'><section class='card'><div class='panel-title'><h2>待处理事项</h2><span class='muted'>只显示当前岗位需要行动的事项</span></div><div class='simple-list'>{todo_html}</div></section>
+<section class='card'><div class='panel-title'><h2>常用入口</h2></div><div class='simple-list'>{quick_html}</div></section></div>
+<section class='card' style='margin-top:18px'><details class='detail-toggle' style='border-top:0;margin-top:0;padding-top:0'><summary>查看运营数字</summary><div><section class='metric-grid'>{cards}</section></div></details></section>
 <div class='footer-note'>概览只读取当前登录账号所属企业的数据；具体修改仍需进入对应模块，并按角色权限执行。</div>
 """
         self.send_html(self.console_page("管理概览", body, "admin"), 200)
