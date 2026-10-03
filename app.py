@@ -2154,15 +2154,20 @@ def classify_products(db: Database, tenant_id: str, values: dict[str, dict[str, 
             else:
                 for requirement_key, product_key, label, unit in (("flow", "flow_range", "流量", "m³/h"), ("head", "head_range", "扬程", "m")):
                     required_number = requirements[requirement_key]
-                    product_range = range_from_text(product_fields.get(product_key, {}).get("value", ""))
+                    product_field = product_fields.get(product_key, {})
+                    product_range = range_from_text(product_field.get("value", ""))
+                    product_value = str(product_field.get("value", "")).strip()
+                    product_unit = str(product_field.get("unit", "")).strip()
+                    # 候选说明带上该型号自己的范围，多候选并列时差异可直接比较。
+                    product_note = f"（产品范围 {product_value}{(' ' + product_unit) if product_unit else ''}）"
                     if required_number is None:
                         unknown.append(f"买方尚未确认{label}")
                     elif product_range is None:
                         unknown.append(f"{label}规则无法解析")
                     elif product_range[0] <= required_number <= product_range[1]:
-                        satisfies.append(f"{label} {required_number:g}{unit} 在产品范围内")
+                        satisfies.append(f"{label} {required_number:g}{unit} 在产品范围内{product_note}")
                     else:
-                        conflicts.append(f"{label} {required_number:g}{unit} 超出产品范围")
+                        conflicts.append(f"{label} {required_number:g}{unit} 超出产品范围{product_note}")
 
             product_media = product_fields.get("media", {}).get("value", "").lower()
             if "清水" in requirement_media or "water" in requirement_media:

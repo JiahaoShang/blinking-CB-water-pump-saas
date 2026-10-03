@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""构建/刷新演示数据库：两款已发布演示产品（含 7 份获准公开文件）+ 演示账号 + 网站标识。
+"""构建/刷新演示数据库：两个可比合成演示型号 + 无依据对照型号 + 演示账号 + 网站标识。
 
 用法:
   python3 tools/demo/seed_demo.py --db data/demo.db          # 首次构建；已构建则跳过
   python3 tools/demo/seed_demo.py --db data/demo.db --reset  # 删除并重建（旧演示文件一并清理）
 
 演示状态由本脚本确定性重建（与 2026-10 走查现场一致）：
-  SLICE-T1  v1=仅字段 → 授权 7 份文件 → v2=字段+图库/图纸/资料（含 1 份系列归属图片）
+  SLICE-T1  立式离心泵（大流量中扬程段）v1=仅字段 → 授权 7 份文件 → v2=字段+图库/图纸/资料（含 1 份系列归属图片）
+  SLICE-T2  多级离心泵（小流量高扬程段，第二个可比候选）v1=字段+1 份获准公开参数表
   SLICE-NOBASIS  仅材质事实（用于展示"无水力依据不进入候选"）
+三个型号均为合成演示数据：型号名、文件名、字段出处与文件内容都显式标注 DEMO，
+只用于本地演示与联调，不得作为任何真实厂商规格或承诺引用。
 产物：数据库写入 --db；文件写入 data/uploads/（沿用平台固定资料目录）。
 """
 from __future__ import annotations
@@ -29,21 +32,34 @@ TENANT_NAME = "示例水泵企业（演示）"
 SITE_KEY = "demo-site-key"
 SITE_ORIGIN = "http://127.0.0.1:8137"
 
-PARAMS_TXT = """SLICE-T1 立式离心泵 · 内部 Demo 资料（非厂商正式承诺）
+PARAMS_TXT = """DEMO 合成演示数据｜SLICE-T1 立式离心泵（非厂商规格 禁止对外引用）
 流量范围: 30-90 m³/h
 扬程范围: 25-60 m
 介质: 清水与低粘度工业循环水
 材质: 铸铁泵体，不锈钢叶轮
 功率: 22 kW
 介质温度: 5-80 °C
-备注：以上为联调演示值，正式对外前必须由企业授权人员核对来源。
+备注：以上为合成演示值，不对应真实在售产品；正式对外前必须由企业授权人员核对来源。
 """
 
-NOBASIS_TXT = """SLICE-NOBASIS 材质说明（联调演示，无水力参数）
+PARAMS_T2_TXT = """DEMO 合成演示数据｜SLICE-T2 多级离心泵（非厂商规格 禁止对外引用）
+流量范围: 18-58 m³/h
+扬程范围: 35-90 m
+介质: 清水及低粘度工业液体
+材质: 不锈钢泵体与叶轮
+功率: 30 kW
+介质温度: -10 至 120 °C
+备注：合成演示数值，人工复核时将流量口径修正为 20-60；文件与数值均不代表任何真实产品。
+"""
+
+NOBASIS_TXT = """DEMO 合成演示数据｜SLICE-NOBASIS 说明用泵（非厂商规格 禁止对外引用）
 材质: 铸铁泵体，不锈钢叶轮
+备注：仅有材质一项合成演示事实，无水力参数，用于验证「无依据不进入候选」。
 """
 
-DXF_BYTES = """0
+DXF_BYTES = """999
+DEMO-SLICE-T1 synthetic demo drawing (not a manufacturer specification)
+0
 SECTION
 2
 HEADER
@@ -85,7 +101,7 @@ EOF
 
 STEP_BYTES = """ISO-10303-21;
 HEADER;
-FILE_NAME('SLICE-T1 外形图（联调演示）');
+FILE_NAME('DEMO SLICE-T1 outline - synthetic demo data, not a manufacturer spec');
 ENDSEC;
 DATA;
 #1=MECHANICAL_CONTEXT('pump','demo');
@@ -132,11 +148,27 @@ def make_pdf(lines: list[str]) -> bytes:
     return bytes(out)
 
 
+def _mark_demo_locations(db: Database, product_id: str) -> None:
+    """把每个候选字段的出处统一加上 DEMO 合成演示标注。
+
+    这样买方页、公开 JSON 与后台显示的每条事实都会写明来源是合成演示资料，
+    不会被误当作真实厂商规格。"""
+    for field in db.get_fields(TENANT, product_id):
+        if field["state"] != "candidate" or not field["source_location"].strip():
+            continue
+        db.save_field(
+            TENANT, product_id, field["field_key"], field["value"], field["unit"],
+            field["source_document_id"], f"DEMO 合成演示资料 · {field['source_location']}",
+            origin=field["origin"] or "extracted",
+        )
+
+
 def _seed_slice_t1(db: Database) -> None:
-    product_id = db.create_product(TENANT, "SLICE-T1", "SLICE-T1 联调离心泵", "联调演示：清水循环")
-    params_id = db.add_source(TENANT, product_id, "SLICE-T1-参数表.txt", "TXT", "演示资料：参数表", content=PARAMS_TXT.encode("utf-8"), scope="exact_model")
+    product_id = db.create_product(TENANT, "SLICE-T1", "SLICE-T1 联调离心泵（DEMO）", "合成演示数据（非厂商规格）：清水循环工况")
+    params_id = db.add_source(TENANT, product_id, "DEMO-SLICE-T1-参数表.txt", "TXT", "DEMO 合成演示资料：参数表", content=PARAMS_TXT.encode("utf-8"), scope="exact_model")
     # 与真实走查一致：人工把扬程口径从提取值修正为 24-58 并标注
     db.save_field(TENANT, product_id, "head_range", "24-58", "m", params_id, "第 3 行（人工修正：口径调整为 24-58）", origin="manual")
+    _mark_demo_locations(db, product_id)
     for key in ("flow_range", "head_range", "media", "material", "power"):
         db.approve_field(TENANT, product_id, key)
     db.reject_field(TENANT, product_id, "temperature", "演示资料不承诺介质温度上限；正式资料需企业确认后再公开")
@@ -145,16 +177,16 @@ def _seed_slice_t1(db: Database) -> None:
     db.allow_public_source(TENANT, product_id, params_id, "demo-admin")
 
     files = [
-        ("SLICE-T1-产品手册.pdf", "PDF", "演示资料：产品手册", "exact_model",
-         make_pdf(["SLICE-T1 Pump Series - Demo Manual", "Flow range: 30-90 m3/h", "Head range: 24-58 m", "Demo document for integration testing only."])),
-        ("SLICE-T1-front.png", "IMAGE", "演示资料：产品正面图", "exact_model",
+        ("DEMO-SLICE-T1-产品手册.pdf", "PDF", "DEMO 合成演示资料：产品手册", "exact_model",
+         make_pdf(["SLICE-T1 Pump Series - DEMO manual", "Synthetic demo data; not a manufacturer specification.", "Flow range: 30-90 m3/h", "Head range: 24-58 m"])),
+        ("DEMO-SLICE-T1-front.png", "IMAGE", "DEMO 合成演示资料：产品正面图", "exact_model",
          make_png(520, 340, (96, 165, 250), (23, 32, 74))),
-        ("SLICE-T1-side.png", "IMAGE", "演示资料：产品侧视图", "exact_model",
+        ("DEMO-SLICE-T1-side.png", "IMAGE", "DEMO 合成演示资料：产品侧视图", "exact_model",
          make_png(520, 340, (94, 234, 212), (16, 58, 64))),
-        ("SLICE-T1-系列样本页.png", "IMAGE", "演示资料：系列样本页（系列归属示例）", "series",
+        ("DEMO-SLICE-T1-系列样本页.png", "IMAGE", "DEMO 合成演示资料：系列样本页（系列归属示例）", "series",
          make_png(680, 460, (167, 139, 250), (40, 24, 84))),
-        ("SLICE-T1-外形图.step", "STEP", "演示资料：三维外形图", "exact_model", STEP_BYTES),
-        ("SLICE-T1-装配图.dxf", "DXF", "演示资料：二维装配图", "exact_model", DXF_BYTES),
+        ("DEMO-SLICE-T1-外形图.step", "STEP", "DEMO 合成演示资料：三维外形图", "exact_model", STEP_BYTES),
+        ("DEMO-SLICE-T1-装配图.dxf", "DXF", "DEMO 合成演示资料：二维装配图", "exact_model", DXF_BYTES),
     ]
     for filename, file_type, location, scope, content in files:
         source_id = db.add_source(TENANT, product_id, filename, file_type, location, content=content, scope=scope)
@@ -162,9 +194,25 @@ def _seed_slice_t1(db: Database) -> None:
     db.publish_product(TENANT, product_id)  # v2：v1 + 7 份获准公开文件
 
 
+def _seed_slice_t2(db: Database) -> None:
+    """第二个可比型号：与 SLICE-T1 运行范围不同，可与其并列成为候选。"""
+    product_id = db.create_product(TENANT, "SLICE-T2", "SLICE-T2 联调多级泵（DEMO）", "合成演示数据（非厂商规格）：高扬程工况")
+    params_id = db.add_source(TENANT, product_id, "DEMO-SLICE-T2-参数表.txt", "TXT", "DEMO 合成演示资料：参数表", content=PARAMS_T2_TXT.encode("utf-8"), scope="exact_model")
+    # 人工复核：把提取到的流量口径修正为 20-60 并标注（合成演示口径）
+    db.save_field(TENANT, product_id, "flow_range", "20-60", "m³/h", params_id, "第 2 行（人工修正：合成演示口径调整为 20-60）", origin="manual")
+    _mark_demo_locations(db, product_id)
+    for key in ("flow_range", "head_range", "media", "material", "power"):
+        db.approve_field(TENANT, product_id, key)
+    db.reject_field(TENANT, product_id, "temperature", "合成演示数据不承诺温度范围；正式资料需企业确认后再公开")
+    db.finalize_product_review(TENANT, product_id)
+    db.allow_public_source(TENANT, product_id, params_id, "demo-admin")
+    db.publish_product(TENANT, product_id)  # v1：字段 + 1 份获准公开参数表
+
+
 def _seed_nobasis(db: Database) -> None:
-    product_id = db.create_product(TENANT, "SLICE-NOBASIS", "SLICE-NOBASIS 说明用泵", "联调：无水力依据（验证无依据不进入候选）")
-    db.add_source(TENANT, product_id, "SLICE-NOBASIS-材质说明.txt", "TXT", "演示资料：材质说明", content=NOBASIS_TXT.encode("utf-8"), scope="exact_model")
+    product_id = db.create_product(TENANT, "SLICE-NOBASIS", "SLICE-NOBASIS 说明用泵（DEMO）", "合成演示数据：验证无水力依据不进入候选")
+    db.add_source(TENANT, product_id, "DEMO-SLICE-NOBASIS-材质说明.txt", "TXT", "DEMO 合成演示资料：材质说明", content=NOBASIS_TXT.encode("utf-8"), scope="exact_model")
+    _mark_demo_locations(db, product_id)
     db.approve_field(TENANT, product_id, "material")
     db.finalize_product_review(TENANT, product_id)
     db.publish_product(TENANT, product_id)
@@ -203,6 +251,7 @@ def seed(db_path: Path, reset: bool = False) -> dict[str, object]:
     except sqlite3.IntegrityError:
         pass
     _seed_slice_t1(db)
+    _seed_slice_t2(db)
     _seed_nobasis(db)
     files = [row["storage_path"] for row in db.conn.execute("SELECT storage_path FROM source_documents WHERE tenant_id=? AND storage_path IS NOT NULL", (TENANT,))]
     db.conn.close()

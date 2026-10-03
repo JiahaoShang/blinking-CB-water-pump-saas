@@ -50,6 +50,7 @@ def main() -> None:
     print("  演示账号: demo-admin@example.invalid / demo-admin（管理员）")
     print("            demo-sales@example.invalid / demo-sales（销售）")
     print("            demo-engineer@example.invalid / demo-engineer（工程师）")
+    print("  演示型号: SLICE-T1 / SLICE-T2（可比合成演示数据，来源标注 DEMO）· SLICE-NOBASIS（无依据对照）")
     print("  演示剧本: docs/演示剧本.md")
     print("=" * 66)
     if args.check:
