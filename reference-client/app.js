@@ -62,6 +62,7 @@ function render() {
   for (const message of current.messages || []) {
     const bubble = node('div', `bubble ${message.role === 'buyer' ? 'buyer' : 'assistant'}`, message.content);
     if (message.source === 'human-engineer') bubble.prepend(node('small', '', locale === 'en' ? 'Engineer reply' : '工程师回复'));
+    if (message.source?.startsWith('engineer-followup:')) bubble.prepend(node('small', '', locale === 'en' ? 'Engineer question' : '工程师追问'));
     log.append(bubble);
   }
   renderRequirements(current.requirement);
@@ -133,7 +134,21 @@ function renderAnswers(answers, tasks) {
       continue;
     }
     const task = tasks.find((item) => item.question_message_id === answer.question_message_id);
-    if (task) card.append(node('span', 'pill', task.status));
+    if (task) {
+      card.append(node('span', 'pill', task.status));
+      if (task.status === 'waiting_buyer') {
+        card.append(node('p', '', task.followup_question || 'The engineer needs one more detail.'));
+        const form = node('form');
+        const reply = node('textarea'); reply.required = true; reply.rows = 2; reply.placeholder = locale === 'en' ? 'Your additional details' : '补充工况'; form.append(reply);
+        const submit = node('button', '', locale === 'en' ? 'Reply to engineer' : '回复工程师'); submit.type = 'submit'; form.append(submit);
+        form.addEventListener('submit', async (event) => {
+          event.preventDefault();
+          try { await api(`/conversations/${conversationId}/human-tasks/${task.id}/responses`, 'POST', { text: reply.value.trim() }); await refresh(); }
+          catch (error) { showNotice(error.message); }
+        });
+        card.append(form);
+      }
+    }
     else card.append(action(t('requestEngineer'), async () => {
       try { await api(`/conversations/${conversationId}/human-requests`, 'POST', { answer_id: answer.id, reply_path: 'conversation' }); await refresh(); }
       catch (error) { showNotice(error.message); }

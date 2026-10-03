@@ -251,6 +251,20 @@ class GroundedAnswerTests(unittest.TestCase):
             self.db.resolve_human_task("demo-tenant", task_id, "duplicate")
         self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 2)
 
+    def test_engineer_followup_waits_for_buyer_on_same_task(self):
+        conversation_id = self.db.create_conversation("demo-tenant")
+        question_id = self.db.save_message("demo-tenant", conversation_id, "buyer", "Is this item in stock?")
+        task_id = self.db.create_human_task("demo-tenant", conversation_id, question_id, "Is this item in stock?", "库存需要核实", {})
+        self.db.ask_task_followup("demo-tenant", task_id, "What quantity do you need?")
+        self.assertEqual(self.db.get_human_task("demo-tenant", task_id)["status"], "waiting_buyer")
+        self.assertEqual(self.db.list_task_followups("demo-tenant", task_id)[0]["source"], f"engineer-followup:{task_id}")
+        self.db.answer_task_followup("demo-tenant", conversation_id, task_id, "10 units")
+        self.assertEqual(self.db.get_human_task("demo-tenant", task_id)["status"], "pending")
+        self.assertEqual(len(self.db.list_task_followups("demo-tenant", task_id)), 2)
+        self.db.resolve_human_task("demo-tenant", task_id, "We will check availability for 10 units.")
+        self.assertEqual(self.db.get_human_task("demo-tenant", task_id)["status"], "resolved")
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 4)
+
 
 class RfqTests(unittest.TestCase):
     def setUp(self):

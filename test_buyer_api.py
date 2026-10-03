@@ -213,6 +213,25 @@ class BuyerApiTests(unittest.TestCase):
         self.assertEqual(current["messages"][-1]["source"], "human-engineer")
         self.assertIn("requested quantity", current["messages"][-1]["content"])
 
+    def test_engineer_followup_and_buyer_reply_keep_original_task(self):
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        _, _, unresolved = self.request("POST", path + "/questions", {"question": "Can this handle my application?"}, headers)
+        _, _, requested = self.request("POST", path + "/human-requests", {"answer_id": unresolved["answer_id"], "reply_path": "conversation"}, headers)
+        task_id = requested["task_id"]
+        _, login_headers, _ = self.form_request("POST", "/login", {"email": "demo-engineer@example.invalid", "password": "demo-engineer"})
+        cookie = login_headers["Set-Cookie"].split(";", 1)[0]
+        self.assertEqual(self.form_request("POST", f"/admin/tasks/{task_id}/followup", {"question": "What is the medium temperature?"}, cookie)[0], 303)
+        _, _, current = self.request("GET", path, headers=headers)
+        self.assertEqual(current["human_tasks"][0]["status"], "waiting_buyer")
+        self.assertEqual(current["human_tasks"][0]["followup_question"], "What is the medium temperature?")
+        self.assertEqual(self.request("POST", path + f"/human-tasks/{task_id}/responses", {"text": "40 °C"}, headers)[0], 201)
+        _, _, current = self.request("GET", path, headers=headers)
+        self.assertEqual(current["human_tasks"][0]["status"], "pending")
+        self.assertEqual(current["messages"][-1]["source"], f"buyer-followup:{task_id}")
+        self.assertEqual(len(self.db.list_human_tasks("demo-tenant")), 1)
+
     def test_rfq_from_api_requires_confirmed_contact_and_rejects_changed_retry(self):
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"

@@ -804,6 +804,43 @@ class Database:
             (tenant_id, task_id),
         ).fetchone()
 
+    def list_task_followups(self, tenant_id: str, task_id: str) -> list[sqlite3.Row]:
+        task = self.get_human_task(tenant_id, task_id)
+        if not task:
+            return []
+        return self.conn.execute(
+            "SELECT * FROM messages WHERE tenant_id=? AND conversation_id=? AND source IN (?, ?) ORDER BY rowid",
+            (tenant_id, task["conversation_id"], f"engineer-followup:{task_id}", f"buyer-followup:{task_id}"),
+        ).fetchall()
+
+    def ask_task_followup(self, tenant_id: str, task_id: str, question: str, actor: str = "demo-engineer") -> None:
+        task = self.get_human_task(tenant_id, task_id)
+        if not task or task["status"] != "pending" or not question.strip():
+            raise ValueError("任务需处于待处理状态，且追问不能为空")
+        with self.conn:
+            updated = self.conn.execute(
+                "UPDATE human_tasks SET status='waiting_buyer', assigned_to=?, updated_at=? WHERE tenant_id=? AND id=? AND status='pending'",
+                (actor, now_iso(), tenant_id, task_id),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("任务状态已变化")
+            self.save_message(tenant_id, task["conversation_id"], "engineer", question, f"engineer-followup:{task_id}", commit=False)
+            self._audit(tenant_id, "human_task", task_id, "asked_buyer", actor)
+
+    def answer_task_followup(self, tenant_id: str, conversation_id: str, task_id: str, answer: str) -> None:
+        task = self.get_human_task(tenant_id, task_id)
+        if not task or task["conversation_id"] != conversation_id or task["status"] != "waiting_buyer" or not answer.strip():
+            raise ValueError("没有待补充的工程师追问")
+        with self.conn:
+            updated = self.conn.execute(
+                "UPDATE human_tasks SET status='pending', updated_at=? WHERE tenant_id=? AND id=? AND conversation_id=? AND status='waiting_buyer'",
+                (now_iso(), tenant_id, task_id, conversation_id),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("任务状态已变化")
+            self.save_message(tenant_id, conversation_id, "buyer", answer, f"buyer-followup:{task_id}", commit=False)
+            self._audit(tenant_id, "human_task", task_id, "buyer_replied", "buyer")
+
     def resolve_human_task(self, tenant_id: str, task_id: str, response: str, actor: str = "demo-engineer") -> None:
         task = self.get_human_task(tenant_id, task_id)
         if not task:
@@ -1877,7 +1914,8 @@ class Handler(BaseHTTPRequestHandler):
                 for row in self.db.list_answers(site["tenant_id"], conversation["id"])
             ]
             human_tasks = [
-                {"id": row["id"], "question_message_id": row["question_message_id"], "status": row["status"], "question": row["question"]}
+                {"id": row["id"], "question_message_id": row["question_message_id"], "status": row["status"], "question": row["question"],
+                 "followup_question": next((message["content"] for message in reversed(self.db.list_task_followups(site["tenant_id"], row["id"])) if message["source"] == f"engineer-followup:{row['id']}"), None)}
                 for row in self.db.list_human_tasks(site["tenant_id"]) if row["conversation_id"] == conversation["id"]
             ]
             rfqs = [
@@ -2149,6 +2187,26 @@ class Handler(BaseHTTPRequestHandler):
                 site["allowed_origin"] if self.headers.get("Origin") else None,
             )
             return
+        api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/human-tasks/([a-f0-9]+)/responses", path)
+        if api_match:
+            access = self.api_conversation(api_match.group(1))
+            if not access:
+                return
+            payload = self.read_json()
+            if payload is None:
+                return
+            answer_text = payload.get("text")
+            if not isinstance(answer_text, str) or not answer_text.strip():
+                self.send_json({"error": "text_required"}, 422)
+                return
+            site, conversation = access
+            try:
+                self.db.answer_task_followup(site["tenant_id"], conversation["id"], api_match.group(2), answer_text)
+            except ValueError:
+                self.send_json({"error": "followup_not_pending"}, 409)
+                return
+            self.send_json({"task_id": api_match.group(2), "status": "pending"}, 201, site["allowed_origin"] if self.headers.get("Origin") else None)
+            return
         api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/rfqs", path)
         if api_match:
             access = self.api_conversation(api_match.group(1))
@@ -2365,6 +2423,11 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 self.db.resolve_human_task(self.tenant_id, match.group(1), str(form.get("response", "")), self.actor)
                 self.redirect(f"/admin/tasks/{match.group(1)}?notice=resolved")
+                return
+            match = re.fullmatch(r"/admin/tasks/([a-f0-9]+)/followup", path)
+            if match:
+                self.db.ask_task_followup(self.tenant_id, match.group(1), str(form.get("question", "")), self.actor)
+                self.redirect(f"/admin/tasks/{match.group(1)}?notice=followup")
                 return
             match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/update", path)
             if match:
@@ -2701,13 +2764,20 @@ class Handler(BaseHTTPRequestHandler):
         context = json.loads(task["context_json"])
         requirements = context.get("confirmed_requirements", {})
         requirement_rows = "".join(f"<tr><td>{esc(item.get('label', key))}</td><td>{esc(item.get('value', ''))} {esc(item.get('unit', ''))}</td><td>{esc(item.get('state', ''))}</td></tr>" for key, item in requirements.items()) or "<tr><td colspan='3' class='muted'>暂无已确认工况</td></tr>"
-        notice = "<div class='notice'>人工任务已回复，买方会话中已保存工程师回复。</div>" if query.get("notice", [""])[0] == "resolved" else ""
-        response_area = f"<p><b>当前回复：</b>{esc(task['response'])}</p>" if task["response"] else f"<form method='post' action='/admin/tasks/{task_id}/reply'><label>工程师回复 *</label><textarea name='response' required placeholder='只回答本次询盘，并说明依据或仍需确认的边界。'></textarea><p><button>提交回复并关闭任务</button></p></form>"
+        notice_kind = query.get("notice", [""])[0]
+        notice = "<div class='notice'>人工任务已回复，买方会话中已保存工程师回复。</div>" if notice_kind == "resolved" and task["status"] == "resolved" else "<div class='notice'>追问已保存到买方原会话，等待买方补充。</div>" if notice_kind == "followup" and task["status"] == "waiting_buyer" else ""
+        followup_rows = "".join(f"<div class='source'><span><b>{'工程师追问' if message['role'] == 'engineer' else '买方补充'}</b><br>{esc(message['content'])}</span></div>" for message in self.db.list_task_followups(self.tenant_id, task_id))
+        if task["response"]:
+            response_area = f"<p><b>当前回复：</b>{esc(task['response'])}</p>"
+        elif task["status"] == "waiting_buyer":
+            response_area = "<p class='muted'>等待买方在原会话补充；收到后可继续答复或再次追问。</p>"
+        else:
+            response_area = f"<form method='post' action='/admin/tasks/{task_id}/followup'><label>向买方追问工况</label><textarea name='question' required placeholder='仅询问处理此任务所需的条件'></textarea><p><button class='secondary'>发送追问并等待买方</button></p></form><hr><form method='post' action='/admin/tasks/{task_id}/reply'><label>工程师最终答复 *</label><textarea name='response' required placeholder='只回答本次询盘，并说明依据或仍需确认的边界。'></textarea><p><button>提交回复并关闭任务</button></p></form>"
         body = f"""
 <div class='toolbar'><div><a href='/admin/tasks'>← 返回人工任务</a><h1>人工接管任务</h1><div class='muted'>状态：{esc(task['status'])} · 会话：{esc(task['conversation_id'])}</div></div></div>
 {notice}
 <div class='grid'><section class='card'><h2>问题上下文</h2><p><b>原问题：</b>{esc(task['question'])}</p><p><b>型号：</b>{esc(task['model'] or '未指定')}</p><p><b>转人工原因：</b>{esc(task['reason'])}</p><p><b>已有回答：</b>{esc(context.get('answer_so_far', ''))}</p></section><section class='card'><h2>已确认工况</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section></div>
-<section class='card' style='margin-top:18px'><h2>工程师处理</h2>{response_area}<p class='muted'>该回复只属于当前会话；如果要成为通用资料，必须回到产品资料核准流程。</p></section>
+<section class='card' style='margin-top:18px'><h2>工程师处理</h2>{followup_rows}{response_area}<p class='muted'>该回复只属于当前会话；如果要成为通用资料，必须回到产品资料核准流程。</p></section>
 """
         self.send_html(layout("人工接管任务", body), 200)
 
