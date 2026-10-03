@@ -196,6 +196,8 @@ def seed(db_path: Path, reset: bool = False) -> dict[str, object]:
         db_path.unlink()
     db = Database(db_path)
     db.ensure_tenant(TENANT, TENANT_NAME)
+    # 演示账号只在本命令（显式演示环境）里创建；普通数据库初始化不预置任何账号。
+    db.seed_demo_users()
     try:
         db.register_buyer_site(TENANT, SITE_KEY, SITE_ORIGIN)
     except sqlite3.IntegrityError:

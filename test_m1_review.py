@@ -34,6 +34,8 @@ class ExtractionReviewTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp_dir.name) / "app.db")
+        # 测试夹具企业需显式创建（普通新库不再预置）。
+        self.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
 
     def tearDown(self):
         self.db.conn.close()
@@ -197,6 +199,8 @@ class PublishedPageFilesTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp_dir.name) / "app.db")
+        # 测试夹具企业需显式创建（普通新库不再预置）。
+        self.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
 
     def tearDown(self):
         self.db.conn.close()

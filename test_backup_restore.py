@@ -15,6 +15,7 @@ class BackupRestoreTests(unittest.TestCase):
             uploads = root / "uploads"
             uploads.mkdir()
             db = Database(root / "app.db")
+            db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
             product_id = db.create_product("demo-tenant", "P-1", "Test pump", "Clean water")
             source_id = db.add_source("demo-tenant", product_id, "manual.pdf", "PDF", "Page 1")
             contents = b"approved demo source"

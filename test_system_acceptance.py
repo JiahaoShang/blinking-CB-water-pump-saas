@@ -69,6 +69,8 @@ class SystemAcceptanceTests(unittest.TestCase):
     def start(self):
         server = make_server(self.db_path, port=0)
         db = server.RequestHandlerClass.db
+        # 演示企业与演示账号属于测试夹具：显式种入（普通新库不再预置）。
+        db.seed_demo_users()
         db.ensure_tenant("second-tenant")
         if not db.get_buyer_site("site-a"):
             db.register_buyer_site("demo-tenant", "site-a", "https://seller-a.example")

@@ -62,7 +62,24 @@ class DemoToolingTests(unittest.TestCase):
         self.assertEqual(fields["temperature"], "rejected")
         site = conn.execute("SELECT site_key, allowed_origin FROM buyer_sites").fetchone()
         self.assertEqual((site["site_key"], site["allowed_origin"]), ("demo-site-key", "http://127.0.0.1:8137"))
+        # 演示账号只由演示命令创建，且保持文档化的账号/角色（密码即账号名）
+        users = {row["email"]: row["role"] for row in conn.execute("SELECT email, role FROM users")}
+        self.assertEqual(users, {
+            "demo-admin@example.invalid": "admin",
+            "demo-sales@example.invalid": "sales",
+            "demo-engineer@example.invalid": "engineer",
+        })
         conn.close()
+        # 文档化口令可通过登录校验（保留内部演示登录）
+        from app import Database as AppDatabase
+        check_db = AppDatabase(self.db_path)
+        for email, password in (
+            ("demo-admin@example.invalid", "demo-admin"),
+            ("demo-sales@example.invalid", "demo-sales"),
+            ("demo-engineer@example.invalid", "demo-engineer"),
+        ):
+            self.assertIsNotNone(check_db.authenticate_user(email, password), email)
+        check_db.conn.close()
 
         # 幂等：再次构建直接跳过
         again = seed(self.db_path)

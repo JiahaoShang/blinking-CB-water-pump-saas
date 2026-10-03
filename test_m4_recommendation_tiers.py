@@ -39,6 +39,8 @@ class RecommendationTierTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp_dir.name) / "app.db")
+        # 测试夹具企业需显式创建（普通新库不再预置）。
+        self.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
         publish_product(self.db, "RNG-A", {
             "flow_range": ("30-90", "m³/h"),
             "head_range": ("24-58", "m"),

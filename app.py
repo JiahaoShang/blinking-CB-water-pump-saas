@@ -567,11 +567,10 @@ class Database:
                 "INSERT INTO rfq_revisions(id, tenant_id, rfq_id, revision, content_json, actor, created_at) VALUES (?, ?, ?, 1, ?, 'legacy-import', ?)",
                 (secrets.token_hex(12), rfq["tenant_id"], rfq["id"], json.dumps(self.rfq_current_content(rfq), ensure_ascii=False), rfq["created_at"]),
             )
-        self.conn.execute(
-            "INSERT OR IGNORE INTO tenants(id, name, created_at) VALUES (?, ?, ?)",
-            ("demo-tenant", "示例水泵企业（演示）", now_iso()),
-        )
-        self.seed_demo_users()
+        # Ordinary initialization must not create any tenant, let alone predictable
+        # users. Demo state comes only from the explicit demo command
+        # (tools/demo/seed_demo.py -> seed_demo_users); a production database
+        # provisions its first administrator via tools/create_admin.py.
         self.conn.commit()
 
     def _audit(self, tenant_id: str, entity_type: str, entity_id: str, action: str, actor: str, details: str = "") -> None:
@@ -633,6 +632,15 @@ class Database:
             return False
 
     def seed_demo_users(self) -> None:
+        """Explicit demo-only bootstrap: the demo tenant plus three documented logins.
+
+        Never called from ``init_schema`` — an ordinary new database must not contain
+        predictable accounts. The only production-like callers are the demo command
+        (``tools/demo/seed_demo.py``, used by ``start_demo.py``) and explicit test
+        setup; a real deployment provisions its first administrator through
+        ``tools/create_admin.py`` instead.
+        """
+        self.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
         users = [
             ("demo-admin@example.invalid", "演示管理员", "admin", "demo-admin"),
             ("demo-sales@example.invalid", "演示销售", "sales", "demo-sales"),
@@ -643,6 +651,7 @@ class Database:
                 "INSERT OR IGNORE INTO users(id, tenant_id, email, display_name, role, password_hash, active, created_at) VALUES (?, 'demo-tenant', ?, ?, ?, ?, 1, ?)",
                 (secrets.token_hex(12), email, display_name, role, self.password_hash(password), now_iso()),
             )
+        self.conn.commit()
 
     def authenticate_user(self, email: str, password: str) -> sqlite3.Row | None:
         user = self.conn.execute("SELECT * FROM users WHERE lower(email)=lower(?) AND active=1", (email.strip(),)).fetchone()
@@ -2641,7 +2650,7 @@ class Handler(BaseHTTPRequestHandler):
         next_path = query.get("next", ["/admin/sales"])[0]
         error_html = f"<div class='error'>{esc(error)}</div>" if error else ""
         body = f"""
-<div style='max-width:520px;margin:70px auto'><section class='card'><h1>企业后台登录</h1><p class='muted'>登录后只能访问当前账号所属企业的数据。买方公开页面不需要后台账号。</p>{error_html}<form method='post' action='/login'><input type='hidden' name='next' value='{esc(next_path)}'><label>邮箱</label><input name='email' type='email' autocomplete='username' required placeholder='demo-sales@example.invalid'><label>密码</label><input name='password' type='password' autocomplete='current-password' required><p><button>登录</button></p></form><div class='footer-note'>本地演示账号：管理员 `demo-admin`、销售 `demo-sales`、工程师 `demo-engineer`，密码与账号相同。仅用于本地演示，不能用于生产。</div></section></div>
+<div style='max-width:520px;margin:70px auto'><section class='card'><h1>企业后台登录</h1><p class='muted'>登录后只能访问当前账号所属企业的数据。买方公开页面不需要后台账号。</p>{error_html}<form method='post' action='/login'><input type='hidden' name='next' value='{esc(next_path)}'><label>邮箱</label><input name='email' type='email' autocomplete='username' required placeholder='name@company.example'><label>密码</label><input name='password' type='password' autocomplete='current-password' required><p><button>登录</button></p></form><div class='footer-note'>新部署的数据库不预置任何账号：请先用 `python3 tools/create_admin.py` 创建管理员。本地演示环境由 `python3 tools/demo/start_demo.py` 创建（文档化的演示账号 demo-admin / demo-sales / demo-engineer，密码与账号相同，仅限本地演示）。</div></section></div>
 """
         self.send_html(layout("企业后台登录", body), 200)
 

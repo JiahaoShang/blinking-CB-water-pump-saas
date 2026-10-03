@@ -23,6 +23,8 @@ class BuyerApiTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.server = make_server(Path(self.temp_dir.name) / "app.db", port=0)
         self.db = self.server.RequestHandlerClass.db
+        # 演示企业与其后台账号属于测试夹具：显式种入（普通新库不再预置）。
+        self.db.seed_demo_users()
         self.db.ensure_tenant("second-tenant")
         self.db.register_buyer_site("demo-tenant", "site-a", "https://seller-a.example")
         self.db.register_buyer_site("second-tenant", "site-b", "https://seller-b.example")

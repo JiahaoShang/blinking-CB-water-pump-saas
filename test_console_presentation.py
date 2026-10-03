@@ -23,6 +23,8 @@ class ConsolePresentationTests(unittest.TestCase):
         self.db_path = Path(self.temp_dir.name) / "app.db"
         self.server = make_server(self.db_path, port=0)
         self.db = self.server.RequestHandlerClass.db
+        # 控制台走查需要演示账号与演示企业：显式种入（普通新库不再预置）。
+        self.db.seed_demo_users()
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 

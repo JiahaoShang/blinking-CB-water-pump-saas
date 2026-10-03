@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -22,6 +24,8 @@ class ProductApprovalTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "app.db"
         self.db = Database(self.db_path)
+        # 测试使用的演示企业属于测试夹具：必须显式创建（普通新库不再预置）。
+        self.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
 
     def tearDown(self):
         self.db.conn.close()
@@ -118,6 +122,7 @@ class PublicPageTests(unittest.TestCase):
     def test_source_file_is_not_public_without_explicit_file_permission(self):
         with tempfile.TemporaryDirectory() as temp:
             db = Database(Path(temp) / "app.db")
+            db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
             product_id = db.create_product("demo-tenant", "T-PUBLIC", "测试泵", "清水")
             source_id = db.add_source("demo-tenant", product_id, "manual.pdf", "PDF", "p. 2")
             db.save_field("demo-tenant", product_id, "flow_range", "10-30", "m³/h", source_id, "p. 2")
@@ -169,6 +174,7 @@ class RequirementMatchingTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp_dir.name) / "app.db")
+        self.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
         self.db.seed_demo_products("demo-tenant")
         for product in self.db.list_products("demo-tenant"):
             approve_all_fields(self.db, "demo-tenant", product["id"])
@@ -229,6 +235,7 @@ class GroundedAnswerTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp_dir.name) / "app.db")
+        self.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
         self.db.seed_demo_products("demo-tenant")
         for product in self.db.list_products("demo-tenant"):
             approve_all_fields(self.db, "demo-tenant", product["id"])
@@ -299,6 +306,7 @@ class RfqTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp_dir.name) / "app.db")
+        self.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
         self.db.seed_demo_products("demo-tenant")
         for product in self.db.list_products("demo-tenant"):
             approve_all_fields(self.db, "demo-tenant", product["id"])
@@ -371,6 +379,8 @@ class DemoFixtureTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp_dir.name) / "app.db")
+        # 演示夹具需要演示企业、演示账号与线索负责人（分配校验会核对用户）。
+        self.db.seed_demo_users()
 
     def tearDown(self):
         self.db.conn.close()
@@ -398,6 +408,7 @@ class LowaraFixtureTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp_dir.name) / "app.db")
+        self.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
 
     def tearDown(self):
         self.db.conn.close()
@@ -470,6 +481,8 @@ class SalesWorkspaceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp_dir.name) / "app.db")
+        # 领取/分配会校验本企业销售与管理员账号：显式种入演示账号。
+        self.db.seed_demo_users()
         self.db.seed_demo_products("demo-tenant")
         for product in self.db.list_products("demo-tenant"):
             approve_all_fields(self.db, "demo-tenant", product["id"])
@@ -562,6 +575,8 @@ class AuthTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp_dir.name) / "app.db")
+        # 演示账号现在必须显式种入（普通新库不再预置任何账号）。
+        self.db.seed_demo_users()
 
     def tearDown(self):
         self.db.conn.close()
@@ -605,6 +620,64 @@ class AuthTests(unittest.TestCase):
             self.db.create_user("demo-tenant", "short@example.invalid", "Short", "sales", "short", "demo-admin")
         with self.assertRaises(ValueError):
             self.db.create_user("demo-tenant", "bad-role@example.invalid", "Bad role", "buyer", "long-pass", "demo-admin")
+
+
+class DatabaseBootstrapTests(unittest.TestCase):
+    """普通新库不得预置演示租户/账号；演示与首位管理员都必须显式创建。"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "fresh.db"
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_fresh_database_has_no_demo_tenant_or_predictable_users(self):
+        db = Database(self.db_path)
+        try:
+            tenants = db.conn.execute("SELECT COUNT(*) FROM tenants").fetchone()[0]
+            users = db.conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            self.assertEqual((tenants, users), (0, 0))
+            self.assertIsNone(db.authenticate_user("demo-admin@example.invalid", "demo-admin"))
+            self.assertIsNone(db.authenticate_user("demo-sales@example.invalid", "demo-sales"))
+        finally:
+            db.conn.close()
+
+    def test_explicit_demo_bootstrap_keeps_documented_logins(self):
+        db = Database(self.db_path)
+        try:
+            db.seed_demo_users()
+            admin = db.authenticate_user("demo-admin@example.invalid", "demo-admin")
+            sales = db.authenticate_user("demo-sales@example.invalid", "demo-sales")
+            engineer = db.authenticate_user("demo-engineer@example.invalid", "demo-engineer")
+            self.assertEqual((admin["role"], sales["role"], engineer["role"]), ("admin", "sales", "engineer"))
+            self.assertEqual(admin["tenant_id"], "demo-tenant")
+            db.seed_demo_users()  # 幂等：重复显式初始化不产生重复账号
+            self.assertEqual(db.conn.execute("SELECT COUNT(*) FROM users").fetchone()[0], 3)
+        finally:
+            db.conn.close()
+
+    def test_create_admin_cli_provisions_first_admin_without_default_password(self):
+        root = Path(__file__).resolve().parent
+        result = subprocess.run(
+            [
+                sys.executable, str(root / "tools" / "create_admin.py"),
+                "--db", str(self.db_path), "--email", "first-admin@example.invalid",
+                "--name", "首位管理员", "--password-stdin",
+            ],
+            input="first-admin-pass-1\n", capture_output=True, text=True, cwd=str(root), timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        db = Database(self.db_path)
+        try:
+            user = db.authenticate_user("first-admin@example.invalid", "first-admin-pass-1")
+            self.assertIsNotNone(user)
+            self.assertEqual((user["role"], user["tenant_id"]), ("admin", "default"))
+            # 只创建了这一个账号，且没有演示/默认口令账号
+            self.assertEqual(db.conn.execute("SELECT COUNT(*) FROM users").fetchone()[0], 1)
+            self.assertIsNone(db.authenticate_user("demo-admin@example.invalid", "demo-admin"))
+        finally:
+            db.conn.close()
 
 
 class BrandingTests(unittest.TestCase):

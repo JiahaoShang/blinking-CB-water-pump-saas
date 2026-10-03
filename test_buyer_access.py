@@ -12,6 +12,8 @@ class BuyerConversationAccessTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.server = make_server(Path(self.temp_dir.name) / "app.db", port=0)
+        # 登录用例需要演示账号：显式种入（普通新库不再预置）。
+        self.server.RequestHandlerClass.db.seed_demo_users()
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
