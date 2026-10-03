@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlencode
 
-from app import Database, Handler, ROOT, make_server
+from app import Database, Handler, ROOT, console_layout, make_server
 
 
 def approve_all_fields(db, tenant_id, product_id):
@@ -763,10 +763,16 @@ class BuyerApiTests(unittest.TestCase):
             db = self.db
             tenant_id = "demo-tenant"
             user_role = "sales"
+            actor = "demo-sales@example.invalid"
+            user_id = "test-user"
+            path = "/admin/rfqs"
             html = ""
 
             def send_html(self, content, status=200):
                 self.html = content
+
+            def console_page(self, title, body, active, lang="zh"):
+                return console_layout(title, body, active, lang=lang, path="/admin", actor=self.actor, role=self.user_role, tenant="示例水泵企业（演示）")
 
         seller = SellerView()
         Handler.admin_rfq(seller, rfq_id, {})

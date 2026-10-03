@@ -2228,6 +2228,11 @@ def answer_from_approved_material(
     return "grounded", answer, product_id, version["id"], [citation], ""
 
 
+BASE_CSS = """:root{--ink:#f7f4ff;--muted:#a8a2b8;--line:#29223c;--accent:#8b5cf6;--accent-strong:#a855f7;--bg:#08070f;--card:rgba(20,17,33,.9);--card-2:#151126;--warn:#f6c56a;--danger:#ff8fa3;--success:#67e8c5;}
+*{box-sizing:border-box}html{background:var(--bg)}body{min-height:100vh;margin:0;background-color:var(--bg);background-image:linear-gradient(rgba(139,92,246,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(139,92,246,.045) 1px,transparent 1px),radial-gradient(circle at 85% 0%,rgba(139,92,246,.15),transparent 28rem);background-size:48px 48px,48px 48px,100% 100%;color:var(--ink);font:15px/1.6 "Avenir Next","SF Pro Display","PingFang SC","Microsoft YaHei",sans-serif}
+a{color:#c4b5fd;text-decoration:none}a:hover{color:#ede9fe;text-decoration:none}header{position:sticky;top:0;z-index:10;background:rgba(8,7,15,.88);backdrop-filter:blur(18px);border-bottom:1px solid rgba(139,92,246,.18);color:var(--ink);padding:17px 32px;display:flex;justify-content:space-between;align-items:center;gap:22px}header strong{font-size:18px;letter-spacing:.08em}header nav{display:flex;gap:4px;align-items:center;justify-content:flex-end;flex-wrap:wrap}header nav a{color:var(--muted);padding:7px 10px;border-radius:9px;white-space:nowrap;flex-shrink:0}header nav a:hover{background:rgba(139,92,246,.12);color:var(--ink)}main{max-width:1240px;margin:0 auto;padding:54px 28px 80px}h1{font-size:38px;line-height:1.15;letter-spacing:-.035em;margin:0 0 8px}h2{font-size:21px;letter-spacing:-.02em;margin:0 0 14px}h3{font-size:16px;margin:20px 0 8px}.muted{color:var(--muted)}.notice{padding:13px 15px;border-radius:12px;background:rgba(103,232,197,.1);border:1px solid rgba(103,232,197,.22);color:#9af2da;margin:0 0 20px}.error{padding:13px 15px;border-radius:12px;background:rgba(255,143,163,.1);border:1px solid rgba(255,143,163,.23);color:#ffb1c0;margin:0 0 20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}.metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:18px}.metric{font-size:38px;font-weight:750;line-height:1.1;margin:8px 0;color:#fff}.action-card{display:block;color:var(--ink);transition:transform .2s ease,border-color .2s ease,background .2s ease}.action-card:hover{text-decoration:none;border-color:rgba(168,85,247,.75);background:rgba(32,24,52,.95);transform:translateY(-2px)}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 18px 45px rgba(0,0,0,.2);backdrop-filter:blur(12px)}.toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:26px}button,.button{border:0;border-radius:10px;padding:10px 15px;background:linear-gradient(135deg,var(--accent),var(--accent-strong));color:#fff;font-weight:700;cursor:pointer;display:inline-block;box-shadow:0 8px 24px rgba(139,92,246,.24)}button:hover,.button:hover{filter:brightness(1.08);transform:translateY(-1px)}button.secondary,.button.secondary{background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.35);color:#ddd6fe;box-shadow:none}button.warn,.button.warn{background:rgba(246,197,106,.12);border:1px solid rgba(246,197,106,.35);color:var(--warn);box-shadow:none}button.danger,.button.danger{background:rgba(255,143,163,.1);border:1px solid rgba(255,143,163,.35);color:var(--danger);box-shadow:none}form.inline{display:inline}label{display:block;font-weight:700;margin:10px 0 5px;color:#ded8ed}input,select,textarea{width:100%;padding:10px 11px;border:1px solid #3a3152;border-radius:10px;font:inherit;color:var(--ink);background:#0f0d19}input::placeholder,textarea::placeholder{color:#716a85}input:focus,select:focus,textarea:focus{outline:2px solid rgba(168,85,247,.35);border-color:var(--accent)}textarea{min-height:76px;resize:vertical}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px}.full{grid-column:1/-1}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}.badge{display:inline-flex;align-items:center;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:700;background:rgba(139,92,246,.13);border:1px solid rgba(139,92,246,.24);color:#d8ccff}.badge.published,.badge.approved{background:rgba(103,232,197,.1);border-color:rgba(103,232,197,.25);color:#9af2da}.badge.pending_review{background:rgba(246,197,106,.1);border-color:rgba(246,197,106,.25);color:#f7d991}.badge.withdrawn{background:rgba(255,143,163,.1);border-color:rgba(255,143,163,.25);color:#ffb1c0}.field-state{font-size:12px;color:var(--muted)}.source{display:flex;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)}.product-hero{background:linear-gradient(135deg,#17112d 0%,#31206a 52%,#5627a4 100%);color:white;border:1px solid rgba(196,181,253,.22);border-radius:22px;padding:36px;margin-bottom:20px;box-shadow:0 22px 60px rgba(69,35,132,.25)}.product-hero .eyebrow{text-transform:uppercase;letter-spacing:.14em;font-size:12px;opacity:.8}.product-hero h1{font-size:42px;margin:4px 0 8px}.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:24px}.kv div{background:rgba(8,7,15,.24);border:1px solid rgba(255,255,255,.14);padding:13px;border-radius:12px}.kv b{display:block;font-size:12px;opacity:.75}.kv span{font-size:19px;font-weight:700}.footer-note{margin-top:28px;padding:14px 16px;border-left:3px solid #a78bfa;background:rgba(167,139,250,.08);color:#c4b5fd;border-radius:0 10px 10px 0}.brand-mark{display:inline-block;width:10px;height:10px;margin-right:10px;border-radius:3px 8px 3px 8px;background:linear-gradient(135deg,#c4b5fd,#7c3aed);box-shadow:0 0 18px rgba(168,85,247,.75);transform:rotate(45deg)}@media(max-width:700px){header{padding:15px 18px;align-items:flex-start;flex-direction:column}header nav{justify-content:flex-start;overflow:auto;flex-wrap:nowrap;width:100%;padding-bottom:2px}main{padding:34px 14px 60px}.form-grid{grid-template-columns:1fr}.full{grid-column:auto}h1{font-size:30px}.product-hero h1{font-size:34px}table{font-size:13px}main table{display:block;overflow-x:auto;max-width:100%}}"""
+
+
 def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh", public: bool = False) -> str:
     header_html = "<header><strong>Industrial Pump Supplier <small>· DEMO</small></strong><nav><a href='#specifications'>Specifications / 参数</a><a href='#downloads'>Documents / 资料</a><a href='#product-rfq'>RFQ / 询价</a></nav></header>" if public else f"<header><strong><span class='brand-mark' aria-hidden='true'></span>Growave</strong><nav><a href='/admin'>{'管理概览' if lang == 'zh' else 'Overview'}</a><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/admin/sales'>{'销售工作台' if lang == 'zh' else 'Sales desk'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>"
     return f"""<!doctype html>
@@ -2236,12 +2241,97 @@ def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh"
 <meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>{esc(title)} · Growave</title>
 <style>
-:root{{--ink:#f7f4ff;--muted:#a8a2b8;--line:#29223c;--accent:#8b5cf6;--accent-strong:#a855f7;--bg:#08070f;--card:rgba(20,17,33,.9);--card-2:#151126;--warn:#f6c56a;--danger:#ff8fa3;--success:#67e8c5;}}
-*{{box-sizing:border-box}}html{{background:var(--bg)}}body{{min-height:100vh;margin:0;background-color:var(--bg);background-image:linear-gradient(rgba(139,92,246,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(139,92,246,.045) 1px,transparent 1px),radial-gradient(circle at 85% 0%,rgba(139,92,246,.15),transparent 28rem);background-size:48px 48px,48px 48px,100% 100%;color:var(--ink);font:15px/1.6 "Avenir Next","SF Pro Display","PingFang SC","Microsoft YaHei",sans-serif}}
-a{{color:#c4b5fd;text-decoration:none}}a:hover{{color:#ede9fe;text-decoration:none}}header{{position:sticky;top:0;z-index:10;background:rgba(8,7,15,.88);backdrop-filter:blur(18px);border-bottom:1px solid rgba(139,92,246,.18);color:var(--ink);padding:17px 32px;display:flex;justify-content:space-between;align-items:center;gap:22px}}header strong{{font-size:18px;letter-spacing:.08em}}header nav{{display:flex;gap:4px;align-items:center;justify-content:flex-end;flex-wrap:wrap}}header nav a{{color:var(--muted);padding:7px 10px;border-radius:9px;white-space:nowrap;flex-shrink:0}}header nav a:hover{{background:rgba(139,92,246,.12);color:var(--ink)}}main{{max-width:1240px;margin:0 auto;padding:54px 28px 80px}}h1{{font-size:38px;line-height:1.15;letter-spacing:-.035em;margin:0 0 8px}}h2{{font-size:21px;letter-spacing:-.02em;margin:0 0 14px}}h3{{font-size:16px;margin:20px 0 8px}}.muted{{color:var(--muted)}}.notice{{padding:13px 15px;border-radius:12px;background:rgba(103,232,197,.1);border:1px solid rgba(103,232,197,.22);color:#9af2da;margin:0 0 20px}}.error{{padding:13px 15px;border-radius:12px;background:rgba(255,143,163,.1);border:1px solid rgba(255,143,163,.23);color:#ffb1c0;margin:0 0 20px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}}.metric-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:18px}}.metric{{font-size:38px;font-weight:750;line-height:1.1;margin:8px 0;color:#fff}}.action-card{{display:block;color:var(--ink);transition:transform .2s ease,border-color .2s ease,background .2s ease}}.action-card:hover{{text-decoration:none;border-color:rgba(168,85,247,.75);background:rgba(32,24,52,.95);transform:translateY(-2px)}}.card{{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 18px 45px rgba(0,0,0,.2);backdrop-filter:blur(12px)}}.toolbar{{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:26px}}button,.button{{border:0;border-radius:10px;padding:10px 15px;background:linear-gradient(135deg,var(--accent),var(--accent-strong));color:#fff;font-weight:700;cursor:pointer;display:inline-block;box-shadow:0 8px 24px rgba(139,92,246,.24)}}button:hover,.button:hover{{filter:brightness(1.08);transform:translateY(-1px)}}button.secondary,.button.secondary{{background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.35);color:#ddd6fe;box-shadow:none}}button.warn,.button.warn{{background:rgba(246,197,106,.12);border:1px solid rgba(246,197,106,.35);color:var(--warn);box-shadow:none}}button.danger,.button.danger{{background:rgba(255,143,163,.1);border:1px solid rgba(255,143,163,.35);color:var(--danger);box-shadow:none}}form.inline{{display:inline}}label{{display:block;font-weight:700;margin:10px 0 5px;color:#ded8ed}}input,select,textarea{{width:100%;padding:10px 11px;border:1px solid #3a3152;border-radius:10px;font:inherit;color:var(--ink);background:#0f0d19}}input::placeholder,textarea::placeholder{{color:#716a85}}input:focus,select:focus,textarea:focus{{outline:2px solid rgba(168,85,247,.35);border-color:var(--accent)}}textarea{{min-height:76px;resize:vertical}}.form-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px}}.full{{grid-column:1/-1}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:12px 8px;border-bottom:1px solid var(--line);vertical-align:top}}th{{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}}.badge{{display:inline-flex;align-items:center;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:700;background:rgba(139,92,246,.13);border:1px solid rgba(139,92,246,.24);color:#d8ccff}}.badge.published,.badge.approved{{background:rgba(103,232,197,.1);border-color:rgba(103,232,197,.25);color:#9af2da}}.badge.pending_review{{background:rgba(246,197,106,.1);border-color:rgba(246,197,106,.25);color:#f7d991}}.badge.withdrawn{{background:rgba(255,143,163,.1);border-color:rgba(255,143,163,.25);color:#ffb1c0}}.field-state{{font-size:12px;color:var(--muted)}}.source{{display:flex;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)}}.product-hero{{background:linear-gradient(135deg,#17112d 0%,#31206a 52%,#5627a4 100%);color:white;border:1px solid rgba(196,181,253,.22);border-radius:22px;padding:36px;margin-bottom:20px;box-shadow:0 22px 60px rgba(69,35,132,.25)}}.product-hero .eyebrow{{text-transform:uppercase;letter-spacing:.14em;font-size:12px;opacity:.8}}.product-hero h1{{font-size:42px;margin:4px 0 8px}}.kv{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:24px}}.kv div{{background:rgba(8,7,15,.24);border:1px solid rgba(255,255,255,.14);padding:13px;border-radius:12px}}.kv b{{display:block;font-size:12px;opacity:.75}}.kv span{{font-size:19px;font-weight:700}}.footer-note{{margin-top:28px;padding:14px 16px;border-left:3px solid #a78bfa;background:rgba(167,139,250,.08);color:#c4b5fd;border-radius:0 10px 10px 0}}.brand-mark{{display:inline-block;width:10px;height:10px;margin-right:10px;border-radius:3px 8px 3px 8px;background:linear-gradient(135deg,#c4b5fd,#7c3aed);box-shadow:0 0 18px rgba(168,85,247,.75);transform:rotate(45deg)}}@media(max-width:700px){{header{{padding:15px 18px;align-items:flex-start;flex-direction:column}}header nav{{justify-content:flex-start;overflow:auto;flex-wrap:nowrap;width:100%;padding-bottom:2px}}main{{padding:34px 14px 60px}}.form-grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}h1{{font-size:30px}}.product-hero h1{{font-size:34px}}table{{font-size:13px}}main table{{display:block;overflow-x:auto;max-width:100%}}}}
+{BASE_CSS}
 </style></head><body>
 {header_html}
 <main>{body}</main></body></html>"""
+
+
+CONSOLE_CSS = """
+.console{display:grid;grid-template-columns:232px minmax(0,1fr);min-height:100vh}
+.console .side{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;background:#0b0916;border-right:1px solid var(--line);padding:16px 10px 10px;z-index:20}
+.console .side-brand{display:flex;align-items:center;gap:10px;padding:2px 8px 14px;border-bottom:1px solid var(--line)}
+.console .side-brand strong{font-size:16px;letter-spacing:.06em;display:block}
+.console .side-brand small{display:block;font-size:10px;color:var(--muted);letter-spacing:.14em}
+.console .side-tenant{margin:12px 6px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;font-size:12px;color:var(--muted)}
+.console .side-nav{flex:1;overflow:auto;display:flex;flex-direction:column;gap:2px;padding-top:4px}
+.console .side-heading{font-size:11px;font-weight:700;letter-spacing:.12em;color:#7f77a0;margin:16px 10px 4px}
+.console .side-link{display:flex;align-items:center;gap:10px;padding:10px 11px;border-radius:10px;color:var(--muted);font-size:14px;border:1px solid transparent}
+.console .side-link:hover{background:rgba(139,92,246,.10);color:var(--ink)}
+.console .side-link.active{background:rgba(139,92,246,.16);border-color:rgba(139,92,246,.30);color:#fff;font-weight:700}
+.console .side-link .sym{width:20px;text-align:center;color:#a78bfa;font-size:15px}
+.console .side-foot{border-top:1px solid var(--line);padding:12px 8px 2px;font-size:11px;color:var(--muted);line-height:1.8}
+.console .side-foot a{color:#c4b5fd}
+.console .shell{min-width:0;display:flex;flex-direction:column}
+.console .topbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:10px;min-height:58px;padding:8px 26px;background:rgba(8,7,15,.9);backdrop-filter:blur(18px);border-bottom:1px solid rgba(139,92,246,.18)}
+.console .crumb{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.console .crumb b{color:var(--ink);font-size:13px}
+.console .topbar .grow{flex:1}
+.console .topbar a{font-size:13px;padding:7px 10px;border-radius:9px}
+.console .topbar a:hover{background:rgba(139,92,246,.12)}
+.console .menu-btn{display:none;border:1px solid var(--line);background:rgba(139,92,246,.08);color:var(--ink);border-radius:9px;padding:6px 11px;font-size:16px;line-height:1;box-shadow:none}
+.console main{max-width:1160px;width:100%;margin:0 auto;padding:34px 30px 70px}
+@media(max-width:850px){
+.console{grid-template-columns:1fr}
+.console .side{position:fixed;left:0;top:0;width:242px;transform:translateX(-105%);transition:transform .18s ease;box-shadow:none}
+.console .side.open{transform:none;box-shadow:10px 0 34px rgba(0,0,0,.55)}
+.console .menu-btn{display:inline-block}
+.console .topbar{padding:8px 14px}
+.console main{padding:24px 16px 60px}
+}
+"""
+
+
+def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path: str = "/admin", actor: str = "", role: str = "", tenant: str = "") -> str:
+    """卖家控制台外壳：左侧按业务分组的工具架 + 右侧工作区（顶栏面包屑）。"""
+    groups = (
+        ("我的工作", (("admin", "/admin", "⌂", "管理概览"),)),
+        ("客户跟进", (
+            ("sales", "/admin/sales", "◎", "销售工作台"),
+            ("rfqs", "/admin/rfqs", "▦", "RFQ 询价"),
+            ("tasks", "/admin/tasks", "◇", "人工任务"),
+        )),
+        ("产品经营", (("products", "/admin/products", "▧", "产品管理"),)),
+        ("团队与接入", (
+            ("users", "/admin/users", "◧", "成员管理"),
+            ("sites", "/admin/sites", "◫", "网站 API 接入"),
+        )),
+    )
+    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "users": "团队与接入", "sites": "团队与接入"}
+    role_label = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}.get(role, role or "未登录")
+    lang_target = f"{esc(path)}?lang={'en' if lang == 'zh' else 'zh'}"
+    sections = []
+    for heading, items in groups:
+        links = "".join(
+            f"<a class='side-link{' active' if key == active else ''}' href='{url}'><span class='sym'>{sym}</span>{label}</a>"
+            for key, url, sym, label in items
+        )
+        sections.append(f"<div class='side-heading'>{heading}</div>{links}")
+    crumb = f"{group_of.get(active, '卖家系统')} / <b>{esc(title)}</b>"
+    account = f"当前账号：{esc(actor)}（{esc(role_label)}）" if actor else "未登录"
+    return f"""<!doctype html>
+<html lang='{'en' if lang == 'en' else 'zh-CN'}'>
+<head>
+<meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>{esc(title)} · Growave</title>
+<style>
+{BASE_CSS}
+{CONSOLE_CSS}
+</style></head><body>
+<div class='console'>
+<aside class='side' id='console-side' aria-label='卖家系统导航'>
+<div class='side-brand'><span class='brand-mark' aria-hidden='true'></span><div><strong>Growave</strong><small>SELLER CONSOLE</small></div></div>
+<div class='side-tenant'>◧ {esc(tenant or '当前企业')}</div>
+<nav class='side-nav'>{''.join(sections)}</nav>
+<div class='side-foot'>{account}<br><a href='/inquiry' target='_blank'>打开买方演示页 ↗</a></div>
+</aside>
+<div class='shell'>
+<header class='topbar'><button class='menu-btn' id='console-menu' aria-label='打开导航'>&#9776;</button><span class='crumb'>{crumb}</span><span class='grow'></span><a href='{lang_target}'>{'English' if lang == 'zh' else '中文'}</a><a href='/logout'>退出登录</a></header>
+<main>{body}</main>
+</div>
+</div>
+<script>document.getElementById('console-menu').addEventListener('click',function(){{document.getElementById('console-side').classList.toggle('open');}});</script>
+</body></html>"""
 
 
 def status_badge(status: str) -> str:
@@ -2341,7 +2431,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             allowed = set()
         if user["role"] not in allowed:
-            self.send_html(layout("无权限", "<div class='error'>当前账号没有访问此管理功能的权限。</div><p><a href='/login'>切换账号</a></p>"), 403)
+            self.send_html(self.console_page("无权限", "<div class='error'>当前账号没有访问此管理功能的权限。</div><p><a href='/login'>切换账号</a></p>", ""), 403)
             return False
         return True
 
@@ -2440,6 +2530,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
+
+    def console_page(self, title: str, body: str, active: str, lang: str = "zh") -> str:
+        tenant = self.db.conn.execute("SELECT name FROM tenants WHERE id=?", (self.tenant_id,)).fetchone()
+        clean_path = urlparse(self.path).path.rstrip("/") or "/admin"
+        return console_layout(
+            title, body, active, lang=lang, path=clean_path,
+            actor=self.actor if self.user_id else "",
+            role=self.user_role if self.user_id else "",
+            tenant=(tenant["name"] if tenant else self.tenant_id),
+        )
 
     def login_page(self, query: dict[str, list[str]], error: str = "") -> None:
         if self.current_user():
@@ -3380,7 +3480,7 @@ class Handler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/contact-stop", path)
             if match:
                 if self.user_role not in {"admin", "sales"}:
-                    self.send_html(layout("无权操作", "<div class='error'>只有销售或管理员可记录买方联系要求。</div>"), 403)
+                    self.send_html(self.console_page("无权操作", "<div class='error'>只有销售或管理员可记录买方联系要求。</div>", "sales"), 403)
                     return
                 rfq = self.db.get_rfq(self.tenant_id, match.group(1))
                 if not rfq:
@@ -3460,12 +3560,16 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, sqlite3.Error) as exc:
             if path.startswith("/inquiry/"):
                 return_path = path.rsplit("/", 1)[0]
-            else:
-                product_match = re.match(r"(/admin/products/[a-f0-9]+)(/|$)", path)
-                return_path = product_match.group(1) if product_match else "/admin/products"
-            self.send_html(layout("操作未完成", f"<div class='error'>{esc(exc)}</div><p><a href='{esc(return_path)}'>返回并修改</a></p>"), 400)
+                self.send_html(layout("操作未完成", f"<div class='error'>{esc(exc)}</div><p><a href='{esc(return_path)}'>返回并修改</a></p>"), 400)
+                return
+            product_match = re.match(r"(/admin/products/[a-f0-9]+)(/|$)", path)
+            return_path = product_match.group(1) if product_match else "/admin/products"
+            self.send_html(self.console_page("操作未完成", f"<div class='error'>{esc(exc)}</div><p><a href='{esc(return_path)}'>返回并修改</a></p>", ""), 400)
             return
-        self.send_html(layout("未找到", "<div class='error'>操作不存在</div>"), 404)
+        if path.startswith("/inquiry/"):
+            self.send_html(layout("未找到", "<div class='error'>操作不存在</div>"), 404)
+            return
+        self.send_html(self.console_page("未找到", "<div class='error'>操作不存在</div>", ""), 404)
 
     def admin_products(self, query: dict[str, list[str]]) -> None:
         lang = query.get("lang", ["zh"])[0]
@@ -3496,12 +3600,12 @@ class Handler(BaseHTTPRequestHandler):
 </div>
 <section class='card' style='margin-top:18px'><h2>产品列表</h2><table><thead><tr><th>型号</th><th>状态</th><th>资料完整度</th><th>买方页面</th></tr></thead><tbody>{rows}</tbody></table></section>
 """
-        self.send_html(layout("产品资料与发布", body, lang=lang), 200)
+        self.send_html(self.console_page("产品资料与发布", body, "products", lang=lang), 200)
 
     def admin_product(self, product_id: str, query: dict[str, list[str]]) -> None:
         product = self.db.get_product(self.tenant_id, product_id)
         if not product:
-            self.send_html(layout("未找到", "<div class='error'>产品不存在或不属于当前企业。</div>"), 404)
+            self.send_html(self.console_page("未找到", "<div class='error'>产品不存在或不属于当前企业。</div>", "products"), 404)
             return
         sources = self.db.get_sources(self.tenant_id, product_id)
         fields = self.db.get_fields(self.tenant_id, product_id)
@@ -3653,7 +3757,7 @@ class Handler(BaseHTTPRequestHandler):
 <section class='card'><h2>登记来源资料</h2>{source_rows}<p class='muted'>文件默认不对外下载。上传后的文本/CSV 会按内容识别已知字段标签；PDF、图片、CAD 等不支持的格式会明确失败，请人工录入。开放公开下载前必须确认文件归属。</p><hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>MARKDOWN</option><option>TXT</option><option>IMAGE</option><option>DXF</option><option>STEP</option><option>OTHER</option></select></div><div><label>文件归属 *</label><select name='scope' required><option value=''>请选择文件归属</option><option value='exact_model'>本型号专属文件</option><option value='series'>系列级资料（非本型号专属）</option><option value='unknown'>归属待核对（不上公开页）</option></select></div><div class='full'><label>原文位置 *</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section></div>
 <section class='card' style='margin-top:18px'><h2>字段核对（逐项）</h2><p class='muted'>候选字段需逐项核准或驳回；驳回保留原值并记录原因。已核准关键字段被修改后会回到待核对，需重新核准并发布新版本；缺项不会被推测值填充。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th><th>操作</th></tr></thead><tbody>{field_table}</tbody></table><hr><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置 *</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></section>
 """
-        self.send_html(layout(f"{product['model']} · 字段核对", body), 200)
+        self.send_html(self.console_page(f"{product['model']} · 字段核对", body, "products"), 200)
 
     def buyer_inquiry(self, conversation_id: str, query: dict[str, list[str]]) -> None:
         conversation = self.db.get_conversation(self.tenant_id, conversation_id)
@@ -3847,7 +3951,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class='grid' style='margin-top:18px'><section class='card'><h2>待处理人工任务</h2><table><thead><tr><th>问题</th><th>型号</th><th>创建时间</th></tr></thead><tbody>{task_rows}</tbody></table></section><section class='card'><h2>最近销售线索</h2><table><thead><tr><th>记录</th><th>阶段</th><th>负责人</th><th>跟进日期</th></tr></thead><tbody>{lead_rows}</tbody></table></section></div>
 <div class='footer-note'>概览只读取当前登录账号所属企业的数据；具体修改仍需进入对应模块，并按角色权限执行。</div>
 """
-        self.send_html(layout("管理概览", body), 200)
+        self.send_html(self.console_page("管理概览", body, "admin"), 200)
 
     def admin_users(self, query: dict[str, list[str]]) -> None:
         role_labels = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}
@@ -3877,7 +3981,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class='grid'><section class='card'><h2>创建成员账号</h2><p class='muted'>密码只在创建时使用，不会在后台列表显示。生产环境应接入正式身份提供商。</p><form method='post' action='/admin/users'><label>姓名 *</label><input name='display_name' required placeholder='例如 Alex Chen'><label>邮箱 *</label><input name='email' type='email' required placeholder='alex@example.com'><label>角色 *</label><select name='role'><option value='sales'>销售</option><option value='engineer'>工程师</option><option value='admin'>管理员</option></select><label>初始密码 *</label><input name='password' type='password' minlength='8' required placeholder='至少 8 位'><p><button>创建账号</button></p></form></section><section class='card'><h2>角色说明</h2><p><b>管理员：</b>产品管理、成员管理、人工任务、RFQ 和销售工作台。</p><p><b>销售：</b>RFQ 和销售工作台。</p><p><b>工程师：</b>人工任务、RFQ 和销售工作台。</p><p class='footer-note'>账号属于当前企业；停用后不能继续登录，也不会改变历史 RFQ、任务或操作记录。</p></section></div>
 <section class='card' style='margin-top:18px'><h2>当前成员</h2><table><thead><tr><th>成员</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{''.join(rows) or "<tr><td colspan='5' class='muted'>暂无成员。</td></tr>"}</tbody></table></section>
 """
-        self.send_html(layout("成员管理", body), 200)
+        self.send_html(self.console_page("成员管理", body, "users"), 200)
 
     def admin_sites(self, query: dict[str, list[str]]) -> None:
         rows = "".join(
@@ -3891,7 +3995,7 @@ class Handler(BaseHTTPRequestHandler):
 <section class='grid'><div class='card'><h2>登记官网</h2><form method='post' action='/admin/sites'><label>官网来源 *</label><input name='allowed_origin' type='url' required placeholder='https://www.example.com'><p class='muted'>只填写协议、域名和可选端口；正式网站使用 HTTPS。本地测试可用 localhost。</p><button>生成网站标识</button></form></div><div class='card'><h2>接入说明</h2><p>把网站标识放在创建会话请求的 <code>site_key</code> 字段。后续请求使用 <code>X-Site-Key</code> 和该会话的 <code>Authorization: Bearer</code> 凭据。</p><p><a href='/reference-client' target='_blank'>打开参考网页聊天窗口</a>。本地演示时，先把此网页的来源登记为允许来源。</p><p class='muted'>这里是基础登记界面；完整接入文档、密钥轮换和自助安装尚未验收。</p></div></section>
 <section class='card' style='margin-top:18px'><h2>已登记网站</h2><table><thead><tr><th>网站标识</th><th>允许来源</th><th>状态</th><th>创建时间</th></tr></thead><tbody>{rows}</tbody></table></section>
 """
-        self.send_html(layout("网站 API 接入", body), 200)
+        self.send_html(self.console_page("网站 API 接入", body, "sites"), 200)
 
     def admin_tasks(self, query: dict[str, list[str]]) -> None:
         tasks = self.db.list_human_tasks(self.tenant_id, query.get("status", [""])[0] or None)
@@ -3903,12 +4007,12 @@ class Handler(BaseHTTPRequestHandler):
 <div class='toolbar'><div><h1>人工任务</h1><div class='muted'>只处理当前演示企业的会话问题；工程师回复不会自动写入产品通用知识。</div></div><div><a class='button secondary' href='/admin/tasks?status=pending'>待处理</a> <a class='button secondary' href='/admin/tasks'>全部</a></div></div>
 <section class='card'><table><thead><tr><th>问题</th><th>型号</th><th>状态</th><th>创建时间</th></tr></thead><tbody>{rows}</tbody></table></section>
 """
-        self.send_html(layout("人工任务", body), 200)
+        self.send_html(self.console_page("人工任务", body, "tasks"), 200)
 
     def admin_task(self, task_id: str, query: dict[str, list[str]]) -> None:
         task = self.db.get_human_task(self.tenant_id, task_id)
         if not task:
-            self.send_html(layout("任务不存在", "<div class='error'>人工任务不存在或不属于当前企业。</div>"), 404)
+            self.send_html(self.console_page("任务不存在", "<div class='error'>人工任务不存在或不属于当前企业。</div>", "tasks"), 404)
             return
         context = json.loads(task["context_json"])
         requirements = context.get("confirmed_requirements", {})
@@ -3928,7 +4032,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class='grid'><section class='card'><h2>问题上下文</h2><p><b>原问题：</b>{esc(task['question'])}</p><p><b>型号：</b>{esc(task['model'] or '未指定')}</p><p><b>转人工原因：</b>{esc(task['reason'])}</p><p><b>已有回答：</b>{esc(context.get('answer_so_far', ''))}</p></section><section class='card'><h2>已确认工况</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section></div>
 <section class='card' style='margin-top:18px'><h2>工程师处理</h2>{followup_rows}{response_area}<p class='muted'>该回复只属于当前会话；如果要成为通用资料，必须回到产品资料核准流程。</p></section>
 """
-        self.send_html(layout("人工接管任务", body), 200)
+        self.send_html(self.console_page("人工接管任务", body, "tasks"), 200)
 
     def admin_rfqs(self, query: dict[str, list[str]]) -> None:
         rfqs = self.db.list_rfqs(self.tenant_id)
@@ -3940,12 +4044,12 @@ class Handler(BaseHTTPRequestHandler):
 <div class='toolbar'><div><h1>RFQ 询价记录</h1><div class='muted'>当前仅展示所属企业记录；完整负责人、阶段和跟进操作将在销售工作台切片中加入。</div></div></div>
 <section class='card'><table><thead><tr><th>记录编号</th><th>型号</th><th>联系人</th><th>状态</th><th>提交时间</th></tr></thead><tbody>{rows}</tbody></table></section>
 """
-        self.send_html(layout("RFQ 询价记录", body), 200)
+        self.send_html(self.console_page("RFQ 询价记录", body, "rfqs"), 200)
 
     def admin_rfq(self, rfq_id: str, query: dict[str, list[str]]) -> None:
         rfq = self.db.get_rfq(self.tenant_id, rfq_id)
         if not rfq:
-            self.send_html(layout("RFQ 不存在", "<div class='error'>RFQ 不存在或不属于当前企业。</div>"), 404)
+            self.send_html(self.console_page("RFQ 不存在", "<div class='error'>RFQ 不存在或不属于当前企业。</div>", "rfqs"), 404)
             return
         snapshot = json.loads(rfq["snapshot_json"])
         requirements = snapshot.get("requirements", {})
@@ -3990,7 +4094,7 @@ class Handler(BaseHTTPRequestHandler):
 <section class='card' style='margin-top:18px'><h2>RFQ 提交与修改记录（仅卖方可见）</h2><table><thead><tr><th>版本</th><th>时间</th><th>修改者</th><th>变更内容（相对上一版）</th><th>型号</th><th>联系</th><th>数量</th><th>目的地</th><th>说明</th></tr></thead><tbody>{revision_rows}</tbody></table></section>
 <div class='footer-note'>该 RFQ 保存了提交时的需求、推荐和产品版本快照；后续产品更新不会静默改写这条历史询价。</div>
 """
-        self.send_html(layout("RFQ 详情", body), 200)
+        self.send_html(self.console_page("RFQ 详情", body, "rfqs"), 200)
 
     def admin_sales(self, query: dict[str, list[str]]) -> None:
         records = self.db.list_sales_records(self.tenant_id)
@@ -4015,13 +4119,13 @@ class Handler(BaseHTTPRequestHandler):
 <div class='toolbar'><div><h1>销售工作台</h1><div class='muted'>统一查看 RFQ、需求、推荐、问答和人工任务；当前企业：示例水泵企业（演示）</div></div><a class='button secondary' href='/admin/rfqs'>RFQ 原始记录</a></div>
 <section class='card'><table><thead><tr><th>线索 / 联系人</th><th>型号</th><th>阶段</th><th>负责人</th><th>跟进日期</th><th>RFQ 状态</th></tr></thead><tbody>{table}</tbody></table></section>
 """
-        self.send_html(layout("销售工作台", body), 200)
+        self.send_html(self.console_page("销售工作台", body, "sales"), 200)
 
     def admin_sales_detail(self, rfq_id: str, query: dict[str, list[str]]) -> None:
         rfq = self.db.get_rfq(self.tenant_id, rfq_id)
         lead = self.db.get_lead_for_rfq(self.tenant_id, rfq_id)
         if not rfq or not lead:
-            self.send_html(layout("线索不存在", "<div class='error'>线索不存在或不属于当前企业。</div>"), 404)
+            self.send_html(self.console_page("线索不存在", "<div class='error'>线索不存在或不属于当前企业。</div>", "sales"), 404)
             return
         snapshot = json.loads(rfq["snapshot_json"])
         preference = self.db.get_contact_preference(self.tenant_id, rfq["conversation_id"])
@@ -4063,7 +4167,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class='grid' style='margin-top:18px'><section class='card'><h2>推荐快照</h2>{recommendation_html}</section><section class='card'><h2>问答与人工任务</h2>{answer_rows}{task_rows}</section></div>
 <section class='card' style='margin-top:18px'><h2>操作记录</h2>{audit_html}</section>
 """
-        self.send_html(layout("销售线索详情", body), 200)
+        self.send_html(self.console_page("销售线索详情", body, "sales"), 200)
 
     def public_product(self, slug: str, query: dict[str, list[str]], site: sqlite3.Row | None = None) -> None:
         tenant_id = site["tenant_id"] if site else self.tenant_id
@@ -4073,7 +4177,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         version = self.db.get_published_version(tenant_id, product["id"])
         if not version:
-            self.send_html(layout("产品不可用", "<div class='error'>找不到已发布版本。</div>"), 404)
+            self.send_html(self.console_page("产品不可用", "<div class='error'>找不到已发布版本。</div>", "products"), 404)
             return
         snapshot = json.loads(version["snapshot_json"])
         sources = self.db.get_sources(tenant_id, product["id"])
