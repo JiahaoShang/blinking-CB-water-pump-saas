@@ -81,6 +81,36 @@ class BuyerConversationAccessTests(unittest.TestCase):
         self.assertEqual(len(db.list_human_tasks("demo-tenant")), 1)
         self.assertIn("pending", self.request("GET", path, cookie=cookie)[2])
 
+    def test_legacy_inquiry_gates_tentative_and_never_claims_auto_task(self):
+        """旧版 /inquiry 页与新口径一致：待核实需主动查看；资料外问题不冒充已安排人工。"""
+        db = self.server.RequestHandlerClass.db
+        db.seed_demo_products("demo-tenant")
+        for product in db.list_products("demo-tenant"):
+            for field in db.get_fields("demo-tenant", product["id"]):
+                if field["state"] == "candidate":
+                    db.approve_field("demo-tenant", product["id"], field["field_key"])
+            db.finalize_product_review("demo-tenant", product["id"])
+            db.publish_product("demo-tenant", product["id"])
+        _, headers, _ = self.request("GET", "/inquiry")
+        path = headers["Location"].split("?", 1)[0]
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        self.assertEqual(self.request("POST", path + "/message", urlencode({"message": "Need pump flow 50 m3/h, head 30 m, clean water, temperature 100"}), cookie)[0], 303)
+        confirm = urlencode({"flow": "50", "head": "30", "media": "clean water", "temperature": "100", "quantity": "2"})
+        self.assertEqual(self.request("POST", path + "/confirm", confirm, cookie)[0], 303)
+        page = self.request("GET", path, cookie=cookie)[2]
+        self.assertIn("匹配结果", page)
+        self.assertIn("查看待核实候选", page)
+        self.assertNotIn("CB-80A", page)  # 待核实候选未泄漏（正文与下拉选项均不下发）
+        shown = self.request("GET", path + "?show_tentative=1", cookie=cookie)[2]
+        self.assertIn("CB-80A", shown)
+        self.assertIn("待核实", shown)
+        self.assertEqual(self.request("POST", path + "/ask", urlencode({"question": "What is the price?"}), cookie)[0], 303)
+        self.assertEqual(len(db.list_human_tasks("demo-tenant")), 0)
+        asked = self.request("GET", path + "?notice=answer", cookie=cookie)[2]
+        self.assertIn("Ask an engineer", asked)
+        self.assertNotIn("后台已生成待处理人工任务", asked)
+        self.assertIn("不会自动安排", asked)
+
 
 if __name__ == "__main__":
     unittest.main()

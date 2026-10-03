@@ -152,12 +152,14 @@ function renderRecommendation(recommendation, requirement) {
   };
   drawProducts(recommendation.results || []);
   if (recommendation.status !== 'recommended') {
-    const exploreButton = recommendation.options?.tentative_available
+    const tentativeShown = (recommendation.results || []).some((item) => item.status === 'needs_confirmation');
+    const exploreButton = recommendation.options?.tentative_available && !tentativeShown
       ? action(locale === 'zh' ? '查看待核实候选' : 'View tentative candidates', async () => {
           try {
             const body = await api(`/conversations/${conversationId}/recommendations`, 'POST', { revision_id: requirement?.revision_id, include_tentative: true });
-            drawProducts(body.results || []);
-            exploreButton.hidden = true;
+            recommendation.results = body.results || [];
+            drawProducts(recommendation.results);
+            exploreButton.remove();
           } catch (error) { showNotice(error.message); }
         }, true)
       : null;

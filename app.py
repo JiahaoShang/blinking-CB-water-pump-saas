@@ -406,6 +406,7 @@ class Database:
                 status TEXT NOT NULL,
                 rule_version TEXT NOT NULL,
                 results_json TEXT NOT NULL,
+                tentative_viewed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 invalidated_at TEXT
             );
@@ -521,6 +522,9 @@ class Database:
         ):
             if column not in message_columns:
                 self.conn.execute(f"ALTER TABLE messages ADD COLUMN {column} {definition}")
+        recommendation_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(recommendations)")}
+        if "tentative_viewed" not in recommendation_columns:
+            self.conn.execute("ALTER TABLE recommendations ADD COLUMN tentative_viewed INTEGER NOT NULL DEFAULT 0")
         self.conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_idempotency ON messages(conversation_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
         )
@@ -922,6 +926,7 @@ class Database:
         status: str,
         results: list[dict[str, object]],
         rule_version: str = "pump-demo-v1",
+        tentative_viewed: bool = False,
     ) -> str:
         self.conn.execute(
             "UPDATE recommendations SET status='invalidated', invalidated_at=? WHERE tenant_id=? AND conversation_id=? AND status <> 'invalidated'",
@@ -929,8 +934,8 @@ class Database:
         )
         recommendation_id = secrets.token_hex(12)
         self.conn.execute(
-            "INSERT INTO recommendations(id, tenant_id, conversation_id, requirement_revision_id, status, rule_version, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (recommendation_id, tenant_id, conversation_id, requirement_revision_id, status, rule_version, json.dumps(results, ensure_ascii=False), now_iso()),
+            "INSERT INTO recommendations(id, tenant_id, conversation_id, requirement_revision_id, status, rule_version, results_json, tentative_viewed, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (recommendation_id, tenant_id, conversation_id, requirement_revision_id, status, rule_version, json.dumps(results, ensure_ascii=False), 1 if tentative_viewed else 0, now_iso()),
         )
         self._audit(tenant_id, "recommendation", recommendation_id, "generated", "matching-rule", f"status={status};revision={requirement_revision_id}")
         self.conn.commit()
@@ -2528,7 +2533,7 @@ class Handler(BaseHTTPRequestHandler):
             if latest_recommendation:
                 stored_results = json.loads(latest_recommendation["results_json"])
                 visible_results = []
-                for result in buyer_visible_results(stored_results, False):
+                for result in buyer_visible_results(stored_results, bool(latest_recommendation["tentative_viewed"])):
                     item = dict(result)
                     url = str(item.get("detail_url") or "")
                     if not url.startswith("/s/"):
@@ -2777,7 +2782,11 @@ class Handler(BaseHTTPRequestHandler):
             existing = self.db.latest_active_recommendation(site["tenant_id"], conversation["id"])
             if existing and existing["requirement_revision_id"] == revision["id"]:
                 stored = json.loads(existing["results_json"])
-                results = [with_site_url(result) for result in buyer_visible_results(stored, include_tentative)]
+                if include_tentative and not existing["tentative_viewed"]:
+                    self.db.conn.execute("UPDATE recommendations SET tentative_viewed=1 WHERE id=?", (existing["id"],))
+                    self.db.conn.commit()
+                serve_tentative = include_tentative or bool(existing["tentative_viewed"])
+                results = [with_site_url(result) for result in buyer_visible_results(stored, serve_tentative)]
                 missing_keys = json.loads(revision["missing_json"])
                 missing = [REQUIREMENT_LABELS.get(key, key) for key in missing_keys]
                 self.send_json(
@@ -2789,7 +2798,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 full_results, missing = classify_products(self.db, site["tenant_id"], values)
                 status = overall_status(full_results, missing)
-                recommendation_id = self.db.save_recommendation(site["tenant_id"], conversation["id"], revision["id"], status, full_results)
+                recommendation_id = self.db.save_recommendation(site["tenant_id"], conversation["id"], revision["id"], status, full_results, tentative_viewed=include_tentative)
             except Exception:
                 self.send_json({"error": "matching_unavailable", "message": "匹配服务暂不可用；已确认工况仍保留，可稍后重试或请求工程师协助。"}, 503, origin)
                 return
@@ -3092,7 +3101,7 @@ class Handler(BaseHTTPRequestHandler):
                     if selected_product_id:
                         result_for_product = next((result for result in recommendation_results if result.get("product_id") == selected_product_id), None)
                     if not result_for_product:
-                        result_for_product = next((result for result in recommendation_results if result.get("status") in {"candidate", "needs_confirmation"}), None)
+                        result_for_product = next((result for result in recommendation_results if result.get("status") == "candidate"), None)
                     selected_product_id = (result_for_product or {}).get("product_id") or selected_product_id
                 answer_status, answer_text, answered_product_id, product_version_id, citations, _reason = answer_from_approved_material(self.db, self.tenant_id, question, selected_product_id)
                 self.db.save_message(self.tenant_id, conversation_id, "assistant", answer_text, "grounded-answer" if answer_status == "grounded" else "unresolved-question")
@@ -3436,7 +3445,7 @@ class Handler(BaseHTTPRequestHandler):
         current_rfq = self.db.get_rfq(self.tenant_id, rfq_id) if rfq_id else None
         notice_html = {
             "recommendation": "<div class='notice'>需求已保存，推荐结果会基于当前已确认摘要重新计算。</div>",
-            "answer": "<div class='notice'>问题已保存。若资料不足，后台已生成待处理人工任务。</div>",
+            "answer": "<div class='notice'>问题已保存。资料不足的问题会保留为待核实记录；只有您点击「请求工程师核实」后才会创建人工任务，不会自动安排。</div>",
         }.get(notice, "")
         if notice == "rfq" and current_rfq:
             missing_labels = json.loads(current_rfq["missing_json"])
@@ -3459,15 +3468,18 @@ class Handler(BaseHTTPRequestHandler):
             for key in ("flow", "head", "media", "temperature", "quantity", "region", "delivery")
         )
 
+        show_tentative = query.get("show_tentative", [""])[0] == "1"
+        visible_results: list[dict[str, object]] = []
         recommendation_html = "<p class='muted'>Send a message and confirm the structured summary to see a recommendation.</p>"
         if current_recommendation:
             result_status = current_recommendation["status"]
             result_label = {"recommended": "可初步推荐 / Initial recommendation", "needs_confirmation": "需工程确认 / Engineering confirmation needed", "insufficient": "条件不足 / More information needed", "no_match": "无可靠候选 / No reliable candidate"}.get(result_status, result_status)
-            results = json.loads(current_recommendation["results_json"])
+            all_results = json.loads(current_recommendation["results_json"])
+            visible_results = buyer_visible_results(all_results, include_tentative=show_tentative)
+            has_tentative = any(item.get("status") == "needs_confirmation" for item in all_results)
             cards = []
-            for result in results:
-                card_class = "notice" if result["status"] in {"candidate", "needs_confirmation"} else "error"
-                result_badge = {"candidate": "Candidate", "needs_confirmation": "需工程确认 / Confirm", "conflict": "Conflict"}.get(result["status"], result["status"])
+            for result in visible_results:
+                result_badge = {"candidate": "可初步推荐 / Candidate", "needs_confirmation": "待核实（未确认适用）/ Tentative"}.get(result["status"], result["status"])
                 cards.append(
                     f"<div class='card' style='margin-top:12px'><h3>{esc(result['model'])} <span class='badge'>{result_badge}</span></h3>"
                     f"<p><b>满足项 / Meets:</b> {esc('；'.join(result['satisfies']) or '—')}</p>"
@@ -3479,9 +3491,15 @@ class Handler(BaseHTTPRequestHandler):
                 cards.append(f"<div class='error'>缺少影响匹配的条件：{esc(', '.join(REQUIREMENT_LABELS.get(key, key) for key in missing))}。系统不会把未知当成满足。</div>")
             if result_status == "no_match":
                 cards.append("<div class='error'>当前已发布产品没有满足全部硬条件的可靠候选，请转人工确认；系统没有把冲突产品标为适用。</div>")
-            if result_status == "needs_confirmation":
-                cards.append("<div class='error'>当前结果包含目录曲线或不可解析条件，系统不会把它当成最终适配；请让工程师确认工作点后再报价。</div>")
-            recommendation_html = f"<div class='notice'><b>匹配结果：</b>{esc(result_label)} · 规则版本 {esc(current_recommendation['rule_version'])}（演示规则，不能替代正式工程选型）</div>" + "".join(cards)
+            tentative_choice = ""
+            if has_tentative and not show_tentative:
+                tentative_choice = (
+                    f"<p><a class='button secondary' href='?show_tentative=1&lang={esc(lang)}'>查看待核实候选 / View tentative candidates</a> "
+                    "<span class='field-state'>待核实候选（未确认适用）仅在您主动查看后展示，不构成适用结论。</span></p>"
+                )
+            elif has_tentative and show_tentative:
+                tentative_choice = "<p class='field-state'>以上标记「待核实」的候选未确认适用，需工程师核对工作点后才能作为选型依据。</p>"
+            recommendation_html = f"<div class='notice'><b>匹配结果：</b>{esc(result_label)} · 规则版本 {esc(current_recommendation['rule_version'])}（演示规则，不能替代正式工程选型）</div>{tentative_choice}" + "".join(cards)
 
         answer_rows = []
         tasks_by_question = {task["question_message_id"]: task for task in tasks}
@@ -3496,7 +3514,7 @@ class Handler(BaseHTTPRequestHandler):
         task_html = "".join(f"<div class='source'><span><b>工程师请求</b> · {esc(task['status'])}<br>{esc(task['question'])}</span></div>" for task in tasks)
         candidate_options = "<option value=''>自动选择当前推荐型号</option>"
         if current_recommendation:
-            for result in json.loads(current_recommendation["results_json"]):
+            for result in visible_results:
                 if result.get("status") in {"candidate", "needs_confirmation"}:
                     candidate_options += f"<option value='{esc(result['product_id'])}'>{esc(result['model'])} · v{esc(result['product_version'])}</option>"
         prefill = {key: values.get(key, {}).get("value", "") for key in ("quantity", "region", "delivery")}

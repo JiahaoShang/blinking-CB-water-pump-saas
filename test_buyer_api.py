@@ -423,10 +423,18 @@ class BuyerApiTests(unittest.TestCase):
         self.assertTrue(explore["results"][0]["detail_url"].startswith("/s/site-a/products/"))
         self.assertIn("温度", "".join(explore["results"][0]["unknown"]))
         self.assertNotIn("CB-120C", models)  # 已知硬冲突不进入候选
-        # 会话刷新后仍只返回可初步推荐层，买方需要再次明确选择
+        # 买方已明确选择查看：刷新或重进会话后保持待核实视图（选择被记住）
         _, _, current = self.request("GET", path, headers=headers)
-        self.assertEqual(current["recommendation"]["results"], [])
+        self.assertEqual([item["model"] for item in current["recommendation"]["results"]], ["CB-80A"])
         self.assertTrue(current["recommendation"]["tentative_available"])
+        # 新一轮确认后的新推荐不沿用旧选择：默认仍只下发可初步推荐层，需再次主动查看
+        adjusted = dict(confirmed["values"])
+        adjusted["quantity"] = {"value": "3", "unit": ""}
+        _, _, reconfirmed = self.request("POST", path + "/requirements/confirm", {"base_revision_id": confirmed["revision_id"], "values": adjusted}, headers)
+        _, _, fresh = self.request("POST", path + "/recommendations", {"revision_id": reconfirmed["revision_id"]}, headers)
+        self.assertEqual(fresh["status"], "needs_confirmation")
+        self.assertEqual(fresh["results"], [])
+        self.assertTrue(fresh["tentative_available"])
 
     def test_recommendation_insufficient_offers_options_and_explore_lists_missing(self):
         self.db.seed_demo_products("demo-tenant")
