@@ -3408,53 +3408,91 @@ class Handler(BaseHTTPRequestHandler):
 
             def lookup_keyed() -> sqlite3.Row | None:
                 return self.db.conn.execute(
-                    "SELECT id, request_hash, result_revision_id FROM messages WHERE tenant_id=? AND conversation_id=? AND idempotency_key=?",
+                    "SELECT id, content, request_hash, result_revision_id FROM messages WHERE tenant_id=? AND conversation_id=? AND idempotency_key=?",
                     (site["tenant_id"], conversation["id"], idempotency_key),
                 ).fetchone()
 
-            def send_duplicate(existing: sqlite3.Row) -> None:
-                draft = None
-                if existing["result_revision_id"]:
-                    stored = self.db.conn.execute(
-                        "SELECT * FROM requirement_revisions WHERE id=? AND tenant_id=?",
-                        (existing["result_revision_id"], site["tenant_id"]),
-                    ).fetchone()
-                    if stored:
-                        values = json.loads(stored["values_json"])
-                        missing = [key for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
-                        askable = [key for key in missing if values.get(key, {}).get("state") != "unknown"]
-                        draft = {"revision_id": stored["id"], "values": values, "missing": missing, "next_question": askable[0] if askable else None}
-                self.send_json({"message_id": existing["id"], "status": "duplicate", "requirement_draft": draft}, 200, origin)
+            def lookup_keyed_revision() -> sqlite3.Row | None:
+                return self.db.conn.execute(
+                    "SELECT id, values_json FROM requirement_revisions WHERE tenant_id=? AND conversation_id=? AND idempotency_key=?",
+                    (site["tenant_id"], conversation["id"], idempotency_key),
+                ).fetchone()
 
+            def draft_payload(values: dict[str, dict[str, str]], revision_id: str) -> dict[str, object]:
+                missing = [key for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
+                askable = [key for key in missing if values.get(key, {}).get("state") != "unknown"]
+                return {"revision_id": revision_id, "values": values, "missing": missing, "next_question": askable[0] if askable else None}
+
+            def attached_draft(existing: sqlite3.Row) -> dict[str, object] | None:
+                """返回消息已附加且仍存在的修订草稿；消息从未生成草稿（首次提取失败）时为 None。"""
+                if not existing["result_revision_id"]:
+                    return None
+                stored = self.db.conn.execute(
+                    "SELECT * FROM requirement_revisions WHERE id=? AND tenant_id=?",
+                    (existing["result_revision_id"], site["tenant_id"]),
+                ).fetchone()
+                return draft_payload(json.loads(stored["values_json"]), stored["id"]) if stored else None
+
+            def hash_conflict(existing: sqlite3.Row) -> bool:
+                return bool(existing["request_hash"]) and not hmac.compare_digest(existing["request_hash"], request_hash)
+
+            message_id = None
+            retrying_saved = False  # 复用首次尝试已存下的消息补生成草稿（当时提取失败）
             if idempotency_key:
                 existing = lookup_keyed()
                 if existing:
-                    if existing["request_hash"] and not hmac.compare_digest(existing["request_hash"], request_hash):
+                    if hash_conflict(existing):
                         self.send_json({"error": "idempotency_conflict"}, 409, origin)
                         return
-                    send_duplicate(existing)
-                    return
-            try:
-                message_id = self.db.save_message(
-                    site["tenant_id"], conversation["id"], "buyer", text_value, "website_api",
-                    idempotency_key=idempotency_key or None, request_hash=request_hash if idempotency_key else None,
-                )
-            except sqlite3.IntegrityError:
-                # 并发同键：另一请求已写入，回滚本次事务并返回已存结果。
-                self.db.conn.rollback()
-                existing = lookup_keyed()
-                if not existing:
-                    raise
-                if existing["request_hash"] and not hmac.compare_digest(existing["request_hash"], request_hash):
-                    self.send_json({"error": "idempotency_conflict"}, 409, origin)
-                    return
-                send_duplicate(existing)
-                return
+                    draft = attached_draft(existing)
+                    if draft:
+                        self.send_json({"message_id": existing["id"], "status": "duplicate", "requirement_draft": draft}, 200, origin)
+                        return
+                    # 首次尝试只落了消息、未生成草稿（如提取失败）：复用已存消息补提取，不重复存消息。
+                    message_id = existing["id"]
+                    text_value = existing["content"]
+                    retrying_saved = True
+            if message_id is None:
+                try:
+                    message_id = self.db.save_message(
+                        site["tenant_id"], conversation["id"], "buyer", text_value, "website_api",
+                        idempotency_key=idempotency_key or None, request_hash=request_hash if idempotency_key else None,
+                    )
+                except sqlite3.IntegrityError:
+                    # 并发同键：另一请求已写入；回滚本次事务后按已存消息继续（含补提取）。
+                    self.db.conn.rollback()
+                    existing = lookup_keyed()
+                    if not existing:
+                        raise
+                    if hash_conflict(existing):
+                        self.send_json({"error": "idempotency_conflict"}, 409, origin)
+                        return
+                    draft = attached_draft(existing)
+                    if draft:
+                        self.send_json({"message_id": existing["id"], "status": "duplicate", "requirement_draft": draft}, 200, origin)
+                        return
+                    message_id = existing["id"]
+                    text_value = existing["content"]
+                    retrying_saved = True
             try:
                 previous = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
                 previous_values = json.loads(previous["values_json"]) if previous else {}
                 values = extract_requirement_values(text_value, {}, previous_values)
-                revision_id = self.db.create_requirement_revision(site["tenant_id"], conversation["id"], values, "candidate", "website_api")
+                revision_id = self.db.create_requirement_revision(
+                    site["tenant_id"], conversation["id"], values, "candidate", "website_api",
+                    idempotency_key=idempotency_key or None, request_hash=request_hash if idempotency_key else None,
+                )
+            except sqlite3.IntegrityError:
+                # 同键并发：另一请求已生成该键的修订；回滚并复用已存修订，不产生第二个草稿。
+                self.db.conn.rollback()
+                stored = lookup_keyed_revision() if idempotency_key else None
+                if stored:
+                    revision_id = stored["id"]
+                    values = json.loads(stored["values_json"])
+                else:
+                    # 其他完整性问题按提取失败处理：消息已保存、可重试，不假装成功。
+                    self.send_json({"error": "extraction_unavailable", "message": "需求提取暂不可用；您的消息已保存，可稍后重试。"}, 503, origin)
+                    return
             except Exception:
                 # 提取失败时消息已保存；不得假装已识别，返回可继续的失败状态供重试。
                 self.send_json({"error": "extraction_unavailable", "message": "需求提取暂不可用；您的消息已保存，可稍后重试。"}, 503, origin)
@@ -3462,12 +3500,11 @@ class Handler(BaseHTTPRequestHandler):
             if idempotency_key:
                 self.db.conn.execute("UPDATE messages SET result_revision_id=? WHERE id=?", (revision_id, message_id))
                 self.db.conn.commit()
-            missing = [key for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
-            askable = [key for key in missing if values.get(key, {}).get("state") != "unknown"]
-            self.send_json(
-                {"message_id": message_id, "status": "saved", "requirement_draft": {"revision_id": revision_id, "values": values, "missing": missing, "next_question": askable[0] if askable else None}}, 201,
-                origin,
-            )
+            draft = draft_payload(values, revision_id)
+            if retrying_saved:
+                self.send_json({"message_id": message_id, "status": "duplicate", "requirement_draft": draft}, 200, origin)
+                return
+            self.send_json({"message_id": message_id, "status": "saved", "requirement_draft": draft}, 201, origin)
             return
         api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/requirements/confirm", path)
         if api_match:

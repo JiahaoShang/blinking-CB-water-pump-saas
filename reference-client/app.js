@@ -15,8 +15,8 @@ let pendingMessage = null;
 $('site-key').value = siteKey;
 
 const words = {
-  en: { connect: 'Connect', quote: 'Request a quote', refresh: 'Refresh replies', send: 'Send', needSite: 'Enter the website key from the seller workspace.', noSession: 'Connect before sending a message.', confirmed: 'Confirmed requirements', draft: 'Check these extracted values before matching', unknown: 'Unknown', confirm: 'Confirm requirements', find: 'Find products', noMatch: 'No reliable candidate. Ask an engineer to review your application.', ask: 'Ask a product question', requestEngineer: 'Ask an engineer to review', rfq: 'RFQ', edit: 'Edit this RFQ', save: 'Submit RFQ', saveEdit: 'Save changes', contact: 'Reply email or phone', confirmContact: 'I confirm this reply contact can be used for this request', quantity: 'Quantity', destination: 'Destination', notes: 'Requirements and notes', error: 'The request did not complete. Your entries remain here; review the message and retry.' },
-  zh: { connect: '连接', quote: '发起询价', refresh: '刷新回复', send: '发送', needSite: '请输入卖家系统提供的网站标识。', noSession: '请先连接，再发送消息。', confirmed: '已确认工况', draft: '请核对提取的工况后再选型', unknown: '不确定', confirm: '确认工况', find: '查找产品', noMatch: '暂无可靠候选，可请求工程师协助核实。', ask: '提出产品问题', requestEngineer: '请求工程师核实', rfq: '询价', edit: '编辑原 RFQ', save: '提交询价', saveEdit: '保存修改', contact: '可回复邮箱或电话', confirmContact: '我确认销售可通过上述方式回复本次请求', quantity: '数量', destination: '目的地', notes: '需求说明', error: '操作未完成。输入内容仍保留，请查看提示后重试。' },
+  en: { connect: 'Connect', quote: 'Request a quote', refresh: 'Refresh replies', send: 'Send', needSite: 'Enter the website key from the seller workspace.', noSession: 'Connect before sending a message.', confirmed: 'Confirmed requirements', draft: 'Check these extracted values before matching', unknown: 'Unknown', confirm: 'Confirm requirements', find: 'Find products', noMatch: 'No reliable candidate. Ask an engineer to review your application.', ask: 'Ask a product question', requestEngineer: 'Ask an engineer to review', rfq: 'RFQ', edit: 'Edit this RFQ', save: 'Submit RFQ', saveEdit: 'Save changes', contact: 'Reply email or phone', confirmContact: 'I confirm this reply contact can be used for this request', quantity: 'Quantity', destination: 'Destination', notes: 'Requirements and notes', error: 'The request did not complete. Your entries remain here; review the message and retry.', noDraft: 'Your message was saved, but the requirements were not extracted yet. Send again to retry — your text is kept.' },
+  zh: { connect: '连接', quote: '发起询价', refresh: '刷新回复', send: '发送', needSite: '请输入卖家系统提供的网站标识。', noSession: '请先连接，再发送消息。', confirmed: '已确认工况', draft: '请核对提取的工况后再选型', unknown: '不确定', confirm: '确认工况', find: '查找产品', noMatch: '暂无可靠候选，可请求工程师协助核实。', ask: '提出产品问题', requestEngineer: '请求工程师核实', rfq: '询价', edit: '编辑原 RFQ', save: '提交询价', saveEdit: '保存修改', contact: '可回复邮箱或电话', confirmContact: '我确认销售可通过上述方式回复本次请求', quantity: '数量', destination: '目的地', notes: '需求说明', error: '操作未完成。输入内容仍保留，请查看提示后重试。', noDraft: '消息已保存，但需求提取尚未完成；请再次发送重试，输入内容已保留。' },
 };
 const t = (key) => words[locale][key];
 function node(tag, className = '', value = '') { const n = document.createElement(tag); if (className) n.className = className; if (value) n.textContent = value; return n; }
@@ -334,7 +334,13 @@ $('message-form').addEventListener('submit', async (event) => {
   if (!conversationId) { showNotice(t('noSession')); return; }
   const value = $('message').value.trim(); if (!value) return;
   if (!pendingMessage || pendingMessage.text !== value) pendingMessage = { key: crypto.randomUUID(), text: value };
-  try { await api(`/conversations/${conversationId}/messages`, 'POST', { text: value }, { 'Idempotency-Key': pendingMessage.key }); pendingMessage = null; $('message').value = ''; await refresh(); }
+  try {
+    const saved = await api(`/conversations/${conversationId}/messages`, 'POST', { text: value }, { 'Idempotency-Key': pendingMessage.key });
+    // 成功但没有草稿（如旧版服务在提取失败后返回 duplicate/null）：不能当作已处理清空输入，
+    // 保留文本与同一提交键，让买家可依提示重试补生成需求草稿。
+    if (!saved.requirement_draft) { showNotice(t('noDraft')); return; }
+    pendingMessage = null; $('message').value = ''; await refresh();
+  }
   catch (error) { showNotice(error.message); }
 });
 $('chat-language').addEventListener('click', () => { locale = locale === 'en' ? 'zh' : 'en'; $('chat-language').textContent = locale === 'en' ? '中文' : 'EN'; $('connect').textContent = t('connect'); $('show-rfq').textContent = t('quote'); $('refresh').textContent = t('refresh'); $('message-form').querySelector('button').textContent = t('send'); render(); });

@@ -1,10 +1,12 @@
 import http.client
+import hashlib
 import json
 import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 from app import Database, Handler, ROOT, console_layout, make_server
@@ -624,6 +626,92 @@ class BuyerApiTests(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertNotEqual(second["message_id"], message_id)
         self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 2)
+
+    def test_message_retry_after_extraction_failure_recovers_draft_once(self):
+        """B-08：提取失败（消息已存、无草稿）后同键重试必须补出草稿；持续故障保持明确失败。"""
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        conversation_id = created["conversation_id"]
+        path = f"/api/v1/buyer/conversations/{conversation_id}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}", "Idempotency-Key": "msg-retry-1"}
+        text = "flow 3 m3/h, head 45 m"
+        # 提取持续故障：首次与重试都明确 503，不得返回假成功
+        with patch("app.extract_requirement_values", side_effect=RuntimeError("提取服务暂不可用")):
+            status, _, first_failed = self.request("POST", path + "/messages", {"text": text}, headers)
+            self.assertEqual(status, 503)
+            self.assertEqual(first_failed["error"], "extraction_unavailable")
+            status, _, retry_failed = self.request("POST", path + "/messages", {"text": text}, headers)
+            self.assertEqual(status, 503, "提取仍不可用时重试必须继续明确失败")
+            self.assertEqual(retry_failed["error"], "extraction_unavailable")
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 1)
+        self.assertEqual(len(self.db.get_revisions("demo-tenant", conversation_id)), 0)
+        # 服务恢复后同键同内容重试：复用已存消息补提取，返回可用 revision
+        status, _, recovered = self.request("POST", path + "/messages", {"text": text}, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(recovered["status"], "duplicate")
+        draft = recovered["requirement_draft"]
+        self.assertTrue(draft and draft["revision_id"])
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 1)
+        revisions = self.db.get_revisions("demo-tenant", conversation_id)
+        self.assertEqual(len(revisions), 1)
+        self.assertEqual(revisions[0]["id"], draft["revision_id"])
+        self.assertEqual(self.db.list_messages("demo-tenant", conversation_id)[0]["result_revision_id"], draft["revision_id"])
+        # 再次重试返回同一消息与同一草稿；不新增消息或修订
+        status, _, again = self.request("POST", path + "/messages", {"text": text}, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(again["message_id"], recovered["message_id"])
+        self.assertEqual(again["requirement_draft"]["revision_id"], draft["revision_id"])
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 1)
+        self.assertEqual(len(self.db.get_revisions("demo-tenant", conversation_id)), 1)
+        # 同键改内容仍是 409，不写入
+        self.assertEqual(self.request("POST", path + "/messages", {"text": "flow 9 m3/h, head 45 m"}, headers)[0], 409)
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 1)
+        self.assertEqual(len(self.db.get_revisions("demo-tenant", conversation_id)), 1)
+
+    def test_message_concurrent_retry_after_failure_creates_single_draft(self):
+        """B-08：故障后两路同键并发重试只产生一个草稿；两路返回同一消息与 revision。"""
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        conversation_id = created["conversation_id"]
+        path = f"/api/v1/buyer/conversations/{conversation_id}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}", "Idempotency-Key": "msg-concurrent-retry"}
+        text = "flow 5 m3/h, head 40 m"
+        with patch("app.extract_requirement_values", side_effect=RuntimeError("提取服务暂不可用")):
+            status, _, _ = self.request("POST", path + "/messages", {"text": text}, headers)
+            self.assertEqual(status, 503)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: self.request("POST", path + "/messages", {"text": text}, headers), range(2)))
+        self.assertEqual(sorted(status for status, _, _ in results), [200, 200])
+        revision_ids = {body["requirement_draft"]["revision_id"] for _, _, body in results}
+        message_ids = {body["message_id"] for _, _, body in results}
+        self.assertEqual(len(revision_ids), 1, "并发重试必须复用同一修订")
+        self.assertEqual(len(message_ids), 1)
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 1)
+        revisions = self.db.get_revisions("demo-tenant", conversation_id)
+        self.assertEqual(len(revisions), 1)
+        self.assertEqual(revisions[0]["id"], revision_ids.pop())
+
+    def test_message_retry_reuses_keyed_revision_when_attach_was_lost(self):
+        """B-08 恢复边界：首次尝试已提交修订但尚未附加到消息（中断窗口）时，重试复用同一修订。"""
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        conversation_id = created["conversation_id"]
+        path = f"/api/v1/buyer/conversations/{conversation_id}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}", "Idempotency-Key": "msg-attach-lost"}
+        text = "flow 12 m3/h, head 40 m"
+        request_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        self.db.save_message(
+            "demo-tenant", conversation_id, "buyer", text, "website_api",
+            idempotency_key="msg-attach-lost", request_hash=request_hash,
+        )
+        existing_revision = self.db.create_requirement_revision(
+            "demo-tenant", conversation_id, {"flow": {"value": "12", "unit": "m³/h"}}, "candidate", "website_api",
+            idempotency_key="msg-attach-lost", request_hash=request_hash,
+        )
+        status, _, retry = self.request("POST", path + "/messages", {"text": text}, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(retry["status"], "duplicate")
+        self.assertEqual(retry["requirement_draft"]["revision_id"], existing_revision)
+        self.assertEqual(len(self.db.get_revisions("demo-tenant", conversation_id)), 1)
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 1)
+        self.assertEqual(self.db.list_messages("demo-tenant", conversation_id)[0]["result_revision_id"], existing_revision)
 
     def test_next_question_skips_buyer_marked_unknown(self):
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
