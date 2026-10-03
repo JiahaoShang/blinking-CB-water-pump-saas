@@ -128,6 +128,11 @@ class HandoffApiTests(unittest.TestCase):
             {"X-Site-Key": "site-a", "Authorization": f"Bearer {token2}", "Idempotency-Key": "handoff-rfq-1"},
         )
         self.assertEqual(status, 201)
+        # 详情页底部表单提交的 RFQ 必须绑定当页具体产品（型号随产品冻结进快照，销售侧据此识别）
+        saved_row = self.db.get_rfq("demo-tenant", saved["rfq_id"])
+        self.assertEqual(saved_row["product_id"], product["id"])
+        self.assertEqual(json.loads(saved_row["snapshot_json"])["recommendation"]["model"], product["model"])
+        self.assertEqual(json.loads(saved_row["snapshot_json"])["entry_surface"], "product_page")
         # 原聊天刷新后看到同一 RFQ
         _, _, current = self.conversation_get(conversation_id, token1)
         self.assertEqual([item["id"] for item in current["rfqs"]], [saved["rfq_id"]])
