@@ -211,6 +211,7 @@ Allowed keys and formats:
 - "delivery": requested delivery timing (short text)
 Hard rules:
 - Include a key only when the message states it explicitly; never guess or copy typical values.
+- If the message gives a number for flow, head or temperature but no unit, omit that key (never assume a unit).
 - Omit any key whose value or unit you are not sure about.
 - Never output other keys. Never add explanations."""
 
@@ -278,7 +279,10 @@ def _format_number(number: float) -> str:
     return text if text not in ("", "-", "-0") else "0"
 
 
-def _normalize_bounded_number(item: dict, forms: set, unit: str, minimum: float, maximum: float, allow_negative: bool = False):
+def _normalize_bounded_number(
+    item: dict, forms: set, unit: str, minimum: float, maximum: float,
+    allow_negative: bool = False, require_unit: bool = True,
+):
     number = _number_value(item.get("value"))
     if number is None:
         return None
@@ -288,7 +292,14 @@ def _normalize_bounded_number(item: dict, forms: set, unit: str, minimum: float,
     elif not 0 < number <= maximum:
         return None
     raw_unit = str(item.get("unit") or "").strip().lower().replace(" ", "")
-    if raw_unit and raw_unit not in forms:
+    if not raw_unit:
+        # 单位缺失：测量类字段（流量/扬程/温度）必须由模型给出受支持的非空单位，缺单位
+        # 即丢弃、保持未知——不补标准单位，避免把「50」这类模型猜测变成确定参数
+        # （买家原话未给单位时可能是 L/s、gpm 或 ft，补 m³/h 会把猜测写死）。
+        if require_unit:
+            return None
+        return _format_number(number), unit
+    if raw_unit not in forms:
         return None  # 无法确认的单位不猜测、不换算，直接丢弃
     return _format_number(number), unit
 
@@ -306,7 +317,9 @@ def _normalize_temperature(item: dict):
 
 
 def _normalize_quantity(item: dict):
-    return _normalize_bounded_number(item, _QUANTITY_UNIT_FORMS, "units", 0, 10_000_000)
+    # 数量是计数（台/套/pcs/units）：空单位不构成技术单位猜测，按计数语义接受并归一为
+    # "units"；非空时仍必须是受支持的计数写法，其他单位（如 kg）一律丢弃。
+    return _normalize_bounded_number(item, _QUANTITY_UNIT_FORMS, "units", 0, 10_000_000, require_unit=False)
 
 
 def _normalize_category(item: dict):
@@ -360,6 +373,9 @@ def normalize_extraction_payload(payload: object) -> dict:
     """校验模型抽取输出：只保留白名单字段且通过单位/结构校验的候选值。
 
     顶层结构不是 ``{"values": {...}}`` 视为模型输出不可用（调用失败）；单条值无效则丢弃该条。
+    流量/扬程/温度必须带受支持的非空单位，缺单位即丢弃（不补默认单位——买家原话未给
+    单位时，补单位会把模型猜测变成确定参数）；数量按计数语义处理（空单位接受为
+    ``units``，非空须为受支持的计数写法）。
     返回 ``{key: {"value": str, "unit": str}}``，不包含任何确认状态。
     """
     if not isinstance(payload, dict) or not isinstance(payload.get("values"), dict):

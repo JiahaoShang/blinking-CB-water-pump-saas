@@ -2442,7 +2442,8 @@ ANSWER_FIELD_TEMPLATES = {
     "temperature": "资料标注的介质温度范围是 {value}{unit}。",
     "performance_points": "资料中的目录性能点（流量:扬程）是：{value}{unit}。最终工作点需工程师确认。",
 }
-# 规则模式的提问关键词 → 字段；deepseek 模式下由模型做同样的判断。
+# 规则模式的提问关键词 → 字段；deepseek 模式下由模型做同样的判断，并用同一张表做
+# 字段冲突防护（模型选出的字段与提问明确字段冲突时不按该字段作答，见 guard_answer_field_selection）。
 ANSWER_QUESTION_TOKENS = (
     (("flow", "流量"), "flow_range"),
     (("head", "扬程"), "head_range"),
@@ -2452,6 +2453,48 @@ ANSWER_QUESTION_TOKENS = (
     (("temperature", "温度", "temperature"), "temperature"),
     (("性能", "曲线", "performance", "catalogue"), "performance_points"),
 )
+
+
+def _answer_question_token_pattern(tokens: tuple) -> re.Pattern:
+    parts = []
+    for token in tokens:
+        escaped = re.escape(token)
+        # 英文关键词按词边界匹配（避免 "head" 误中 "overhead"/"header"）；中文无词边界，按子串匹配。
+        parts.append(rf"\b{escaped}\b" if token.isascii() else escaped)
+    return re.compile("|".join(parts))
+
+
+_ANSWER_QUESTION_FIELD_PATTERNS = tuple(
+    (key, _answer_question_token_pattern(tokens)) for tokens, key in ANSWER_QUESTION_TOKENS
+)
+
+
+def explicit_answer_fields(question: str) -> list[str]:
+    """提问中明确可识别的泵参数字段（与规则模式同一张关键词表；英文按词边界）。
+
+    只用于判断「模型选出的字段是否与买家明确问到的字段冲突」；没有明确字段的问题
+    返回空列表（不做任何推断，维持模型选择）。
+    """
+    text = str(question or "").lower()
+    return [key for key, pattern in _ANSWER_QUESTION_FIELD_PATTERNS if pattern.search(text)]
+
+
+def guard_answer_field_selection(question: str, selected: str | None, available_keys: set) -> str | None:
+    """最小防护：模型选出的字段与提问明确字段冲突时，不按该字段作答。
+
+    - 模型给出 none：维持原有语义（转待核实），不据此追加回答；
+    - 问题没有明确字段、或模型选择正是明确字段之一：维持模型选择；
+    - 冲突时：仅当提问只含一个明确字段且该字段已发布时，确定性路由到该字段
+      （与规则模式同一张表），其余情形转待核实——绝不答非所问。
+    """
+    if selected is None:
+        return None
+    explicit = explicit_answer_fields(question)
+    if not explicit or selected in explicit:
+        return selected
+    if len(explicit) == 1 and explicit[0] in available_keys:
+        return explicit[0]
+    return None
 
 
 def build_record_answer(
@@ -2587,6 +2630,9 @@ def answer_question_with_mode(
 
     最终数值、答案文本与引用必须由后端从该产品的已发布快照构造（build_record_answer）；
     模型给出 none 或其选择不在已核准、已发布字段内时按「没有可用依据」转人工核实。
+    模型字段与提问的明确字段冲突时（如买家问扬程、模型选流量），先经
+    guard_answer_field_selection：只有一个明确字段且已发布则按该字段回答，否则转待核实，
+    绝不把冲突字段作为已答输出。
     模型超时/限流等失败向上抛出：不保存假答案、不创建人工任务，重试后可继续。
     """
     if ai is None or ai.mode != ai_client.MODE_DEEPSEEK:
@@ -2611,6 +2657,7 @@ def answer_question_with_mode(
         log_ai_call(db, tenant_id, conversation_id, AI_TASK_ANSWER, ai, error=error)
         raise
     log_ai_call(db, tenant_id, conversation_id, AI_TASK_ANSWER, ai, meta=meta)
+    selected = guard_answer_field_selection(question, selected, {item["key"] for item in allowed})
     if not selected or not fields.get(selected) or not str(fields[selected].get("value", "")).strip():
         return "needs_human", NO_APPROVED_BASIS_ANSWER, product_id, version["id"], [], "资料缺少对应字段或问题需要工程判断"
     answer, citation = build_record_answer(db, tenant_id, selected, fields[selected], version)
