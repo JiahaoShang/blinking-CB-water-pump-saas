@@ -63,6 +63,24 @@ class BuyerConversationAccessTests(unittest.TestCase):
         self.assertEqual(self.request("POST", path + "/rfq", with_contact, cookie)[0], 303)
         self.assertEqual(len(self.server.RequestHandlerClass.db.list_rfqs("demo-tenant")), 1)
 
+    def test_unresolved_question_creates_task_only_after_buyer_requests_it(self):
+        _, headers, _ = self.request("GET", "/inquiry")
+        path = headers["Location"].split("?", 1)[0]
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        self.assertEqual(self.request("POST", path + "/ask", urlencode({"question": "Can you confirm the price?"}), cookie)[0], 303)
+        db = self.server.RequestHandlerClass.db
+        conversation_id = path.rsplit("/", 1)[1]
+        answer = db.list_answers("demo-tenant", conversation_id)[0]
+        self.assertEqual(answer["answer_status"], "needs_human")
+        self.assertEqual(len(db.list_human_tasks("demo-tenant")), 0)
+        self.assertIn("Ask an engineer", self.request("GET", path, cookie=cookie)[2])
+
+        body = urlencode({"answer_id": answer["id"]})
+        self.assertEqual(self.request("POST", path + "/human-request", body, cookie)[0], 303)
+        self.assertEqual(self.request("POST", path + "/human-request", body, cookie)[0], 303)
+        self.assertEqual(len(db.list_human_tasks("demo-tenant")), 1)
+        self.assertIn("pending", self.request("GET", path, cookie=cookie)[2])
+
 
 if __name__ == "__main__":
     unittest.main()

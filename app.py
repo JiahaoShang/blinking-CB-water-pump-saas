@@ -675,6 +675,12 @@ class Database:
         requirement_revision_id: str | None = None,
         recommendation_id: str | None = None,
     ) -> str:
+        existing = self.conn.execute(
+            "SELECT id FROM human_tasks WHERE tenant_id=? AND conversation_id=? AND question_message_id=?",
+            (tenant_id, conversation_id, question_message_id),
+        ).fetchone()
+        if existing:
+            return existing["id"]
         task_id = secrets.token_hex(12)
         timestamp = now_iso()
         self.conn.execute(
@@ -684,6 +690,34 @@ class Database:
         self._audit(tenant_id, "human_task", task_id, "created", "rule-based-answer", reason)
         self.conn.commit()
         return task_id
+
+    def request_human_review(self, tenant_id: str, conversation_id: str, answer_id: str) -> str:
+        answer = self.conn.execute(
+            "SELECT * FROM answers WHERE tenant_id=? AND conversation_id=? AND id=? AND answer_status='needs_human'",
+            (tenant_id, conversation_id, answer_id),
+        ).fetchone()
+        if not answer:
+            raise ValueError("没有可请求人工核实的未解问题")
+        question = self.conn.execute(
+            "SELECT content FROM messages WHERE tenant_id=? AND conversation_id=? AND id=? AND role='buyer'",
+            (tenant_id, conversation_id, answer["question_message_id"]),
+        ).fetchone()
+        if not question:
+            raise ValueError("原始问题不存在")
+        revision = self.get_latest_revision(tenant_id, conversation_id)
+        recommendation = self.latest_active_recommendation(tenant_id, conversation_id)
+        context = {
+            "requirement_revision_id": revision["id"] if revision else None,
+            "confirmed_requirements": json.loads(revision["values_json"]) if revision and revision["status"] == "confirmed" else {},
+            "recommendation_id": recommendation["id"] if recommendation else None,
+            "product_version_id": answer["product_version_id"],
+            "answer_so_far": answer["answer_text"],
+        }
+        return self.create_human_task(
+            tenant_id, conversation_id, answer["question_message_id"], question["content"],
+            "资料未覆盖或需要工程判断", context, answer["product_id"], answer["product_version_id"],
+            revision["id"] if revision else None, recommendation["id"] if recommendation else None,
+        )
 
     def list_human_tasks(self, tenant_id: str, status: str | None = None) -> list[sqlite3.Row]:
         query = (
@@ -1392,12 +1426,12 @@ def answer_from_approved_material(
     question_lower = question.lower()
     forbidden = ("price", "cost", "quote", "price", "价格", "报价", "库存", "stock", "delivery", "lead time", "shipping", "交期", "交货", "到货", "认证", "certificate", "certification")
     if any(token in question_lower for token in forbidden):
-        return "needs_human", "这个问题涉及价格、库存、交期或认证等资料外信息，当前无法从核准产品资料确认。我们已把问题转给工程师。", product_id, None, [], "资料不包含商业承诺或认证判断"
+        return "needs_human", "关于价格、库存、交期或认证，我手上的核准资料还无法确认。若您希望工程师核实，可点击下方按钮；提交后可回到本对话查看回复。", product_id, None, [], "资料不包含商业承诺或认证判断"
 
     product = db.get_product(tenant_id, product_id) if product_id else None
     version = db.get_published_version(tenant_id, product_id) if product_id else None
     if not product or not version:
-        return "needs_human", "当前没有可引用的已发布产品版本，无法确认这个问题。我们已把问题转给工程师。", product_id, None, [], "没有可引用的已发布产品版本"
+        return "needs_human", "目前没有可引用的已发布产品资料，我还不能确认这个问题。若您希望继续核实，可请求工程师查看。", product_id, None, [], "没有可引用的已发布产品版本"
 
     snapshot = json.loads(version["snapshot_json"])
     fields = {field["field_key"]: field for field in snapshot.get("fields", [])}
@@ -1418,7 +1452,7 @@ def answer_from_approved_material(
             template = candidate_template
             break
     if not selected_key or not fields.get(selected_key) or not fields[selected_key].get("value", "").strip():
-        return "needs_human", "核准资料中没有足够依据回答这个问题。我们不会猜测参数，已把问题转给工程师确认。", product_id, version["id"], [], "资料缺少对应字段或问题需要工程判断"
+        return "needs_human", "现有核准资料没有足够依据回答这个问题，参数还需要核实。若您愿意，我可以在您点击请求后请工程师查看。", product_id, version["id"], [], "资料缺少对应字段或问题需要工程判断"
 
     field = fields[selected_key]
     citation = {
@@ -1668,7 +1702,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/admin/") and not self.authorize_admin(path, "POST"):
             return
-        buyer_match = re.fullmatch(r"/inquiry/([a-f0-9]+)/(message|confirm|ask|rfq)", path)
+        buyer_match = re.fullmatch(r"/inquiry/([a-f0-9]+)/(message|confirm|ask|human-request|rfq)", path)
         if buyer_match and not self.authorize_buyer_conversation(buyer_match.group(1)):
             return
         try:
@@ -1758,7 +1792,6 @@ class Handler(BaseHTTPRequestHandler):
                 question_message_id = self.db.save_message(self.tenant_id, conversation_id, "buyer", question, "buyer_web")
                 selected_product_id = str(form.get("product_id", "")).strip() or None
                 recommendation = self.db.latest_active_recommendation(self.tenant_id, conversation_id)
-                latest_revision = self.db.get_latest_revision(self.tenant_id, conversation_id)
                 result_for_product = None
                 if recommendation:
                     recommendation_results = json.loads(recommendation["results_json"])
@@ -1767,20 +1800,16 @@ class Handler(BaseHTTPRequestHandler):
                     if not result_for_product:
                         result_for_product = next((result for result in recommendation_results if result.get("status") in {"candidate", "needs_confirmation"}), None)
                     selected_product_id = (result_for_product or {}).get("product_id") or selected_product_id
-                answer_status, answer_text, answered_product_id, product_version_id, citations, reason = answer_from_approved_material(self.db, self.tenant_id, question, selected_product_id)
-                self.db.save_message(self.tenant_id, conversation_id, "assistant", answer_text, "grounded-answer" if answer_status == "grounded" else "human-handoff")
+                answer_status, answer_text, answered_product_id, product_version_id, citations, _reason = answer_from_approved_material(self.db, self.tenant_id, question, selected_product_id)
+                self.db.save_message(self.tenant_id, conversation_id, "assistant", answer_text, "grounded-answer" if answer_status == "grounded" else "unresolved-question")
                 self.db.save_answer(self.tenant_id, conversation_id, question_message_id, answered_product_id, product_version_id, answer_status, answer_text, citations)
-                if answer_status == "needs_human":
-                    context = {
-                        "requirement_revision_id": latest_revision["id"] if latest_revision else None,
-                        "confirmed_requirements": json.loads(latest_revision["values_json"]) if latest_revision else {},
-                        "recommendation_id": recommendation["id"] if recommendation else None,
-                        "product_model": result_for_product.get("model") if result_for_product else None,
-                        "product_version_id": product_version_id,
-                        "answer_so_far": answer_text,
-                    }
-                    self.db.create_human_task(self.tenant_id, conversation_id, question_message_id, question, reason, context, answered_product_id, product_version_id, latest_revision["id"] if latest_revision else None, recommendation["id"] if recommendation else None)
                 self.redirect(f"/inquiry/{conversation_id}?notice=answer")
+                return
+            match = re.fullmatch(r"/inquiry/([a-f0-9]+)/human-request", path)
+            if match:
+                conversation_id = match.group(1)
+                self.db.request_human_review(self.tenant_id, conversation_id, str(form.get("answer_id", "")))
+                self.redirect(f"/inquiry/{conversation_id}?notice=human-request")
                 return
             match = re.fullmatch(r"/inquiry/([a-f0-9]+)/rfq", path)
             if match:
@@ -1988,13 +2017,16 @@ class Handler(BaseHTTPRequestHandler):
             recommendation_html = f"<div class='notice'><b>匹配结果：</b>{esc(result_label)} · 规则版本 {esc(current_recommendation['rule_version'])}（演示规则，不能替代正式工程选型）</div>" + "".join(cards)
 
         answer_rows = []
+        tasks_by_question = {task["question_message_id"]: task for task in tasks}
         for answer in answers:
             citations = json.loads(answer["citations_json"])
             citation_html = "".join(f"<div class='field-state'>引用：{esc(citation.get('filename'))} · {esc(citation.get('location'))} · 产品版本 {esc(citation.get('product_version'))}</div>" for citation in citations)
-            state_label = "有据回答" if answer["answer_status"] == "grounded" else "已转人工"
-            answer_rows.append(f"<div class='source'><span><b>{state_label}</b><br>{esc(answer['answer_text'])}{citation_html}</span><span class='field-state'>{esc(answer['created_at'])}</span></div>")
+            task = tasks_by_question.get(answer["question_message_id"])
+            state_label = "有据回答" if answer["answer_status"] == "grounded" else "待核实" if not task else "已请求工程师"
+            request_button = f"<form method='post' action='/inquiry/{conversation_id}/human-request'><input type='hidden' name='answer_id' value='{esc(answer['id'])}'><button class='secondary'>Ask an engineer / 请求工程师核实</button></form>" if answer["answer_status"] == "needs_human" and not task else ""
+            answer_rows.append(f"<div class='source'><span><b>{state_label}</b><br>{esc(answer['answer_text'])}{citation_html}{request_button}</span><span class='field-state'>{esc(answer['created_at'])}</span></div>")
         answer_html = "".join(answer_rows) or "<p class='muted'>还没有问答记录。</p>"
-        task_html = "".join(f"<div class='source'><span><b>人工任务</b> · {esc(task['status'])}<br>{esc(task['question'])}</span><a href='/admin/tasks/{task['id']}' target='_blank'>查看处理状态</a></div>" for task in tasks)
+        task_html = "".join(f"<div class='source'><span><b>工程师请求</b> · {esc(task['status'])}<br>{esc(task['question'])}</span></div>" for task in tasks)
         candidate_options = "<option value=''>自动选择当前推荐型号</option>"
         if current_recommendation:
             for result in json.loads(current_recommendation["results_json"]):
@@ -2009,7 +2041,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class='grid'><section class='card'><h2>Describe your application</h2><p class='muted'>Tell us the pump use, flow, head and medium in your own words. Structured values are candidates until you confirm them.</p><form method='post' action='/inquiry/{conversation_id}/message'><label>Your message / 需求原话 *</label><textarea name='message' required placeholder='Example: I need a water pump for cooling water, flow 50 m³/h and head 30 m.'></textarea><p><button>Save message and extract fields</button></p></form><hr><h3>Conversation</h3>{message_rows}</section>
 <section class='card'><h2>Requirement summary</h2>{missing_html}<form method='post' action='/inquiry/{conversation_id}/confirm'><div class='form-grid'>{input_fields}</div><p><button>Confirm summary and match</button></p></form><table><thead><tr><th>Field</th><th>Value</th><th>State</th></tr></thead><tbody>{summary_rows}</tbody></table></section></div>
 <section class='card' style='margin-top:18px'><h2>Recommendations</h2>{recommendation_html}</section>
-<section class='card' style='margin-top:18px'><h2>Ask about the recommended product</h2><p class='muted'>资料内问题会显示引用；价格、交期、认证或资料外问题不会被猜测，会生成后台人工任务。</p><form method='post' action='/inquiry/{conversation_id}/ask'><label>Product context</label><select name='product_id'>{candidate_options}</select><label>Your question / 技术问题 *</label><textarea name='question' required placeholder='Example: What is the flow range? Or ask about price, stock, certification to test handoff.'></textarea><p><button>Ask and save answer</button></p></form><h3>Answers and handoff</h3>{answer_html}{task_html}</section>
+<section class='card' style='margin-top:18px'><h2>Ask about the recommended product</h2><p class='muted'>资料内问题显示出处。资料外问题先保存为待核实；只有您点击“请求工程师核实”后才会交给工程师，在此对话查看回复无需另留联系方式。</p><form method='post' action='/inquiry/{conversation_id}/ask'><label>Product context</label><select name='product_id'>{candidate_options}</select><label>Your question / 技术问题 *</label><textarea name='question' required placeholder='Example: What is the flow range? Or ask about price, stock, certification to test handoff.'></textarea><p><button>Ask and save answer</button></p></form><h3>Answers and handoff</h3>{answer_html}{task_html}</section>
 <section class='card' style='margin-top:18px'><h2>Request for quotation (RFQ)</h2><p class='muted'>您可以随时提交询价，无须先完成选型。请至少提供邮箱或电话，方便销售回复；已确认的工况会随询价保存，缺少的技术或商务信息会标为待补充。</p><form method='post' action='/inquiry/{conversation_id}/rfq'><input type='hidden' name='submission_key' value='{esc(submission_key)}'><div class='form-grid'><div><label>Product / 产品</label><select name='product_id'>{candidate_options}</select></div><div><label>Contact name / 联系人</label><input name='contact_name' placeholder='Your name'></div><div><label>Company / 公司</label><input name='company' placeholder='Company name'></div><div><label>Email / 邮箱</label><input name='contact_email' type='email' placeholder='you@example.com'></div><div><label>Phone / 电话</label><input name='contact_phone' placeholder='+49 ...'></div><div><label>Quantity / 数量</label><input name='quantity' value='{esc(prefill['quantity'])}' placeholder='e.g. 2'></div><div><label>Destination / 目的地</label><input name='region' value='{esc(prefill['region'])}' placeholder='e.g. Germany'></div><div><label>Expected delivery / 期望交期</label><input name='delivery' value='{esc(prefill['delivery'])}' placeholder='e.g. 8 weeks'></div><div class='full'><label>Notes / 补充说明</label><textarea name='notes' placeholder='Additional operating conditions or questions'></textarea></div></div><p><button>Save RFQ / 提交询价</button></p></form></section>
 <div class='footer-note'>产品页面、推荐和后续 chatbot 都只读取已核准并已发布的产品版本。当前规则是透明的水泵演示规则，正式阈值需由企业工程师确认。</div>
 """
