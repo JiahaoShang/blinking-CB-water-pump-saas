@@ -17,6 +17,17 @@ python3 app.py --host 127.0.0.1 --port 8000 --db data/app.db
 
 参考聊天推荐的产品页使用 `/s/{网站标识}/products/{型号路径}`。同一浏览器、同一站点下，详情页底部表单会复用原聊天会话并调用同一 RFQ API；直接打开该链接的买家会在提交时建立自己的会话。演示页面的技术资料、文案与视觉仍需按 M2 验收，不可把当前页面作为正式对外产品页。
 
+## 本地备份与隔离恢复检查
+
+在应用使用本地 SQLite 和 `data/uploads/` 时，可用下列命令制作数据库一致性快照，并将数据库与上传文件恢复到**新的隔离目录**检查。备份与恢复目标须是尚不存在的路径，并放在仓库外或已忽略的 `data/` 内。
+
+```sh
+python3 tools/backup_restore.py backup --db data/app.db --uploads data/uploads --out data/backup-001
+python3 tools/backup_restore.py restore-check --bundle data/backup-001 --out data/restore-check-001
+```
+
+工具使用 SQLite 在线备份接口，核对文件哈希和恢复后数据库完整性，并报告可恢复的 RFQ 与有文件的资料数量。它是本地演练工具，**不是**自动定时备份、异地保存或真实试点部署方案；首次使用真实资料前，仍须选择托管存储和备份策略，实际演练恢复并记录耗时和最后可恢复记录。
+
 ## 当前开发约束
 
 - GitHub 旧代码是测试材料，原有单元测试通过不代表符合当前用户旅程；尤其是人工请求、RFQ、公开页面、API、匿名会话权限和销售记录仍需修正。
