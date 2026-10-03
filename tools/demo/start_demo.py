@@ -40,7 +40,7 @@ def main() -> None:
     result = seed(db_path, reset=args.reset)
     site_key = str(result.get("site_key", SITE_KEY))
     buyer_url = f"http://{args.host}:{args.port}/reference-client?site_key={site_key}"
-    admin_url = f"http://{args.host}:{args.port}/admin/login"
+    admin_url = f"http://{args.host}:{args.port}/login"
 
     print("=" * 66)
     print("演示环境就绪" + ("（复用现有演示库；状态乱了加 --reset 重建）" if result.get("skipped") else "（演示库已构建）"))

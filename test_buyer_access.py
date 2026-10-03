@@ -175,6 +175,23 @@ class BuyerConversationAccessTests(unittest.TestCase):
         self.assertIn("编辑询价", page)
         self.assertNotIn("quantity: 2 → 3", page)
 
+    def test_login_entry_routes_resolve_without_loop(self):
+        """/admin/login 是别名不再自我循环；已登录访问 /login 直接进后台。"""
+        status, headers, _ = self.request("GET", "/admin/login")
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "/login?next=/admin")
+        # 旧表单携带 next=/admin/login 登录：成功且回到后台（不再被弹到 403 路径）
+        body = urlencode({"email": "demo-admin@example.invalid", "password": "demo-admin", "next": "/admin/login"})
+        status, headers, _ = self.request("POST", "/login", body)
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "/admin")
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        # 已登录再访问 /login：直接进后台首页
+        status, headers, _ = self.request("GET", "/login", cookie=cookie)
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "/admin")
+        self.assertEqual(self.request("GET", "/admin", cookie=cookie)[0], 200)
+
 
 if __name__ == "__main__":
     unittest.main()

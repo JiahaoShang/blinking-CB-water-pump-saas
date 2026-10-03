@@ -2442,6 +2442,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def login_page(self, query: dict[str, list[str]], error: str = "") -> None:
+        if self.current_user():
+            self.redirect("/admin")
+            return
         next_path = query.get("next", ["/admin/sales"])[0]
         error_html = f"<div class='error'>{esc(error)}</div>" if error else ""
         body = f"""
@@ -2455,8 +2458,9 @@ class Handler(BaseHTTPRequestHandler):
             self.login_page({"next": [str(form.get("next", "/admin/sales"))]}, "邮箱或密码不正确")
             return
         next_path = str(form.get("next", "/admin/sales"))
-        if not next_path.startswith("/") or next_path.startswith("//"):
-            next_path = "/admin/sales"
+        if not next_path.startswith("/") or next_path.startswith("//") or next_path.startswith("/login") or next_path.startswith("/admin/login"):
+            # 登录页自身或非法目标：回到后台首页，避免登录成功后跳进登录相关路径
+            next_path = "/admin"
         session_id = self.db.create_session(user)
         self.redirect(next_path, f"cb_session={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200")
 
@@ -2468,6 +2472,10 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         query = parse_qs(parsed.query)
+        if path == "/admin/login":
+            # /admin/login 不是真实页面：统一引导到登录页，登录后回后台首页（避免登录成功后被弹回本路径造成 403）
+            self.redirect("/login?next=/admin")
+            return
         reference_files = {
             "/reference-client": ("index.html", "text/html; charset=utf-8"),
             "/reference-client/app.js": ("app.js", "text/javascript; charset=utf-8"),
