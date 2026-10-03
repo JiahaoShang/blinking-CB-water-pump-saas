@@ -760,6 +760,37 @@ class Database:
             (tenant_id, product_id),
         )}
 
+    def public_downloadable_ids(self, tenant_id: str, product_id: str) -> set[str]:
+        """Source ids the current published version may actually expose to the public.
+
+        All three conditions must hold: the file is listed in the current published
+        snapshot, it still has a live public-download permission, and its live
+        attribution scope equals the scope recorded in that snapshot. Correcting a
+        scope revokes the permission and invalidates the old version's mapping
+        (see set_source_scope), so an outdated “本型号/系列” label can never keep
+        being served from a stale snapshot.
+        """
+        version = self.get_published_version(tenant_id, product_id)
+        if not version:
+            return set()
+        snapshot_scopes = {
+            entry["id"]: entry.get("scope")
+            for entry in json.loads(version["snapshot_json"]).get("public_sources", [])
+        }
+        allowed = self.public_source_ids(tenant_id, product_id)
+        live_scopes = {
+            row["id"]: row["scope"]
+            for row in self.conn.execute(
+                "SELECT id, scope FROM source_documents WHERE tenant_id=? AND product_id=?",
+                (tenant_id, product_id),
+            )
+        }
+        return {
+            source_id
+            for source_id, snapshot_scope in snapshot_scopes.items()
+            if source_id in allowed and live_scopes.get(source_id) == snapshot_scope
+        }
+
     def allow_public_source(self, tenant_id: str, product_id: str, source_id: str, actor: str) -> None:
         source = self.conn.execute(
             "SELECT id, storage_path, scope FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
@@ -1500,7 +1531,17 @@ class Database:
         self.conn.commit()
         return source_id
 
-    def set_source_scope(self, tenant_id: str, product_id: str, source_id: str, scope: str, actor: str = "demo-admin") -> None:
+    def set_source_scope(self, tenant_id: str, product_id: str, source_id: str, scope: str, actor: str = "demo-admin") -> dict[str, bool]:
+        """Correct a source file's attribution scope.
+
+        A scope correction changes what the published snapshot's scope label
+        (“本型号/系列”) means for this file. When the file currently carries a
+        public-download permission, that permission is revoked immediately, so the
+        old version stops serving the file on the public page, the download route
+        and the public JSON (all consult public_downloadable_ids). Renewed public
+        display requires a fresh permission approval plus a new published version
+        that records the corrected scope.
+        """
         if scope not in SOURCE_SCOPES:
             raise ValueError("文件归属范围无效")
         source = self.conn.execute(
@@ -1509,11 +1550,28 @@ class Database:
         ).fetchone()
         if not source:
             raise ValueError("来源文件不属于当前产品")
-        if scope == "unknown" and source_id in self.public_source_ids(tenant_id, product_id):
+        previous_scope = source["scope"]
+        if scope == previous_scope:
+            return {"changed": False, "public_permission_revoked": False}
+        public_ids = self.public_source_ids(tenant_id, product_id)
+        if scope == "unknown" and source_id in public_ids:
             raise ValueError("该文件已开放公开下载；请先撤销公开许可，再标记为归属未核对")
+        public_permission_revoked = source_id in public_ids
+        if public_permission_revoked:
+            # 归属口径已变，旧快照不得继续以旧口径公开该文件；重新公开须走
+            # 重新核准 + 重新发布（见 public_downloadable_ids 的三重条件）。
+            self.conn.execute(
+                "DELETE FROM public_source_permissions WHERE tenant_id=? AND product_id=? AND source_id=?",
+                (tenant_id, product_id, source_id),
+            )
+            self._audit(
+                tenant_id, "source_document", source_id, "public_permission_revoked_on_scope_change",
+                actor, f"{previous_scope} -> {scope}",
+            )
         self.conn.execute("UPDATE source_documents SET scope=? WHERE id=?", (scope, source_id))
-        self._audit(tenant_id, "source_document", source_id, "scope_updated", actor, scope)
+        self._audit(tenant_id, "source_document", source_id, "scope_updated", actor, f"{previous_scope} -> {scope}")
         self.conn.commit()
+        return {"changed": True, "public_permission_revoked": public_permission_revoked}
 
     def rerun_source_extraction(self, tenant_id: str, product_id: str, source_id: str, actor: str = "demo-admin") -> None:
         source = self.conn.execute(
@@ -2634,7 +2692,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "product_not_found"}, 404, origin)
                 return
             snapshot = json.loads(version["snapshot_json"])
-            allowed_source_ids = self.db.public_source_ids(tenant_id, product["id"])
+            allowed_source_ids = self.db.public_downloadable_ids(tenant_id, product["id"])
             db_source_rows = {row["id"]: row for row in self.db.get_sources(tenant_id, product["id"])}
             public_files = []
             for entry in snapshot.get("public_sources", []):
@@ -3558,7 +3616,9 @@ class Handler(BaseHTTPRequestHandler):
                 elif action == "revoke-public":
                     self.db.revoke_public_source(self.tenant_id, product_id, source_id, self.actor)
                 elif action == "scope":
-                    self.db.set_source_scope(self.tenant_id, product_id, source_id, str(form.get("scope", "")), self.actor)
+                    scope_result = self.db.set_source_scope(self.tenant_id, product_id, source_id, str(form.get("scope", "")), self.actor)
+                    if scope_result.get("public_permission_revoked"):
+                        action = "scope-revoked"
                 else:
                     self.db.rerun_source_extraction(self.tenant_id, product_id, source_id, self.actor)
                 self.redirect(f"/admin/products/{product_id}?notice={action}")
@@ -3661,6 +3721,7 @@ class Handler(BaseHTTPRequestHandler):
             "source": "来源已保存。已上传的文件已按内容尝试抽取；请核对下方提取结果后逐项处理。",
             "source-permission": "文件公开权限已更新；新文件在下次发布后才会进入买方页。",
             "scope": "文件归属已更新。",
+            "scope-revoked": "文件归属已更新；原公开许可已自动撤销，旧版本不再展示该文件。如需重新公开，请重新确认许可并发布新版本。",
             "extract": "文件已按内容重新解析，结果在来源区显示。",
             "field": "字段已保存为候选值，需逐项核准或驳回后才能完成核对。",
             "field-approve": "字段已核准。",
@@ -4324,11 +4385,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         snapshot = json.loads(version["snapshot_json"])
         sources = self.db.get_sources(tenant_id, product["id"])
-        allowed_source_ids = self.db.public_source_ids(tenant_id, product["id"])
+        allowed_source_ids = self.db.public_downloadable_ids(tenant_id, product["id"])
         db_source_rows = {source["id"]: source for source in sources}
         # The published version freezes the model-file mapping: files approved for
         # public download after this publication only appear after the next release.
-        # Live permission revocation still hides a file immediately for safety.
+        # Live permission revocation still hides a file immediately for safety, and
+        # a scope correction invalidates this version's mapping until republish
+        # (public_downloadable_ids requires snapshot scope == live scope).
         published_sources = []
         for entry in snapshot.get("public_sources", []):
             row = db_source_rows.get(entry["id"])
@@ -4470,16 +4533,10 @@ class Handler(BaseHTTPRequestHandler):
             "SELECT * FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
             (tenant_id, product["id"], source_id),
         ).fetchone()
-        if not source or not source["storage_path"] or source_id not in self.db.public_source_ids(tenant_id, product["id"]):
-            self.send_html(layout("资料不可用", "<div class='error'>该来源资料没有可下载文件。</div>"), 404)
-            return
-        version = self.db.get_published_version(tenant_id, product["id"])
-        if not version:
-            self.send_html(layout("资料不可用", "<div class='error'>产品未公开。</div>", public=True), 404)
-            return
-        snapshot = json.loads(version["snapshot_json"])
-        if source_id not in {entry["id"] for entry in snapshot.get("public_sources", [])}:
-            self.send_html(layout("资料不可用", "<div class='error'>该来源资料未纳入当前公开版本。</div>", public=True), 404)
+        # 许可、快照收录与当前归属三者一致才可服务；归属修正会立即撤销许可，
+        # 旧版本在重新核准并发布新版本之前不再出现该文件（见 set_source_scope）。
+        if not source or not source["storage_path"] or source_id not in self.db.public_downloadable_ids(tenant_id, product["id"]):
+            self.send_html(layout("资料不可用", "<div class='error'>该来源资料没有可下载文件、未纳入当前公开版本，或归属已修正待重新发布。</div>"), 404)
             return
         target = ROOT / source["storage_path"]
         if not target.is_file():

@@ -61,10 +61,15 @@ def main() -> None:
                 continue
             if item.get("scope") not in ("exact_model", "series"):
                 gaps.append(f"{label}: 归属 scope={item.get('scope')} 不在可公开范围")
-            source = conn.execute("SELECT sha256, storage_path FROM source_documents WHERE id=?", (item["id"],)).fetchone()
+            source = conn.execute("SELECT sha256, storage_path, scope FROM source_documents WHERE id=?", (item["id"],)).fetchone()
             if not source or not source["storage_path"]:
                 gaps.append(f"{label}: 缺少本地存储路径")
                 continue
+            if source["scope"] != item.get("scope"):
+                gaps.append(
+                    f"{label}: 归属口径与发布快照不一致（快照 {item.get('scope')} / 当前 {source['scope']}）；"
+                    "该文件不应再按旧版本公开，需重新核准并发布新版本"
+                )
             file_path = ROOT / source["storage_path"]
             if not file_path.is_file():
                 gaps.append(f"{label}: 存储文件不存在（{source['storage_path']}）")
@@ -92,7 +97,7 @@ def main() -> None:
     if register is None:
         print("提示：未提供厂方授权清单（--register）。机器校验通过也仅代表平台内部一致，")
         print("      试点前必须补充厂方书面授权清单并重新运行本脚本。")
-    print("结果：", "PASS — 公开文件全部有许可、哈希与可读文件" if not gaps else f"FAIL — {len(gaps)} 处缺口")
+    print("结果：", "PASS — 公开文件全部有许可、哈希、可读文件，且归属与快照一致" if not gaps else f"FAIL — {len(gaps)} 处缺口")
     for gap in gaps:
         print("  缺口:", gap)
     raise SystemExit(0 if not gaps else 1)
