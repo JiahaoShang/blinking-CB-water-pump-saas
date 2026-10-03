@@ -170,6 +170,21 @@ class GroundedAnswerTests(unittest.TestCase):
         field = self.db.get_fields("demo-tenant", self.product["id"])[0]
         self.assertNotEqual(field["value"], "工程师需要根据当前项目条件确认价格和交期。")
 
+    def test_unresolved_answer_waits_for_explicit_handoff_request(self):
+        conversation_id = self.db.create_conversation("demo-tenant")
+        question_id = self.db.save_message("demo-tenant", conversation_id, "buyer", "What is the price?")
+        status, answer, product_id, version_id, citations, _reason = answer_from_approved_material(
+            self.db, "demo-tenant", "What is the price?", self.product["id"]
+        )
+        self.assertEqual(status, "needs_human")
+        self.db.save_message("demo-tenant", conversation_id, "assistant", answer, "human-handoff")
+        self.db.save_answer("demo-tenant", conversation_id, question_id, product_id, version_id, status, answer, citations)
+        self.assertIsNone(self.db.get_human_task_for_question("demo-tenant", conversation_id, question_id))
+        task_id = self.db.create_human_task(
+            "demo-tenant", conversation_id, question_id, "What is the price?", "商业信息不在资料中", {"answer_so_far": answer}, product_id, version_id
+        )
+        self.assertEqual(self.db.get_human_task_for_question("demo-tenant", conversation_id, question_id)["id"], task_id)
+
 
 class RfqTests(unittest.TestCase):
     def setUp(self):
