@@ -380,6 +380,9 @@ class Database:
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 source TEXT NOT NULL DEFAULT 'buyer_web',
+                idempotency_key TEXT,
+                request_hash TEXT,
+                result_revision_id TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS requirement_revisions (
@@ -510,6 +513,17 @@ class Database:
         ):
             if column not in field_columns:
                 self.conn.execute(f"ALTER TABLE product_fields ADD COLUMN {column} {definition}")
+        message_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(messages)")}
+        for column, definition in (
+            ("idempotency_key", "TEXT"),
+            ("request_hash", "TEXT"),
+            ("result_revision_id", "TEXT"),
+        ):
+            if column not in message_columns:
+                self.conn.execute(f"ALTER TABLE messages ADD COLUMN {column} {definition}")
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_idempotency ON messages(conversation_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
+        )
         conversation_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(conversations)")}
         for column, definition in (
             ("stop_proactive_contact", "INTEGER NOT NULL DEFAULT 0"),
@@ -823,7 +837,17 @@ class Database:
             (tenant_id, conversation_id),
         ).fetchall()
 
-    def save_message(self, tenant_id: str, conversation_id: str, role: str, content: str, source: str = "buyer-web", commit: bool = True) -> str:
+    def save_message(
+        self,
+        tenant_id: str,
+        conversation_id: str,
+        role: str,
+        content: str,
+        source: str = "buyer-web",
+        commit: bool = True,
+        idempotency_key: str | None = None,
+        request_hash: str | None = None,
+    ) -> str:
         if not self.get_conversation(tenant_id, conversation_id):
             raise ValueError("会话不存在")
         content = content.strip()
@@ -831,8 +855,8 @@ class Database:
             raise ValueError("消息不能为空")
         message_id = secrets.token_hex(12)
         self.conn.execute(
-            "INSERT INTO messages(id, tenant_id, conversation_id, role, content, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (message_id, tenant_id, conversation_id, role, content, source, now_iso()),
+            "INSERT INTO messages(id, tenant_id, conversation_id, role, content, source, idempotency_key, request_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (message_id, tenant_id, conversation_id, role, content, source, idempotency_key, request_hash, now_iso()),
         )
         self.conn.execute("UPDATE conversations SET updated_at=? WHERE tenant_id=? AND id=?", (now_iso(), tenant_id, conversation_id))
         if commit:
@@ -1943,11 +1967,15 @@ def confirm_requirement_values(values: dict[str, dict[str, str]]) -> dict[str, d
     return confirmed
 
 
-def match_products(db: Database, tenant_id: str, values: dict[str, dict[str, str]]) -> tuple[str, list[dict[str, object]], list[str]]:
-    """Apply deterministic demo rules to approved, published product snapshots."""
+def classify_products(db: Database, tenant_id: str, values: dict[str, dict[str, str]]) -> tuple[list[dict[str, object]], list[str]]:
+    """Classify every published model against the confirmed requirements.
+
+    Per-model tiers: ``candidate`` (可初步推荐), ``needs_confirmation`` (待核实候选),
+    ``conflict`` (已知硬冲突，永不作为候选展示) and ``no_basis``（没有支持相关性的
+    已核准技术依据，不进入匹配结果）。Returns (results, missing requirement labels);
+    callers decide which tiers may reach the buyer.
+    """
     missing = [REQUIREMENT_LABELS[key] for key in MATCH_REQUIRED_FIELDS if not field_value(values, key)]
-    if missing:
-        return "insufficient", [], missing
     requirements = {key: number_from_text(field_value(values, key)) for key in ("flow", "head", "temperature")}
     requirement_media = field_value(values, "media").lower()
     rows = db.conn.execute(
@@ -1963,57 +1991,72 @@ def match_products(db: Database, tenant_id: str, values: dict[str, dict[str, str
         satisfies: list[str] = []
         conflicts: list[str] = []
         unknown: list[str] = []
+        has_basis = any(product_fields.get(key) for key in ("flow_range", "head_range", "performance_points"))
 
-        performance_points = performance_points_from_text(product_fields.get("performance_points", {}).get("value", ""))
-        if performance_points:
-            required_flow = requirements["flow"]
-            required_head = requirements["head"]
-            curve_head = curve_head_at_flow(performance_points, required_flow) if required_flow is not None else None
-            if curve_head is None:
-                conflicts.append("流量超出该型号目录性能点范围")
-            elif required_head is None:
-                unknown.append("扬程无法与目录性能曲线核对")
-            elif required_head <= curve_head:
-                satisfies.append(f"流量 {required_flow:g}m³/h 位于目录性能点范围")
-                satisfies.append(f"扬程 {required_head:g}m 不高于该流量目录曲线值约 {curve_head:g}m")
-                unknown.append("最终工作点仍需工程师按曲线和系统工况确认")
-            else:
-                conflicts.append(f"扬程 {required_head:g}m 高于该流量目录曲线值约 {curve_head:g}m")
-        else:
-            for requirement_key, product_key, label, unit in (("flow", "flow_range", "流量", "m³/h"), ("head", "head_range", "扬程", "m")):
-                required_number = requirements[requirement_key]
-                product_range = range_from_text(product_fields.get(product_key, {}).get("value", ""))
-                if required_number is None or product_range is None:
-                    unknown.append(f"{label}规则无法解析")
-                elif product_range[0] <= required_number <= product_range[1]:
-                    satisfies.append(f"{label} {required_number:g}{unit} 在产品范围内")
+        if has_basis:
+            performance_points = performance_points_from_text(product_fields.get("performance_points", {}).get("value", ""))
+            if performance_points:
+                required_flow = requirements["flow"]
+                required_head = requirements["head"]
+                curve_head = curve_head_at_flow(performance_points, required_flow) if required_flow is not None else None
+                if required_flow is None:
+                    unknown.append("买方尚未确认流量，无法与目录性能曲线核对")
+                elif curve_head is None:
+                    conflicts.append("流量超出该型号目录性能点范围")
+                elif required_head is None:
+                    unknown.append("买方尚未确认扬程，无法与目录性能曲线核对")
+                elif required_head <= curve_head:
+                    satisfies.append(f"流量 {required_flow:g}m³/h 位于目录性能点范围")
+                    satisfies.append(f"扬程 {required_head:g}m 不高于该流量目录曲线值约 {curve_head:g}m")
+                    unknown.append("最终工作点仍需工程师按曲线和系统工况确认")
                 else:
-                    conflicts.append(f"{label} {required_number:g}{unit} 超出产品范围")
+                    conflicts.append(f"扬程 {required_head:g}m 高于该流量目录曲线值约 {curve_head:g}m")
+            else:
+                for requirement_key, product_key, label, unit in (("flow", "flow_range", "流量", "m³/h"), ("head", "head_range", "扬程", "m")):
+                    required_number = requirements[requirement_key]
+                    product_range = range_from_text(product_fields.get(product_key, {}).get("value", ""))
+                    if required_number is None:
+                        unknown.append(f"买方尚未确认{label}")
+                    elif product_range is None:
+                        unknown.append(f"{label}规则无法解析")
+                    elif product_range[0] <= required_number <= product_range[1]:
+                        satisfies.append(f"{label} {required_number:g}{unit} 在产品范围内")
+                    else:
+                        conflicts.append(f"{label} {required_number:g}{unit} 超出产品范围")
 
-        product_media = product_fields.get("media", {}).get("value", "").lower()
-        if "清水" in requirement_media or "water" in requirement_media:
-            if "清水" in product_media or "water" in product_media:
-                satisfies.append("介质为清水，产品资料标注可用")
+            product_media = product_fields.get("media", {}).get("value", "").lower()
+            if "清水" in requirement_media or "water" in requirement_media:
+                if "清水" in product_media or "water" in product_media:
+                    satisfies.append("介质为清水，产品资料标注可用")
+                else:
+                    conflicts.append("产品资料未标注清水适用")
+            elif any(token in requirement_media for token in ("酸", "碱", "化工", "chemical", "acid", "alkali")):
+                if any(token in product_media for token in ("酸", "碱", "化工", "chemical", "acid", "alkali")):
+                    satisfies.append("介质属于化工场景，产品资料标注相关适用条件")
+                else:
+                    conflicts.append("产品资料未标注该化工介质适用")
+            elif requirement_media:
+                unknown.append("介质类型尚未形成可解释规则")
             else:
-                conflicts.append("产品资料未标注清水适用")
-        elif any(token in requirement_media for token in ("酸", "碱", "化工", "chemical", "acid", "alkali")):
-            if any(token in product_media for token in ("酸", "碱", "化工", "chemical", "acid", "alkali")):
-                satisfies.append("介质属于化工场景，产品资料标注相关适用条件")
-            else:
-                conflicts.append("产品资料未标注该化工介质适用")
+                unknown.append("买方尚未确认介质")
+
+            if requirements["temperature"] is not None:
+                temperature_range = range_from_text(product_fields.get("temperature", {}).get("value", ""))
+                if not temperature_range:
+                    unknown.append("产品资料没有可核对的介质温度范围")
+                elif temperature_range[0] <= requirements["temperature"] <= temperature_range[1]:
+                    satisfies.append(f"介质温度 {requirements['temperature']:g}°C 在资料范围内")
+                else:
+                    conflicts.append(f"介质温度 {requirements['temperature']:g}°C 超出资料范围")
+
+        if not has_basis:
+            candidate_status = "no_basis"
+        elif conflicts:
+            candidate_status = "conflict"
+        elif unknown or missing:
+            candidate_status = "needs_confirmation"
         else:
-            unknown.append("介质类型尚未形成可解释规则")
-
-        if requirements["temperature"] is not None:
-            temperature_range = range_from_text(product_fields.get("temperature", {}).get("value", ""))
-            if not temperature_range:
-                unknown.append("产品资料没有可核对的介质温度范围")
-            elif temperature_range[0] <= requirements["temperature"] <= temperature_range[1]:
-                satisfies.append(f"介质温度 {requirements['temperature']:g}°C 在资料范围内")
-            else:
-                conflicts.append(f"介质温度 {requirements['temperature']:g}°C 超出资料范围")
-
-        candidate_status = "candidate" if not conflicts and not unknown else "needs_confirmation" if not conflicts else "conflict"
+            candidate_status = "candidate"
         results.append({
             "product_id": row["id"],
             "model": row["model"],
@@ -2025,14 +2068,51 @@ def match_products(db: Database, tenant_id: str, values: dict[str, dict[str, str
             "conflicts": conflicts,
             "unknown": unknown,
         })
-    results.sort(key=lambda item: (0 if item["status"] == "candidate" else 1 if item["status"] == "needs_confirmation" else 2, item["model"]))
+    results.sort(key=lambda item: (0 if item["status"] == "candidate" else 1 if item["status"] == "needs_confirmation" else 2 if item["status"] == "conflict" else 3, item["model"]))
+    return results, missing
+
+
+def overall_status(results: list[dict[str, object]], missing: list[str]) -> str:
+    if missing:
+        return "insufficient"
     if any(item["status"] == "candidate" for item in results):
-        status = "recommended"
-    elif any(item["status"] == "needs_confirmation" for item in results):
-        status = "needs_confirmation"
-    else:
-        status = "no_match"
-    return status, results, []
+        return "recommended"
+    if any(item["status"] == "needs_confirmation" for item in results):
+        return "needs_confirmation"
+    return "no_match"
+
+
+def match_products(
+    db: Database,
+    tenant_id: str,
+    values: dict[str, dict[str, str]],
+    include_tentative: bool = False,
+) -> tuple[str, list[dict[str, object]], list[str]]:
+    """Public helper: classify and apply the buyer-facing tier policy (used by tests)."""
+    results, missing = classify_products(db, tenant_id, values)
+    if missing:
+        if include_tentative:
+            return "insufficient", [item for item in results if item["status"] == "needs_confirmation"], missing
+        return "insufficient", [], missing
+    return overall_status(results, missing), results, []
+
+
+def buyer_visible_results(results: list[dict[str, object]], include_tentative: bool) -> list[dict[str, object]]:
+    """Which result tiers may reach the buyer for this request.
+
+    Tentative candidates are withheld until the buyer explicitly asks to view them;
+    ``conflict`` and ``no_basis`` models are never returned to the buyer.
+    """
+    allowed = {"candidate", "needs_confirmation"} if include_tentative else {"candidate"}
+    return [result for result in results if result.get("status") in allowed]
+
+
+def recommendation_flags(results: list[dict[str, object]], status: str) -> dict[str, object]:
+    tentative_available = any(result.get("status") == "needs_confirmation" for result in results)
+    return {
+        "tentative_available": tentative_available,
+        "options": {"engineer_help": status != "recommended", "tentative_available": tentative_available},
+    }
 
 
 def answer_from_approved_material(
@@ -2341,6 +2421,51 @@ class Handler(BaseHTTPRequestHandler):
         if path in reference_files:
             self.send_reference_file(*reference_files[path])
             return
+        public_product_match = re.fullmatch(r"/api/v1/public/products/([a-zA-Z0-9-]+)", path)
+        if public_product_match:
+            site = self.api_site(self.headers.get("X-Site-Key", ""))
+            if not site:
+                return
+            tenant_id = site["tenant_id"]
+            origin = site["allowed_origin"] if self.headers.get("Origin") else None
+            product = self.db.get_product_by_slug(tenant_id, public_product_match.group(1))
+            version = self.db.get_published_version(tenant_id, product["id"]) if product else None
+            if not product or product["status"] == "withdrawn" or not version:
+                self.send_json({"error": "product_not_found"}, 404, origin)
+                return
+            snapshot = json.loads(version["snapshot_json"])
+            allowed_source_ids = self.db.public_source_ids(tenant_id, product["id"])
+            db_source_rows = {row["id"]: row for row in self.db.get_sources(tenant_id, product["id"])}
+            public_files = []
+            for entry in snapshot.get("public_sources", []):
+                row = db_source_rows.get(entry["id"])
+                if not row or not row["storage_path"] or entry["id"] not in allowed_source_ids:
+                    continue
+                suffix = Path(str(entry["filename"])).suffix.lower()
+                base_url = f"/s/{quote(site['site_key'])}/products/{quote(product['slug'])}/sources/{entry['id']}"
+                public_files.append({
+                    "id": entry["id"], "filename": entry["filename"], "file_type": entry["file_type"], "scope": entry["scope"],
+                    "download_url": base_url,
+                    "preview_url": f"{base_url}?preview=1" if suffix in (IMAGE_EXTENSIONS | {".pdf"}) else None,
+                })
+            fields = [
+                {
+                    "field_key": field["field_key"], "label": field.get("label", ""), "value": field["value"], "unit": field.get("unit", ""),
+                    "source_filename": field.get("source_filename") or None, "source_location": field.get("source_location") or None,
+                }
+                for field in snapshot["fields"]
+            ]
+            missing = [{"key": key, "label": FIELD_LABELS.get(key, key)} for key in snapshot.get("missing_fields", [])]
+            self.send_json(
+                {
+                    "product": {"model": product["model"], "name": product["name"], "slug": product["slug"]},
+                    "page_version": version["version"], "published_at": version["published_at"],
+                    "fields": fields, "missing_fields": missing, "public_sources": public_files,
+                    "disclaimer": "Initial technical display; not a quotation or final engineering approval.",
+                },
+                200, origin,
+            )
+            return
         api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)", path)
         if api_match:
             access = self.api_conversation(api_match.group(1))
@@ -2370,10 +2495,21 @@ class Handler(BaseHTTPRequestHandler):
                 "values": json.loads(latest_revision["values_json"]), "missing": json.loads(latest_revision["missing_json"]),
             } if latest_revision else None
             latest_recommendation = self.db.latest_active_recommendation(site["tenant_id"], conversation["id"])
-            recommendation = {
-                "recommendation_id": latest_recommendation["id"], "status": latest_recommendation["status"],
-                "results": json.loads(latest_recommendation["results_json"]), "rule_version": latest_recommendation["rule_version"],
-            } if latest_recommendation else None
+            recommendation = None
+            if latest_recommendation:
+                stored_results = json.loads(latest_recommendation["results_json"])
+                visible_results = []
+                for result in buyer_visible_results(stored_results, False):
+                    item = dict(result)
+                    url = str(item.get("detail_url") or "")
+                    if not url.startswith("/s/"):
+                        item["detail_url"] = f"/s/{quote(site['site_key'])}" + url
+                    visible_results.append(item)
+                recommendation = {
+                    "recommendation_id": latest_recommendation["id"], "status": latest_recommendation["status"],
+                    "results": visible_results, "rule_version": latest_recommendation["rule_version"],
+                    **recommendation_flags(stored_results, latest_recommendation["status"]),
+                }
             self.send_json(
                 {"conversation_id": conversation["id"], "status": conversation["status"], "locale": conversation["locale"], "contact_preference": {"stop_proactive_contact": bool(conversation["stop_proactive_contact"]), "reason": conversation["stop_reason"], "source": conversation["stop_source"], "stopped_at": conversation["stopped_at"]}, "messages": messages, "requirement": requirement, "recommendation": recommendation, "answers": answers, "human_tasks": human_tasks, "rfqs": rfqs},
                 allowed_origin=site["allowed_origin"] if self.headers.get("Origin") else None,
@@ -2504,15 +2640,47 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "text_required"}, 422)
                 return
             site, conversation = access
-            message_id = self.db.save_message(site["tenant_id"], conversation["id"], "buyer", text_value, "website_api")
+            origin = site["allowed_origin"] if self.headers.get("Origin") else None
+            idempotency_key = self.headers.get("Idempotency-Key", "").strip()
+            request_hash = hashlib.sha256(text_value.strip().encode("utf-8")).hexdigest()
+            if idempotency_key:
+                existing = self.db.conn.execute(
+                    "SELECT id, request_hash, result_revision_id FROM messages WHERE tenant_id=? AND conversation_id=? AND idempotency_key=?",
+                    (site["tenant_id"], conversation["id"], idempotency_key),
+                ).fetchone()
+                if existing:
+                    if existing["request_hash"] and not hmac.compare_digest(existing["request_hash"], request_hash):
+                        self.send_json({"error": "idempotency_conflict"}, 409, origin)
+                        return
+                    draft = None
+                    if existing["result_revision_id"]:
+                        stored = self.db.conn.execute(
+                            "SELECT * FROM requirement_revisions WHERE id=? AND tenant_id=?",
+                            (existing["result_revision_id"], site["tenant_id"]),
+                        ).fetchone()
+                        if stored:
+                            values = json.loads(stored["values_json"])
+                            missing = [key for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
+                            askable = [key for key in missing if values.get(key, {}).get("state") != "unknown"]
+                            draft = {"revision_id": stored["id"], "values": values, "missing": missing, "next_question": askable[0] if askable else None}
+                    self.send_json({"message_id": existing["id"], "status": "duplicate", "requirement_draft": draft}, 200, origin)
+                    return
+            message_id = self.db.save_message(
+                site["tenant_id"], conversation["id"], "buyer", text_value, "website_api",
+                idempotency_key=idempotency_key or None, request_hash=request_hash if idempotency_key else None,
+            )
             previous = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
             previous_values = json.loads(previous["values_json"]) if previous else {}
             values = extract_requirement_values(text_value, {}, previous_values)
             revision_id = self.db.create_requirement_revision(site["tenant_id"], conversation["id"], values, "candidate", "website_api")
+            if idempotency_key:
+                self.db.conn.execute("UPDATE messages SET result_revision_id=? WHERE id=?", (revision_id, message_id))
+                self.db.conn.commit()
             missing = [key for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
+            askable = [key for key in missing if values.get(key, {}).get("state") != "unknown"]
             self.send_json(
-                {"message_id": message_id, "status": "saved", "requirement_draft": {"revision_id": revision_id, "values": values, "missing": missing, "next_question": missing[0] if missing else None}}, 201,
-                site["allowed_origin"] if self.headers.get("Origin") else None,
+                {"message_id": message_id, "status": "saved", "requirement_draft": {"revision_id": revision_id, "values": values, "missing": missing, "next_question": askable[0] if askable else None}}, 201,
+                origin,
             )
             return
         api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/requirements/confirm", path)
@@ -2554,24 +2722,43 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.read_json()
             if payload is None:
                 return
+            include_tentative = payload.get("include_tentative", False)
+            if not isinstance(include_tentative, bool):
+                self.send_json({"error": "invalid_include_tentative"}, 422)
+                return
             site, conversation = access
+            origin = site["allowed_origin"] if self.headers.get("Origin") else None
             revision = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
             if not revision or revision["status"] != "confirmed" or payload.get("revision_id") != revision["id"]:
                 self.send_json({"error": "confirmed_revision_required"}, 409)
                 return
+
+            def with_site_url(result: dict[str, object]) -> dict[str, object]:
+                item = dict(result)
+                url = str(item.get("detail_url") or "")
+                if not url.startswith("/s/"):
+                    item["detail_url"] = f"/s/{quote(site['site_key'])}" + url
+                return item
+
             existing = self.db.latest_active_recommendation(site["tenant_id"], conversation["id"])
             if existing and existing["requirement_revision_id"] == revision["id"]:
-                self.send_json({"recommendation_id": existing["id"], "status": existing["status"], "results": json.loads(existing["results_json"]), "missing": []}, 200)
+                stored = json.loads(existing["results_json"])
+                results = [with_site_url(result) for result in buyer_visible_results(stored, include_tentative)]
+                missing_keys = json.loads(revision["missing_json"])
+                missing = [REQUIREMENT_LABELS.get(key, key) for key in missing_keys]
+                self.send_json(
+                    {"recommendation_id": existing["id"], "status": existing["status"], "results": results, "missing": missing, **recommendation_flags(stored, existing["status"])},
+                    200, origin,
+                )
                 return
             values = json.loads(revision["values_json"])
-            status, raw_results, missing = match_products(self.db, site["tenant_id"], values)
-            results = [result for result in raw_results if result.get("status") in {"candidate", "needs_confirmation"}]
-            for result in results:
-                result["detail_url"] = f"/s/{quote(site['site_key'])}" + str(result["detail_url"])
-            recommendation_id = self.db.save_recommendation(site["tenant_id"], conversation["id"], revision["id"], status, results)
+            full_results, missing = classify_products(self.db, site["tenant_id"], values)
+            status = overall_status(full_results, missing)
+            results = [with_site_url(result) for result in buyer_visible_results(full_results, include_tentative)]
+            recommendation_id = self.db.save_recommendation(site["tenant_id"], conversation["id"], revision["id"], status, full_results)
             self.send_json(
-                {"recommendation_id": recommendation_id, "status": status, "results": results, "missing": missing}, 201,
-                site["allowed_origin"] if self.headers.get("Origin") else None,
+                {"recommendation_id": recommendation_id, "status": status, "results": results, "missing": missing, **recommendation_flags(full_results, status)}, 201,
+                origin,
             )
             return
         api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/questions", path)

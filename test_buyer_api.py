@@ -397,6 +397,148 @@ class BuyerApiTests(unittest.TestCase):
         self.assertIn("停止主动联系", seller_page)
         self.assertEqual(self.form_request("POST", f"/admin/sales/{rfq_id}/update", {"stage": "technical_review", "next_follow_up": "2026-10-21"}, cookie)[0], 400)
 
+    def test_recommendation_withholds_tentative_until_requested(self):
+        self.db.seed_demo_products("demo-tenant")
+        for product in self.db.list_products("demo-tenant"):
+            approve_all_fields(self.db, "demo-tenant", product["id"])
+            self.db.publish_product("demo-tenant", product["id"])
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        _, _, sent = self.request("POST", path + "/messages", {"text": "Need pump flow 50 m3/h, head 30 m, clean water, temperature 100"}, headers)
+        draft = sent["requirement_draft"]
+        _, _, confirmed = self.request("POST", path + "/requirements/confirm", {"base_revision_id": draft["revision_id"], "values": draft["values"]}, headers)
+        status, _, first = self.request("POST", path + "/recommendations", {"revision_id": confirmed["revision_id"]}, headers)
+        self.assertEqual(status, 201)
+        self.assertEqual(first["status"], "needs_confirmation")
+        self.assertEqual(first["results"], [])  # 待核实候选默认不下发
+        self.assertTrue(first["tentative_available"])
+        self.assertTrue(first["options"]["engineer_help"])
+        # 买方明确选择查看后才返回待核实候选，并逐款标注未确认条件
+        status, _, explore = self.request("POST", path + "/recommendations", {"revision_id": confirmed["revision_id"], "include_tentative": True}, headers)
+        self.assertEqual(status, 200)
+        models = [item["model"] for item in explore["results"]]
+        self.assertEqual(models, ["CB-80A"])
+        self.assertTrue(explore["results"][0]["detail_url"].startswith("/s/site-a/products/"))
+        self.assertIn("温度", "".join(explore["results"][0]["unknown"]))
+        self.assertNotIn("CB-120C", models)  # 已知硬冲突不进入候选
+        # 会话刷新后仍只返回可初步推荐层，买方需要再次明确选择
+        _, _, current = self.request("GET", path, headers=headers)
+        self.assertEqual(current["recommendation"]["results"], [])
+        self.assertTrue(current["recommendation"]["tentative_available"])
+
+    def test_recommendation_insufficient_offers_options_and_explore_lists_missing(self):
+        self.db.seed_demo_products("demo-tenant")
+        for product in self.db.list_products("demo-tenant"):
+            approve_all_fields(self.db, "demo-tenant", product["id"])
+            self.db.publish_product("demo-tenant", product["id"])
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        _, _, sent = self.request("POST", path + "/messages", {"text": "Need pump flow 50 m3/h"}, headers)
+        draft = sent["requirement_draft"]
+        self.assertIsNotNone(draft["next_question"])
+        _, _, confirmed = self.request("POST", path + "/requirements/confirm", {"base_revision_id": draft["revision_id"], "values": draft["values"]}, headers)
+        _, _, first = self.request("POST", path + "/recommendations", {"revision_id": confirmed["revision_id"]}, headers)
+        self.assertEqual(first["status"], "insufficient")
+        self.assertEqual(first["results"], [])
+        self.assertIn("扬程", first["missing"])
+        self.assertIn("介质", first["missing"])
+        self.assertTrue(first["options"]["engineer_help"])
+        self.assertTrue(first["options"]["tentative_available"])
+        _, _, explore = self.request("POST", path + "/recommendations", {"revision_id": confirmed["revision_id"], "include_tentative": True}, headers)
+        self.assertEqual(explore["status"], "insufficient")
+        self.assertEqual(sorted(item["model"] for item in explore["results"]), ["CB-120C", "CB-80A"])
+        self.assertTrue(all(item["status"] == "needs_confirmation" for item in explore["results"]))
+        unknown_text = "".join("".join(item["unknown"]) for item in explore["results"])
+        self.assertIn("买方尚未确认扬程", unknown_text)
+        # 已知硬冲突导致无可靠候选：不再提供待核实列表
+        changed = dict(confirmed["values"])
+        changed["head"] = {"value": "300", "unit": "m", "label": "扬程"}
+        changed["media"] = {"value": "清水", "unit": "", "label": "介质"}
+        _, _, re_confirmed = self.request("POST", path + "/requirements/confirm", {"base_revision_id": confirmed["revision_id"], "values": changed}, headers)
+        _, _, no_match = self.request("POST", path + "/recommendations", {"revision_id": re_confirmed["revision_id"]}, headers)
+        self.assertEqual(no_match["status"], "no_match")
+        self.assertEqual(no_match["results"], [])
+        self.assertFalse(no_match["tentative_available"])
+        self.assertTrue(no_match["options"]["engineer_help"])
+
+    def test_public_product_json_serves_only_published_approved_content(self):
+        product_id = self.db.create_product("demo-tenant", "PUB-JSON", "公开 JSON 泵", "联调")
+        contents = b"\x89PNG\r\n\x1a\n" + b"public-json-image"
+        source_id = self.db.add_source("demo-tenant", product_id, "PUB-JSON.png", "PNG", "Image 1", content=contents, scope="exact_model")
+        self.addCleanup((ROOT / "data" / "uploads" / f"{source_id}-PUB-JSON.png").unlink, missing_ok=True)
+        self.db.save_field("demo-tenant", product_id, "flow_range", "12-34", "m³/h", source_id, "Image 1")
+        approve_all_fields(self.db, "demo-tenant", product_id)
+        self.db.allow_public_source("demo-tenant", product_id, source_id, "demo-admin")
+        self.db.publish_product("demo-tenant", product_id)
+        status, _, body = self.request("GET", "/api/v1/public/products/pub-json", headers={"X-Site-Key": "site-a"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["product"]["model"], "PUB-JSON")
+        self.assertEqual(body["page_version"], 1)
+        self.assertEqual([field["field_key"] for field in body["fields"]], ["flow_range"])
+        self.assertEqual(body["fields"][0]["value"], "12-34")
+        self.assertEqual(len(body["public_sources"]), 1)
+        self.assertTrue(body["public_sources"][0]["download_url"].startswith("/s/site-a/products/pub-json/sources/"))
+        self.assertTrue(body["public_sources"][0]["preview_url"].endswith("?preview=1"))
+        serialized = json.dumps(body)
+        self.assertNotIn("approved_by", serialized)
+        self.assertNotIn("tenant_id", serialized)
+        # 跨企业网站标识不可见
+        self.assertEqual(self.request("GET", "/api/v1/public/products/pub-json", headers={"X-Site-Key": "site-b"})[0], 404)
+        # 撤销文件许可后 JSON 中不再出现该文件
+        self.db.revoke_public_source("demo-tenant", product_id, source_id, "demo-admin")
+        _, _, after_revoke = self.request("GET", "/api/v1/public/products/pub-json", headers={"X-Site-Key": "site-a"})
+        self.assertEqual(after_revoke["public_sources"], [])
+        # 撤回产品后不可读取
+        self.db.withdraw_product("demo-tenant", product_id, "demo-admin")
+        self.assertEqual(self.request("GET", "/api/v1/public/products/pub-json", headers={"X-Site-Key": "site-a"})[0], 404)
+
+    def test_message_idempotency_dedupes_retries_and_rejects_changed_retry(self):
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        conversation_id = created["conversation_id"]
+        path = f"/api/v1/buyer/conversations/{conversation_id}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}", "Idempotency-Key": "msg-1"}
+        status, _, first = self.request("POST", path + "/messages", {"text": "flow 3 m3/h, head 45 m"}, headers)
+        self.assertEqual(status, 201)
+        self.assertEqual(first["status"], "saved")
+        message_id = first["message_id"]
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 1)
+        self.assertEqual(len(self.db.get_revisions("demo-tenant", conversation_id)), 1)
+        # 同键同内容重试：返回原消息与原始草稿，不新增记录
+        status, _, retry = self.request("POST", path + "/messages", {"text": "flow 3 m3/h, head 45 m"}, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(retry["status"], "duplicate")
+        self.assertEqual(retry["message_id"], message_id)
+        self.assertEqual(retry["requirement_draft"]["revision_id"], first["requirement_draft"]["revision_id"])
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 1)
+        self.assertEqual(len(self.db.get_revisions("demo-tenant", conversation_id)), 1)
+        # 同键不同内容：冲突，不写入
+        self.assertEqual(self.request("POST", path + "/messages", {"text": "flow 9 m3/h, head 45 m"}, headers)[0], 409)
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 1)
+        # 新键视为新消息
+        status, _, second = self.request("POST", path + "/messages", {"text": "flow 9 m3/h, head 45 m"}, {**headers, "Idempotency-Key": "msg-2"})
+        self.assertEqual(status, 201)
+        self.assertNotEqual(second["message_id"], message_id)
+        self.assertEqual(len(self.db.list_messages("demo-tenant", conversation_id)), 2)
+
+    def test_next_question_skips_buyer_marked_unknown(self):
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        _, _, sent = self.request("POST", path + "/messages", {"text": "flow 50"}, headers)
+        draft = sent["requirement_draft"]
+        self.assertEqual(draft["next_question"], "head")
+        values = {"flow": {"value": "50", "unit": "m³/h", "label": "流量"}, "head": {"value": "", "unit": "", "label": "扬程"}, "media": {"value": "", "unit": "", "label": "介质"}}
+        _, _, confirmed = self.request("POST", path + "/requirements/confirm", {"base_revision_id": draft["revision_id"], "values": values}, headers)
+        self.assertEqual(confirmed["values"]["head"]["state"], "unknown")
+        self.assertEqual(confirmed["values"]["media"]["state"], "unknown")
+        # 买方明确标记“不确定”的项不再被反复追问
+        _, _, swept = self.request("POST", path + "/messages", {"text": "no further details for now"}, headers)
+        self.assertIsNone(swept["requirement_draft"]["next_question"])
+        self.assertIn("head", swept["requirement_draft"]["missing"])
+        self.assertIn("media", swept["requirement_draft"]["missing"])
+
     def test_buyer_edits_same_rfq_with_seller_history_and_stale_revision_conflict(self):
         self.db.seed_demo_products("demo-tenant")
         product = self.db.list_products("demo-tenant")[0]

@@ -6,6 +6,7 @@ let conversationId = '';
 let token = '';
 let current = null;
 let locale = 'en';
+let pendingMessage = null;
 $('site-key').value = siteKey;
 
 const words = {
@@ -113,21 +114,67 @@ function renderRecommendation(recommendation, requirement) {
     }));
   }
   if (!recommendation) return;
-  const card = appendCard(`Product match · ${recommendation.status}`);
-  if (!recommendation.results.length) card.append(node('p', 'warning', t('noMatch')));
+  const statusLabels = {
+    recommended: '可初步推荐 / Recommended',
+    needs_confirmation: '条件不足或需核实 / Needs review',
+    insufficient: '条件不足 / More information needed',
+    no_match: '无可靠候选 / No reliable candidate',
+  };
+  const card = appendCard(`Product match · ${statusLabels[recommendation.status] || recommendation.status}`);
   const list = node('div');
-  const draw = () => {
+  const productLabel = (status) => status === 'candidate'
+    ? (locale === 'zh' ? '可初步推荐（有依据）' : 'Suggested (with evidence)')
+    : (locale === 'zh' ? '待核实候选（未确认适用）' : 'Tentative candidate — suitability not confirmed');
+  const drawProducts = (items) => {
     list.replaceChildren();
-    for (const product of recommendation.results) {
+    if (!items.length) {
+      list.append(node('p', 'warning', recommendation.status === 'insufficient'
+        ? (locale === 'zh' ? '条件不足：请补充工况，或请求工程师协助，或查看待核实候选。' : 'Not enough confirmed conditions yet: add details, ask an engineer, or view tentative candidates.')
+        : t('noMatch')));
+      return;
+    }
+    for (const product of items) {
       const item = node('p');
-      item.append(node('strong', '', `${product.model} · ${product.status}`));
-      const details = node('div', 'muted', (product.satisfies || []).join('; ') || (product.unknown || []).join('; ')); item.append(details);
-      const link = node('a', '', 'Open product detail ↗'); link.href = product.detail_url.startsWith('/products/') ? `/s/${encodeURIComponent(siteKey)}${product.detail_url}` : product.detail_url; link.target = '_blank'; link.rel = 'noopener'; item.append(link);
+      item.append(node('strong', '', `${product.model} · ${productLabel(product.status)}`));
+      if (product.satisfies?.length) item.append(node('div', 'muted', (product.satisfies || []).join('; ')));
+      if (product.unknown?.length) item.append(node('div', 'muted', `${locale === 'zh' ? '未确认' : 'Unconfirmed'}: ${product.unknown.join('; ')}`));
+      const link = node('a', '', 'Open product detail ↗');
+      link.href = product.detail_url.startsWith('/products/') ? `/s/${encodeURIComponent(siteKey)}${product.detail_url}` : product.detail_url;
+      link.target = '_blank'; link.rel = 'noopener';
+      item.append(link);
       list.append(item);
     }
+    if (recommendation.status !== 'recommended') {
+      list.append(node('p', 'muted', locale === 'zh'
+        ? '以上仅为待核实候选，不表示适用；最终工作点需工程师确认。'
+        : 'These are tentative candidates only, not a suitability claim; an engineer must confirm the duty point.'));
+    }
   };
-  if (recommendation.status === 'needs_confirmation') card.append(action('View tentative candidates / 查看待核实候选', draw, true));
-  else draw();
+  drawProducts(recommendation.results || []);
+  if (recommendation.status !== 'recommended') {
+    const exploreButton = recommendation.options?.tentative_available
+      ? action(locale === 'zh' ? '查看待核实候选' : 'View tentative candidates', async () => {
+          try {
+            const body = await api(`/conversations/${conversationId}/recommendations`, 'POST', { revision_id: requirement?.revision_id, include_tentative: true });
+            drawProducts(body.results || []);
+            exploreButton.hidden = true;
+          } catch (error) { showNotice(error.message); }
+        }, true)
+      : null;
+    if (exploreButton) card.append(exploreButton);
+    if (recommendation.options?.engineer_help) {
+      card.append(action(locale === 'zh' ? '请求工程师协助选型' : 'Ask an engineer to help select', async (event) => {
+        event.target.disabled = true;
+        try {
+          const values = current?.requirement?.values || {};
+          const conditionText = Object.entries(values).filter(([, value]) => value && value.value).map(([key, value]) => `${key}=${value.value}${value.unit || ''}`).join(', ') || 'conditions pending';
+          const asked = await api(`/conversations/${conversationId}/questions`, 'POST', { product_id: null, question: `Request selection help / 请求工程师协助选型：${conditionText}` });
+          await api(`/conversations/${conversationId}/human-requests`, 'POST', { answer_id: asked.answer_id, reply_path: 'conversation' });
+          await refresh();
+        } catch (error) { event.target.disabled = false; showNotice(error.message); }
+      }));
+    }
+  }
   card.append(list);
 }
 function renderAnswers(answers, tasks) {
@@ -233,7 +280,8 @@ $('message-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!conversationId) { showNotice(t('noSession')); return; }
   const value = $('message').value.trim(); if (!value) return;
-  try { await api(`/conversations/${conversationId}/messages`, 'POST', { text: value }); $('message').value = ''; await refresh(); }
+  if (!pendingMessage || pendingMessage.text !== value) pendingMessage = { key: crypto.randomUUID(), text: value };
+  try { await api(`/conversations/${conversationId}/messages`, 'POST', { text: value }, { 'Idempotency-Key': pendingMessage.key }); pendingMessage = null; $('message').value = ''; await refresh(); }
   catch (error) { showNotice(error.message); }
 });
 $('chat-language').addEventListener('click', () => { locale = locale === 'en' ? 'zh' : 'en'; $('chat-language').textContent = locale === 'en' ? '中文' : 'EN'; $('connect').textContent = t('connect'); $('show-rfq').textContent = t('quote'); $('refresh').textContent = t('refresh'); $('message-form').querySelector('button').textContent = t('send'); render(); });
