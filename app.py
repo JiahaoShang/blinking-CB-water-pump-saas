@@ -28,6 +28,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
+import ai_client
+from ai_client import AIConfig, AIConfigurationError, AIService, AIUnavailableError
+
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "data" / "app.db"
@@ -36,6 +39,17 @@ DEMO_SEED_FILE = ROOT / "fixtures" / "demo_seed.json"
 LOWARA_SEED_FILE = ROOT / "fixtures" / "lowara_demo_seed.json"
 REQUIRED_FIELDS = ("flow_range", "head_range", "media", "material")
 MATCH_REQUIRED_FIELDS = ("flow", "head", "media")
+# AI 调用日志里的任务名（与 ai_client 内部任务无关，用于管理概览展示与排错）。
+AI_TASK_EXTRACTION = "requirement_extraction"
+AI_TASK_ANSWER = "answer_field_selection"
+# 商业承诺、认证与交期类问题在任何模式下都不进入模型问答，直接转为待核实记录。
+COMMERCIAL_QUESTION_TOKENS = (
+    "price", "cost", "quote", "价格", "报价", "库存", "stock", "delivery",
+    "lead time", "shipping", "交期", "交货", "到货", "认证", "certificate", "certification",
+)
+COMMERCIAL_REFUSAL_ANSWER = "关于价格、库存、交期或认证，我手上的核准资料还无法确认。若您希望工程师核实，可点击下方按钮；提交后可回到本对话查看回复。"
+NO_PUBLISHED_PRODUCT_ANSWER = "目前没有可引用的已发布产品资料，我还不能确认这个问题。若您希望继续核实，可请求工程师查看。"
+NO_APPROVED_BASIS_ANSWER = "现有核准资料没有足够依据回答这个问题，参数还需要核实。若您愿意，我可以在您点击请求后请工程师查看。"
 REQUIREMENT_LABELS = {
     "category": "品类",
     "use_case": "用途",
@@ -523,6 +537,22 @@ class Database:
                 updated_at TEXT NOT NULL,
                 UNIQUE (tenant_id, rfq_id)
             );
+            CREATE TABLE IF NOT EXISTS ai_call_log (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                conversation_id TEXT,
+                task TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                status TEXT NOT NULL,
+                action TEXT NOT NULL DEFAULT 'none',
+                http_status INTEGER,
+                duration_ms INTEGER,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ai_call_log_tenant ON ai_call_log(tenant_id, created_at);
             """
         )
         if "request_hash" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
@@ -1559,6 +1589,41 @@ class Database:
             "leads_overdue": int(lead_counts["overdue"] or 0),
         }
 
+    def record_ai_call(
+        self,
+        tenant_id: str,
+        conversation_id: str | None,
+        task: str,
+        provider: str,
+        model: str,
+        status: str,
+        action: str,
+        http_status: int | None = None,
+        duration_ms: int | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+    ) -> None:
+        """记录一次模型调用的内部状态；只存提供方/模型/状态/耗时/用量。
+
+        不存密钥、提示词、买方消息或联系方式；排错沿 conversation_id 关联业务对象。
+        """
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO ai_call_log(id, tenant_id, conversation_id, task, provider, model, status, action, "
+                "http_status, duration_ms, prompt_tokens, completion_tokens, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    secrets.token_hex(12), tenant_id, conversation_id, task, provider, model, status, action,
+                    http_status, duration_ms, prompt_tokens, completion_tokens, now_iso(),
+                ),
+            )
+
+    def latest_ai_call(self, tenant_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM ai_call_log WHERE tenant_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (tenant_id,),
+        ).fetchone()
+
     def update_lead(
         self,
         tenant_id: str,
@@ -2365,50 +2430,46 @@ def recommendation_flags(results: list[dict[str, object]], status: str) -> dict[
     }
 
 
-def answer_from_approved_material(
+ANSWER_FIELD_KEYS = ("flow_range", "head_range", "media", "material", "power", "temperature", "performance_points")
+
+# 字段答案模板：两种问答模式共用；数值与单位始终取自当前已发布快照的该字段。
+ANSWER_FIELD_TEMPLATES = {
+    "flow_range": "该型号的流量范围是 {value}{unit}。",
+    "head_range": "该型号的扬程范围是 {value}{unit}。",
+    "media": "资料标注的介质适用条件是：{value}{unit}。",
+    "material": "该型号的材质是：{value}{unit}。",
+    "power": "该型号的功率是 {value}{unit}。",
+    "temperature": "资料标注的介质温度范围是 {value}{unit}。",
+    "performance_points": "资料中的目录性能点（流量:扬程）是：{value}{unit}。最终工作点需工程师确认。",
+}
+# 规则模式的提问关键词 → 字段；deepseek 模式下由模型做同样的判断。
+ANSWER_QUESTION_TOKENS = (
+    (("flow", "流量"), "flow_range"),
+    (("head", "扬程"), "head_range"),
+    (("media", "介质", "medium", "液体"), "media"),
+    (("material", "材质", "材料"), "material"),
+    (("power", "功率"), "power"),
+    (("temperature", "温度", "temperature"), "temperature"),
+    (("性能", "曲线", "performance", "catalogue"), "performance_points"),
+)
+
+
+def build_record_answer(
     db: Database,
     tenant_id: str,
-    question: str,
-    product_id: str | None,
-) -> tuple[str, str, str | None, str | None, list[dict[str, str]], str]:
-    """Answer only from the selected published snapshot; otherwise hand off."""
-    question_lower = question.lower()
-    forbidden = ("price", "cost", "quote", "price", "价格", "报价", "库存", "stock", "delivery", "lead time", "shipping", "交期", "交货", "到货", "认证", "certificate", "certification")
-    if any(token in question_lower for token in forbidden):
-        return "needs_human", "关于价格、库存、交期或认证，我手上的核准资料还无法确认。若您希望工程师核实，可点击下方按钮；提交后可回到本对话查看回复。", product_id, None, [], "资料不包含商业承诺或认证判断"
+    field_key: str,
+    field: dict,
+    version: sqlite3.Row,
+) -> tuple[str, dict[str, str]]:
+    """从当前已发布快照的字段构造答案文本与引用（规则与模型两种模式共用）。
 
-    product = db.get_product(tenant_id, product_id) if product_id else None
-    version = db.get_published_version(tenant_id, product_id) if product_id else None
-    if not product or not version:
-        return "needs_human", "目前没有可引用的已发布产品资料，我还不能确认这个问题。若您希望继续核实，可请求工程师查看。", product_id, None, [], "没有可引用的已发布产品版本"
-
-    snapshot = json.loads(version["snapshot_json"])
-    fields = {field["field_key"]: field for field in snapshot.get("fields", [])}
-    field_map = [
-        (("flow", "流量"), "flow_range", "该型号的流量范围是 {value}{unit}。"),
-        (("head", "扬程"), "head_range", "该型号的扬程范围是 {value}{unit}。"),
-        (("media", "介质", "medium", "液体"), "media", "资料标注的介质适用条件是：{value}{unit}。"),
-        (("material", "材质", "材料"), "material", "该型号的材质是：{value}{unit}。"),
-        (("power", "功率"), "power", "该型号的功率是 {value}{unit}。"),
-        (("temperature", "温度", "temperature"), "temperature", "资料标注的介质温度范围是 {value}{unit}。"),
-        (("性能", "曲线", "performance", "catalogue"), "performance_points", "资料中的目录性能点（流量:扬程）是：{value}{unit}。最终工作点需工程师确认。"),
-    ]
-    selected_key = None
-    template = ""
-    for tokens, key, candidate_template in field_map:
-        if any(token in question_lower for token in tokens):
-            selected_key = key
-            template = candidate_template
-            break
-    if not selected_key or not fields.get(selected_key) or not fields[selected_key].get("value", "").strip():
-        return "needs_human", "现有核准资料没有足够依据回答这个问题，参数还需要核实。若您愿意，我可以在您点击请求后请工程师查看。", product_id, version["id"], [], "资料缺少对应字段或问题需要工程判断"
-
-    field = fields[selected_key]
+    模型只能选择字段；数值、单位、答案文本和引用都在这里生成，模型输出不进入答案。
+    """
     citation = {
         "filename": field.get("source_filename") or "产品核准资料",
         "location": field.get("source_location") or "字段核准记录",
         "product_version": str(version["version"]),
-        "field": field.get("label", selected_key),
+        "field": field.get("label", field_key),
     }
     source = db.conn.execute(
         "SELECT filename, source_location FROM source_documents WHERE tenant_id=? AND id=?",
@@ -2417,8 +2478,187 @@ def answer_from_approved_material(
     if source:
         citation["filename"] = source["filename"]
         citation["location"] = field.get("source_location") or source["source_location"]
-    answer = template.format(value=field.get("value", ""), unit=field.get("unit", ""))
+    answer = ANSWER_FIELD_TEMPLATES[field_key].format(value=field.get("value", ""), unit=field.get("unit", ""))
+    return answer, citation
+
+
+def answer_from_approved_material(
+    db: Database,
+    tenant_id: str,
+    question: str,
+    product_id: str | None,
+) -> tuple[str, str, str | None, str | None, list[dict[str, str]], str]:
+    """Answer only from the selected published snapshot; otherwise hand off.（规则模式）"""
+    question_lower = question.lower()
+    if any(token in question_lower for token in COMMERCIAL_QUESTION_TOKENS):
+        return "needs_human", COMMERCIAL_REFUSAL_ANSWER, product_id, None, [], "资料不包含商业承诺或认证判断"
+
+    product = db.get_product(tenant_id, product_id) if product_id else None
+    version = db.get_published_version(tenant_id, product_id) if product_id else None
+    if not product or not version:
+        return "needs_human", NO_PUBLISHED_PRODUCT_ANSWER, product_id, None, [], "没有可引用的已发布产品版本"
+
+    snapshot = json.loads(version["snapshot_json"])
+    fields = {field["field_key"]: field for field in snapshot.get("fields", [])}
+    selected_key = None
+    for tokens, key in ANSWER_QUESTION_TOKENS:
+        if any(token in question_lower for token in tokens):
+            selected_key = key
+            break
+    if not selected_key or not fields.get(selected_key) or not str(fields[selected_key].get("value", "")).strip():
+        return "needs_human", NO_APPROVED_BASIS_ANSWER, product_id, version["id"], [], "资料缺少对应字段或问题需要工程判断"
+
+    answer, citation = build_record_answer(db, tenant_id, selected_key, fields[selected_key], version)
     return "grounded", answer, product_id, version["id"], [citation], ""
+
+
+def log_ai_call(
+    db: Database,
+    tenant_id: str,
+    conversation_id: str | None,
+    task: str,
+    ai,
+    meta: dict | None = None,
+    error: AIUnavailableError | None = None,
+) -> None:
+    """把一次模型调用结果写入内部日志（提供方/模型/状态/耗时/用量；失败给处理建议）。"""
+    if ai is None or ai.mode != ai_client.MODE_DEEPSEEK:
+        return
+    if error is not None:
+        status, action = error.kind, error.action
+        http_status, duration_ms = error.http_status, error.duration_ms
+        prompt_tokens = completion_tokens = None
+    else:
+        meta = meta or {}
+        status, action = ai_client.STATUS_OK, ai_client.ACTION_NONE
+        http_status, duration_ms = meta.get("http_status"), meta.get("duration_ms")
+        prompt_tokens, completion_tokens = meta.get("prompt_tokens"), meta.get("completion_tokens")
+    db.record_ai_call(
+        tenant_id, conversation_id, task, ai.config.provider, ai.config.model,
+        status, action, http_status, duration_ms, prompt_tokens, completion_tokens,
+    )
+
+
+def extract_requirement_candidates(
+    db: Database,
+    ai,
+    tenant_id: str,
+    conversation_id: str,
+    text: str,
+    explicit: dict[str, str] | None = None,
+    previous: dict[str, dict[str, str]] | None = None,
+) -> dict[str, dict[str, str]]:
+    """M3 提取入口：规则模式保持本地规则可复现；deepseek 模式由模型给出候选值。
+
+    模型候选经白名单字段、单位与结构校验后并入现有需求卡（state 仍为 candidate），
+    是否采信由买方在卡片里逐项确认；模型失败（超时/限流/服务错误）向上抛出，由调用方
+    返回可重试的失败状态——不静默落回规则结果，也不假装已识别。
+    """
+    if ai is None or ai.mode != ai_client.MODE_DEEPSEEK:
+        return extract_requirement_values(text, explicit or {}, previous)
+    # 表单显式填写的字段按原有规则保留；模型只补充/覆盖来自自由文本的候选。
+    values = extract_requirement_values("", dict(explicit or {}), previous)
+    try:
+        candidates, meta = ai.extract_requirements(text)
+    except AIUnavailableError as error:
+        log_ai_call(db, tenant_id, conversation_id, AI_TASK_EXTRACTION, ai, error=error)
+        raise
+    log_ai_call(db, tenant_id, conversation_id, AI_TASK_EXTRACTION, ai, meta=meta)
+    for key, item in candidates.items():
+        values[key] = {
+            "value": item["value"],
+            "unit": item["unit"],
+            "state": "candidate",
+            "source": "model_candidate",
+            "label": REQUIREMENT_LABELS[key],
+        }
+    return values
+
+
+def answer_question_with_mode(
+    db: Database,
+    ai,
+    tenant_id: str,
+    conversation_id: str,
+    question: str,
+    product_id: str | None,
+) -> tuple[str, str, str | None, str | None, list[dict[str, str]], str]:
+    """M5 问答入口：规则模式沿用本地规则；deepseek 模式模型只选择字段。
+
+    最终数值、答案文本与引用必须由后端从该产品的已发布快照构造（build_record_answer）；
+    模型给出 none 或其选择不在已核准、已发布字段内时按「没有可用依据」转人工核实。
+    模型超时/限流等失败向上抛出：不保存假答案、不创建人工任务，重试后可继续。
+    """
+    if ai is None or ai.mode != ai_client.MODE_DEEPSEEK:
+        return answer_from_approved_material(db, tenant_id, question, product_id)
+    question_lower = question.lower()
+    if any(token in question_lower for token in COMMERCIAL_QUESTION_TOKENS):
+        return "needs_human", COMMERCIAL_REFUSAL_ANSWER, product_id, None, [], "资料不包含商业承诺或认证判断"
+    product = db.get_product(tenant_id, product_id) if product_id else None
+    version = db.get_published_version(tenant_id, product_id) if product_id else None
+    if not product or not version:
+        return "needs_human", NO_PUBLISHED_PRODUCT_ANSWER, product_id, None, [], "没有可引用的已发布产品版本"
+    snapshot = json.loads(version["snapshot_json"])
+    fields = {field["field_key"]: field for field in snapshot.get("fields", [])}
+    allowed = [
+        {"key": key, "label_zh": FIELD_LABELS.get(key, key), "label_en": FIELD_LABELS_EN.get(key, key)}
+        for key in ANSWER_FIELD_KEYS
+        if fields.get(key) and str(fields[key].get("value", "")).strip()
+    ]
+    try:
+        selected, meta = ai.select_answer_field(question, allowed)
+    except AIUnavailableError as error:
+        log_ai_call(db, tenant_id, conversation_id, AI_TASK_ANSWER, ai, error=error)
+        raise
+    log_ai_call(db, tenant_id, conversation_id, AI_TASK_ANSWER, ai, meta=meta)
+    if not selected or not fields.get(selected) or not str(fields[selected].get("value", "")).strip():
+        return "needs_human", NO_APPROVED_BASIS_ANSWER, product_id, version["id"], [], "资料缺少对应字段或问题需要工程判断"
+    answer, citation = build_record_answer(db, tenant_id, selected, fields[selected], version)
+    return "grounded", answer, product_id, version["id"], [citation], ""
+
+
+AI_TASK_LABELS_ZH = {AI_TASK_EXTRACTION: "需求提取", AI_TASK_ANSWER: "资料问答"}
+
+
+def ai_status_section(db: Database, ai, tenant_id: str) -> str:
+    """管理概览「模型接入」卡片：显式模式 + 最近一次调用的内部状态（可重试/需配置/需排查）。"""
+    if ai is None or ai.mode != ai_client.MODE_DEEPSEEK:
+        return (
+            "<section class='card' style='margin-top:18px'><div class='panel-title'><h2>模型接入</h2>"
+            "<span class='muted'>AI 调用边界</span></div><div class='simple-item'><div>"
+            "<strong>当前模式：本地规则（演示）</strong><small>买方需求提取与资料内问答由本地规则完成，未调用外部模型。"
+            "需要模型辅助时，按 README「启用 DeepSeek 模型辅助」配置 AI_MODE=deepseek 后重启服务。</small></div></div></section>"
+        )
+    latest = db.latest_ai_call(tenant_id)
+    rows = [
+        "<div class='simple-item'><div><strong>当前模式：DeepSeek 模型辅助</strong>"
+        f"<small>提供方 DeepSeek · 模型 {esc(ai.config.model)}。模型只做候选抽取与字段定位；"
+        "数值、答案与引用由平台从已发布核准快照构造。</small></div></div>"
+    ]
+    if latest is None:
+        rows.append(
+            "<div class='simple-item'><div><strong>尚无模型调用记录</strong>"
+            "<small>买方发送需求或对已发布产品提问后，这里会显示最近一次调用的内部状态。</small></div></div>"
+        )
+    else:
+        task_label = AI_TASK_LABELS_ZH.get(latest["task"], latest["task"])
+        status_label = ai_client.STATUS_LABELS_ZH.get(latest["status"], latest["status"])
+        details = [f"最近一次调用：{task_label} · {status_label}", latest["created_at"]]
+        if latest["duration_ms"] is not None:
+            details.append(f"{latest['duration_ms']} ms")
+        if latest["http_status"]:
+            details.append(f"HTTP {latest['http_status']}")
+        if latest["prompt_tokens"] is not None or latest["completion_tokens"] is not None:
+            details.append(f"tokens {latest['prompt_tokens'] or 0}+{latest['completion_tokens'] or 0}")
+        rows.append(
+            "<div class='simple-item'><div><strong>" + esc(" · ".join(details)) + "</strong>"
+            "<small>失败时买方只看到统一的「暂不可用、可重试」提示；本卡片与 ai_call_log 记录内部状态，"
+            "不含密钥与买家消息。</small></div></div>"
+        )
+    return (
+        "<section class='card' style='margin-top:18px'><div class='panel-title'><h2>模型接入</h2>"
+        "<span class='muted'>AI 调用边界</span></div><div class='simple-list'>" + "".join(rows) + "</div></section>"
+    )
 
 
 BASE_CSS = """:root{--ink:#f7f4ff;--muted:#a8a2b8;--line:#29223c;--accent:#8b5cf6;--accent-strong:#a855f7;--bg:#08070f;--card:rgba(20,17,33,.9);--card-2:#151126;--warn:#f6c56a;--danger:#ff8fa3;--success:#67e8c5;}
@@ -2880,6 +3120,8 @@ def parse_multipart(handler: BaseHTTPRequestHandler) -> dict[str, str | bytes]:
 
 class Handler(BaseHTTPRequestHandler):
     db: Database
+    # AI 调用边界：由 make_server 按显式模式装配（rules 时 ai 为空操作对象，不发外部请求）。
+    ai: AIService | None = None
     tenant_id = "demo-tenant"
     actor = "demo-admin"
     user_role = "admin"
@@ -3477,7 +3719,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 previous = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
                 previous_values = json.loads(previous["values_json"]) if previous else {}
-                values = extract_requirement_values(text_value, {}, previous_values)
+                values = extract_requirement_candidates(
+                    self.db, self.ai, site["tenant_id"], conversation["id"], text_value, None, previous_values,
+                )
                 revision_id = self.db.create_requirement_revision(
                     site["tenant_id"], conversation["id"], values, "candidate", "website_api",
                     idempotency_key=idempotency_key or None, request_hash=request_hash if idempotency_key else None,
@@ -3731,7 +3975,10 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     question_message_id = existing["id"]
             try:
-                status, answer_text, answered_product_id, version_id, citations, _reason = answer_from_approved_material(self.db, site["tenant_id"], question, product_id or None)
+                status, answer_text, answered_product_id, version_id, citations, _reason = answer_question_with_mode(
+                    self.db, self.ai, site["tenant_id"], conversation["id"], question,
+                    product_id if isinstance(product_id, str) and product_id else None,
+                )
                 self.db.save_message(site["tenant_id"], conversation["id"], "assistant", answer_text, "grounded-answer" if status == "grounded" else "unresolved-question")
                 try:
                     answer_id = self.db.save_answer(site["tenant_id"], conversation["id"], question_message_id, answered_product_id, version_id, status, answer_text, citations)
@@ -3963,7 +4210,14 @@ class Handler(BaseHTTPRequestHandler):
                 explicit = {key: str(form.get(key, "")) for key in REQUIREMENT_LABELS}
                 for key in REQUIREMENT_LABELS:
                     explicit[f"{key}_unit"] = str(form.get(f"{key}_unit", ""))
-                values = extract_requirement_values(message, explicit, previous_values)
+                try:
+                    values = extract_requirement_candidates(
+                        self.db, self.ai, self.tenant_id, conversation_id, message, explicit, previous_values,
+                    )
+                except AIUnavailableError:
+                    # 模型故障：消息已保存，明确提示可重试；不落草稿、不假装已识别。
+                    self.redirect(f"/inquiry/{conversation_id}?notice=extract_unavailable")
+                    return
                 self.db.create_requirement_revision(self.tenant_id, conversation_id, values, "candidate", "buyer-web")
                 missing = [REQUIREMENT_LABELS[key] for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
                 if missing:
@@ -4036,7 +4290,15 @@ class Handler(BaseHTTPRequestHandler):
                     if not result_for_product:
                         result_for_product = next((result for result in recommendation_results if result.get("status") == "candidate"), None)
                     selected_product_id = (result_for_product or {}).get("product_id") or selected_product_id
-                answer_status, answer_text, answered_product_id, product_version_id, citations, _reason = answer_from_approved_material(self.db, self.tenant_id, question, selected_product_id)
+                try:
+                    answer_status, answer_text, answered_product_id, product_version_id, citations, _reason = answer_question_with_mode(
+                        self.db, self.ai, self.tenant_id, conversation_id, question,
+                        selected_product_id if isinstance(selected_product_id, str) and selected_product_id else None,
+                    )
+                except AIUnavailableError:
+                    # 模型故障：问题已保存，明确提示可重试；不落假答案、不建人工任务。
+                    self.redirect(f"/inquiry/{conversation_id}?notice=answer_unavailable")
+                    return
                 self.db.save_message(self.tenant_id, conversation_id, "assistant", answer_text, "grounded-answer" if answer_status == "grounded" else "unresolved-question")
                 self.db.save_answer(self.tenant_id, conversation_id, question_message_id, answered_product_id, product_version_id, answer_status, answer_text, citations)
                 self.redirect(f"/inquiry/{conversation_id}?notice=answer")
@@ -4473,6 +4735,8 @@ class Handler(BaseHTTPRequestHandler):
         notice_html = {
             "recommendation": "<div class='notice'>需求已保存，推荐结果会基于当前已确认摘要重新计算。</div>",
             "answer": "<div class='notice'>问题已保存。资料不足的问题会保留为待核实记录；只有您点击「请求工程师核实」后才会创建人工任务，不会自动安排。</div>",
+            "extract_unavailable": "<div class='error'>消息已保存，但需求提取暂不可用（服务故障）；请再次提交同一内容重试。</div>",
+            "answer_unavailable": "<div class='error'>问题已保存，但回答服务暂不可用；请稍后重新提交同一问题重试，或请求工程师核实。</div>",
             "rfq_stale": "<div class='error'>这张询价已在别处更新，请刷新页面后再修改（避免覆盖较新的版本）。</div>",
             "rfq_contact": "<div class='error'>请保留至少一种可回复联系方式（邮箱或电话）。</div>",
             "rfq_missing": "<div class='error'>没有找到要修改的询价，请刷新页面后重试。</div>",
@@ -4657,12 +4921,14 @@ class Handler(BaseHTTPRequestHandler):
             f"<div class='actions'><a class='button secondary' href='{href}'>进入</a></div></div>"
             for href, title, description in quick_links
         )
+        ai_section = ai_status_section(self.db, self.ai, self.tenant_id)
         body = f"""
 <div class='toolbar'><div><h1>管理概览</h1><div class='muted'>当前企业：示例水泵企业（演示） · 当前账号：{esc(self.actor)}（{role_label}）</div></div><div><form method='post' action='/admin/demo/seed' class='inline'><button class='secondary'>加载演示数据</button></form> <form method='post' action='/admin/lowara/seed' class='inline'><button class='secondary'>加载 Lowara 资料</button></form></div></div>
 {demo_notice}
 {focus_html}
 <div class='grid'><section class='card'><div class='panel-title'><h2>待处理事项</h2><span class='muted'>只显示当前岗位需要行动的事项</span></div><div class='simple-list'>{todo_html}</div></section>
 <section class='card'><div class='panel-title'><h2>常用入口</h2></div><div class='simple-list'>{quick_html}</div></section></div>
+{ai_section}
 <section class='card' style='margin-top:18px'><details class='detail-toggle' style='border-top:0;margin-top:0;padding-top:0'><summary>查看运营数字</summary><div><section class='metric-grid'>{cards}</section></div></details></section>
 <div class='footer-note'>概览只读取当前登录账号所属企业的数据；具体修改仍需进入对应模块，并按角色权限执行。</div>
 """
@@ -5108,11 +5374,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_bytes(content, content_type, source["filename"], inline=preview and previewable)
 
 
-def make_server(db_path: str | os.PathLike[str], host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:
+def make_server(
+    db_path: str | os.PathLike[str],
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    ai_config: AIConfig | None = None,
+) -> ThreadingHTTPServer:
     database = Database(db_path)
+    # 模式显式：不传配置时读取环境变量（默认 rules）；deepseek 缺 Key 在这里明确失败。
+    config = ai_config if ai_config is not None else AIConfig.from_env()
+    ai_service = AIService(config)
 
     class AppHandler(Handler):
         db = database
+        ai = ai_service
 
     return ThreadingHTTPServer((host, port), AppHandler)
 
@@ -5122,9 +5397,16 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--db", default=str(DEFAULT_DB))
+    parser.add_argument("--ai-mode", choices=list(ai_client.MODES), default=None, help="覆盖 AI_MODE 环境变量（默认 rules）")
     args = parser.parse_args()
-    server = make_server(args.db, args.host, args.port)
-    print(f"Growave running at http://{args.host}:{args.port}")
+    try:
+        ai_config = AIConfig.from_env(mode_override=args.ai_mode)
+        server = make_server(args.db, args.host, args.port, ai_config=ai_config)
+    except AIConfigurationError as error:
+        # deepseek 配置不完整时拒绝启动：不允许静默落回规则结果。
+        print(f"启动失败：{error}")
+        raise SystemExit(2)
+    print(f"Growave running at http://{args.host}:{args.port}（AI 模式：{ai_config.mode}）")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

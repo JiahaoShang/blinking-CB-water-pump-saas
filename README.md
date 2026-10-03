@@ -39,6 +39,22 @@ python3 tools/backup_restore.py restore-check --bundle data/backup-001 --out dat
 
 工具使用 SQLite 在线备份接口，核对文件哈希和恢复后数据库完整性，并报告可恢复的 RFQ 与有文件的资料数量。它是本地演练工具，**不是**自动定时备份、异地保存或真实试点部署方案；首次使用真实资料前，仍须选择托管存储和备份策略，实际演练恢复并记录耗时和最后可恢复记录。
 
+## 启用 DeepSeek 模型辅助（可选；默认仍是本地规则）
+
+默认不设置 `AI_MODE` 时使用本地规则引擎（当前演示默认），行为与既有演示一致，不需要任何密钥。要让买方自由文本需求识别与资料内问答走 DeepSeek 模型辅助（模型只做候选抽取与字段定位；数值、答案和引用仍由平台从已发布核准快照构造，模型输出不是核准事实）：
+
+```sh
+export AI_MODE=deepseek
+export DEEPSEEK_API_KEY=sk-...      # 只在本机 shell 配置；不要写入仓库、文档、日志或截图
+python3 app.py --host 127.0.0.1 --port 8000 --db data/app.db
+# 也可用 --ai-mode deepseek 覆盖本次启动；start_demo.py 同样读取这些环境变量
+```
+
+- 可选配置：`DEEPSEEK_MODEL`（默认 `deepseek-flash`）、`DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`，仅测试/代理场景覆盖）、`DEEPSEEK_TIMEOUT_SECONDS`（默认 20，上限 120）、`DEEPSEEK_MAX_TOKENS`（默认 512，上限 8192）。密钥只经 `DEEPSEEK_API_KEY` 环境变量读取；`.env` 已在 `.gitignore` 中。
+- `AI_MODE=deepseek` 而未设置 `DEEPSEEK_API_KEY` 时应用会**明确拒绝启动**，不会落回规则结果（避免把未联调误认为已联调）。模型故障时买方只看到统一的「暂不可用、消息已保存、可重试」提示；内部状态（可重试/需配置/需排查）记录在管理概览「模型接入」卡片与 `ai_call_log` 表（只含提供方、模型、状态、耗时、用量，不含密钥与买家消息）。
+- **真实账户联调（未验证，待配置者本机执行）**：在配置 Key 后运行 `python3 tools/pilot_checks/check_deepseek_live.py`，输出只含状态/耗时/用量。该步骤属于[试点就绪核对表](docs/试点就绪核对表.md)第 6 项；在此之前，代码适配由本地模拟服务测试覆盖，**不等于**真实 DeepSeek 账户联调完成。
+- 自动测试不需要真实 Key，也不要为跑测试设置 `AI_MODE=deepseek`；模型边界行为由本地 HTTP 模拟服务测试（`test_ai_deepseek.py`）覆盖。
+
 ## 当前开发约束
 
 - GitHub 旧代码是测试材料，原有单元测试通过不代表符合当前用户旅程；尤其是人工请求、RFQ、公开页面、API、匿名会话权限和销售记录仍需修正。
