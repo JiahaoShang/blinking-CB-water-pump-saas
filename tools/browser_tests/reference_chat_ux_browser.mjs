@@ -10,6 +10,8 @@
 //      POST /human-tasks/{id}/responses（工程师一侧走真实登录 + 真实后台表单端点）；
 //   6. 实时同步：面板打开时工程师答复自动出现（无需手动刷新）；面板收起时启动按钮出现
 //      未读角标；重新打开后角标清空、回复可见。
+//   7. 产品详情页上下文（window.PUMP_CHAT_CONTEXT）：打开即自动连接；询价默认当前型号并
+//      在提交时绑定；提问默认针对当前型号（有据回答）。
 //
 // 用法: node reference_chat_ux_browser.mjs <config.json> <result.json>
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -77,6 +79,12 @@ function countTags(root, tag) {
   return count;
 }
 
+function collectTags(root, tag) {
+  const found = [];
+  walk(root, (el) => { if (el.tagName === tag) found.push(el); });
+  return found;
+}
+
 function makeStorage(initial = {}) {
   const map = new Map(Object.entries(initial));
   return {
@@ -89,7 +97,7 @@ function makeStorage(initial = {}) {
 const IDS = ['chat-log', 'chat-notice', 'chat-launcher', 'chat-launcher-label', 'chat-panel', 'chat-close', 'chat-language',
   'chat-badge', 'connect', 'site-key', 'show-rfq', 'stop-contact', 'message-form', 'message', 'chat-title', 'chat-subtitle'];
 
-function openChat({ language, languages, session = {} }) {
+function openChat({ language, languages, session = {}, chatContext = null }) {
   const journal = [];
   const elements = {};
   const timers = new Set();
@@ -142,6 +150,7 @@ function openChat({ language, languages, session = {} }) {
     URLSearchParams,
     setInterval: wrappedSetInterval,
     clearInterval: (timer) => { clearInterval(timer); timers.delete(timer); },
+    ...(chatContext ? { window: { PUMP_CHAT_CONTEXT: chatContext } } : {}),
     console,
   });
   vm.runInContext(source, context, { filename: 'reference-client/app.js' });
@@ -176,6 +185,27 @@ function openChat({ language, languages, session = {} }) {
     async clickLauncher() {
       for (const handler of elements['chat-launcher'].listeners.click || []) await handler();
       await sleep(150);
+    },
+    async clickShowRfq() {
+      for (const handler of elements['show-rfq'].listeners.click || []) await handler();
+      await sleep(50);
+    },
+    inputValue(name) {
+      const input = collectTags(elements['chat-log'], 'INPUT').find((item) => item.name === name);
+      return input ? input.value : null;
+    },
+    async fillAndSubmitRfq(email) {
+      const inputs = collectTags(elements['chat-log'], 'INPUT');
+      const byName = (name) => inputs.find((item) => item.name === name);
+      const emailInput = byName('contact_email');
+      if (!emailInput) throw new Error('未找到询价邮箱输入框');
+      emailInput.value = email;
+      const confirmed = byName('contact_confirmed');
+      if (confirmed) confirmed.checked = true;
+      const form = collectTags(elements['chat-log'], 'FORM')[0];
+      if (!form) throw new Error('未找到询价表单');
+      for (const handler of form.listeners.submit || []) await handler({ preventDefault() {} });
+      await sleep(60);
     },
     badge() {
       return { hidden: elements['chat-badge'].hidden, text: elements['chat-badge'].textContent };
@@ -325,6 +355,25 @@ try {
       badgeAfterOpen: chat.badge(),
       reopenedText: chat.logText(),
     };
+    chat.stop();
+  }
+  // 场景 7：产品详情页上下文（window.PUMP_CHAT_CONTEXT）——打开即自动连接；
+  // 询价表单默认当前型号且提交绑定；提问默认针对当前型号并得到有据回答
+  {
+    const chatContext = { siteKey: config.siteKey, productId: config.contextProductId, model: config.contextProductModel };
+    const chat = openChat({ language: 'en-US', languages: ['en-US'], session: {}, chatContext });
+    await chat.clickLauncher();
+    await sleep(1200); // 自动连接（打开即连）
+    const connected = chat.journal.some((item) => item.method === 'POST' && item.url.endsWith('/conversations'));
+    await chat.clickShowRfq();
+    const modelPrefill = chat.inputValue('requested_model');
+    const rfqSlice = chat.journal.length;
+    await chat.fillAndSubmitRfq('buyer@example.com');
+    const rfqRequests = chat.journal.slice(rfqSlice);
+    const questionSlice = chat.journal.length;
+    await chat.submitMessage('What is the flow range?');
+    const questionRequests = chat.journal.slice(questionSlice);
+    results.product_page_context = { connected, modelPrefill, rfqRequests, questionRequests };
     chat.stop();
   }
   writeFileSync(resultPath, JSON.stringify({ ok: true, results }, null, 2));

@@ -1,7 +1,10 @@
 const $ = (id) => document.getElementById(id);
 const log = $('chat-log');
 const notice = $('chat-notice');
-let siteKey = new URLSearchParams(location.search).get('site_key') || localStorage.getItem('pump_reference_site_key') || '';
+// 产品详情页上下文：由服务端注入 window.PUMP_CHAT_CONTEXT = {siteKey, productId, model}。
+// 有上下文时：聊天窗与页面询价表单保持同一会话归属语义；发出即自动连接；询价默认针对当前型号。
+const chatContext = (typeof window !== 'undefined' && window.PUMP_CHAT_CONTEXT) || null;
+let siteKey = (chatContext && chatContext.siteKey) || new URLSearchParams(location.search).get('site_key') || localStorage.getItem('pump_reference_site_key') || '';
 // 跨来源部署时，聊天页在企业官网来源、API/产品页在平台来源：用 ?api_base=https://platform.example
 // 指定平台来源；不填则与页面同源（本地参考演示）。产品链接也指向该来源。
 // 不落盘保存：api_base 属于页面级配置，避免一次跨来源演示影响后续同来源打开。
@@ -21,15 +24,39 @@ let locale = systemPrefersChinese() ? 'zh' : 'en';
 let pendingMessage = null;
 let pendingQuestion = null;
 $('site-key').value = siteKey;
+// 接管站点的聊天窗：隐藏「Website key / 连接」配置行（连接由页面上下文自动完成）。
+if (chatContext) {
+  const configRow = $('site-key').parentElement && $('site-key').parentElement.parentElement;
+  if (configRow) configRow.hidden = true;
+}
 
 const words = {
-  en: { connect: 'Connect', assistantTitle: 'Pump product assistant', assistantSubtitle: 'Technical information with sources', stopContact: 'Stop proactive contact', quote: 'Request a quote', send: 'Send', needSite: 'Enter the website key from the seller workspace.', noSession: 'Connect before sending a message.', confirmed: 'Confirmed requirements', draft: 'Check these extracted values before matching', unknown: 'Unknown', confirm: 'Confirm requirements', find: 'Find products', noMatch: 'No reliable candidate. Ask an engineer to review your application.', ask: 'Product answer', greeting: "Hello! I'm your consulting assistant — feel free to ask me anything about our products.", placeholder: 'Describe your requirements (e.g. flow 3 m³/h, head 45 m) — or just ask a question', requestEngineer: 'Ask an engineer to review', askEngineer: 'Would you like an engineer to verify this?', engineerRequested: 'Engineer review requested — the reply will appear right here.', replyHint: 'Reply using the message box below.', launcher: 'Ask me about products', rfq: 'RFQ', edit: 'Edit this RFQ', save: 'Submit RFQ', saveEdit: 'Save changes', contact: 'Reply email or phone', confirmContact: 'I confirm this reply contact can be used for this request', quantity: 'Quantity', destination: 'Destination', notes: 'Requirements and notes', error: 'The request did not complete. Your entries remain here; review the message and retry.', noDraft: 'Your message was saved, but the requirements were not extracted yet. Send again to retry — your text is kept.' },
-  zh: { connect: '连接', assistantTitle: '水泵产品助手', assistantSubtitle: '带出处的技术信息', stopContact: '停止主动联系', quote: '发起询价', send: '发送', needSite: '请输入卖家系统提供的网站标识。', noSession: '请先连接，再发送消息。', confirmed: '已确认工况', draft: '请核对提取的工况后再选型', unknown: '不确定', confirm: '确认工况', find: '查找产品', noMatch: '暂无可靠候选，可请求工程师协助核实。', ask: '产品问答', greeting: '你好，我是您的咨询助手——您可以随时向我提出任何关于产品的问题。', placeholder: '描述工况（例如：流量 3 m³/h，扬程 45 m），或直接提问', requestEngineer: '请求工程师核实', askEngineer: '需要工程师帮您核实吗？', engineerRequested: '已转交工程师核实——答复会直接出现在这里。', replyHint: '请在下方输入框直接回复', launcher: '向我提问产品问题', rfq: '询价', edit: '编辑原 RFQ', save: '提交询价', saveEdit: '保存修改', contact: '可回复邮箱或电话', confirmContact: '我确认销售可通过上述方式回复本次请求', quantity: '数量', destination: '目的地', notes: '需求说明', error: '操作未完成。输入内容仍保留，请查看提示后重试。', noDraft: '消息已保存，但需求提取尚未完成；请再次发送重试，输入内容已保留。' },
+  en: { connect: 'Connect', assistantTitle: 'Pump product assistant', assistantSubtitle: 'Technical information with sources', stopContact: 'Stop proactive contact', quote: 'Request a quote', send: 'Send', needSite: 'Enter the website key from the seller workspace.', noSession: 'Connect before sending a message.', confirmed: 'Confirmed requirements', draft: 'Check these extracted values before matching', unknown: 'Unknown', confirm: 'Confirm requirements', find: 'Find products', noMatch: 'No reliable candidate. Ask an engineer to review your application.', ask: 'Product answer', greeting: "Hello! I'm your consulting assistant — feel free to ask me anything about our products.", placeholder: 'Describe your requirements (e.g. flow 3 m³/h, head 45 m) — or just ask a question', requestEngineer: 'Ask an engineer to review', askEngineer: 'Would you like an engineer to verify this?', engineerRequested: 'Engineer review requested — the reply will appear right here.', replyHint: 'Reply using the message box below.', launcher: 'Ask me about products', rfq: 'RFQ', edit: 'Edit this RFQ', save: 'Submit RFQ', saveEdit: 'Save changes', contact: 'Reply email or phone', confirmContact: 'I confirm this reply contact can be used for this request', quantity: 'Quantity', model: 'Product model', destination: 'Destination', notes: 'Requirements and notes', error: 'The request did not complete. Your entries remain here; review the message and retry.', noDraft: 'Your message was saved, but the requirements were not extracted yet. Send again to retry — your text is kept.' },
+  zh: { connect: '连接', assistantTitle: '水泵产品助手', assistantSubtitle: '带出处的技术信息', stopContact: '停止主动联系', quote: '发起询价', send: '发送', needSite: '请输入卖家系统提供的网站标识。', noSession: '请先连接，再发送消息。', confirmed: '已确认工况', draft: '请核对提取的工况后再选型', unknown: '不确定', confirm: '确认工况', find: '查找产品', noMatch: '暂无可靠候选，可请求工程师协助核实。', ask: '产品问答', greeting: '你好，我是您的咨询助手——您可以随时向我提出任何关于产品的问题。', placeholder: '描述工况（例如：流量 3 m³/h，扬程 45 m），或直接提问', requestEngineer: '请求工程师核实', askEngineer: '需要工程师帮您核实吗？', engineerRequested: '已转交工程师核实——答复会直接出现在这里。', replyHint: '请在下方输入框直接回复', launcher: '向我提问产品问题', rfq: '询价', edit: '编辑原 RFQ', save: '提交询价', saveEdit: '保存修改', contact: '可回复邮箱或电话', confirmContact: '我确认销售可通过上述方式回复本次请求', quantity: '数量', model: '产品型号', destination: '目的地', notes: '需求说明', error: '操作未完成。输入内容仍保留，请查看提示后重试。', noDraft: '消息已保存，但需求提取尚未完成；请再次发送重试，输入内容已保留。' },
 };
 const t = (key) => words[locale][key];
 function node(tag, className = '', value = '') { const n = document.createElement(tag); if (className) n.className = className; if (value) n.textContent = value; return n; }
 function showNotice(message = '') { notice.textContent = message; }
 function sessionKey() { return `pump_reference_session_${siteKey}`; }
+function readStored(store, key) {
+  try { return store ? JSON.parse(store.getItem(key) || 'null') : null; } catch (error) { return null; }
+}
+function tabStorage() {
+  try { return typeof sessionStorage === 'undefined' ? null : sessionStorage; } catch (error) { return null; }
+}
+// 产品页上下文下的会话归属（与 product-page.js 同语义）：交接成功 → 本标签页固定凭据；
+// 交接失败 → 本标签页独立会话（不回落共享存储）；否则用浏览器共享存储。
+function preferredSession() {
+  if (chatContext && chatContext.siteKey) {
+    const key = chatContext.siteKey;
+    const connected = readStored(tabStorage(), `pump_product_handoff_connected_${key}`);
+    if (connected && connected.conversationId && connected.token) return { session: connected, store: null, storeKey: '' };
+    if (tabStorage() && tabStorage().getItem(`pump_product_handoff_failed_${key}`) === '1') {
+      return { session: readStored(tabStorage(), `pump_product_handoff_session_${key}`), store: tabStorage(), storeKey: `pump_product_handoff_session_${key}` };
+    }
+  }
+  return { session: readStored(localStorage, sessionKey()), store: localStorage, storeKey: sessionKey() };
+}
 function appendCard(title) { const card = node('section', 'card'); card.append(node('h3', '', title)); log.append(card); return card; }
 function field(form, label, name, value = '', type = 'text') {
   const wrapper = node('label'); wrapper.append(node('span', '', label));
@@ -50,7 +77,8 @@ async function connect() {
   siteKey = $('site-key').value.trim();
   if (!siteKey) { showNotice(t('needSite')); return; }
   localStorage.setItem('pump_reference_site_key', siteKey);
-  const saved = JSON.parse(localStorage.getItem(sessionKey()) || 'null');
+  const preferred = preferredSession();
+  const saved = preferred.session;
   if (saved?.conversationId && saved?.token) {
     conversationId = saved.conversationId;
     token = saved.token;
@@ -60,7 +88,7 @@ async function connect() {
     const started = await api('/conversations', 'POST', { site_key: siteKey, locale });
     conversationId = started.conversation_id;
     token = started.access_token;
-    localStorage.setItem(sessionKey(), JSON.stringify({ conversationId, token }));
+    (preferred.store || localStorage).setItem(preferred.storeKey || sessionKey(), JSON.stringify({ conversationId, token }));
     await refresh();
     startPolling();
   } catch (error) { showNotice(error.message); }
@@ -344,7 +372,7 @@ function renderAnswers(answers, tasks) {
 function renderRfqs(rfqs) {
   for (const rfq of rfqs) {
     const card = appendCard(`${t('rfq')} · ${rfq.id.slice(0, 8)} · v${rfq.current_revision}`);
-    card.append(node('p', 'muted', `${rfq.quantity || '—'} · ${rfq.model || 'Model pending'} · ${rfq.status}`));
+    card.append(node('p', 'muted', `${rfq.quantity || '—'} · ${rfq.model || rfq.requested_model || 'Model pending'} · ${rfq.status}`));
     card.append(action(t('edit'), () => showRfqForm(rfq), true));
   }
 }
@@ -353,6 +381,22 @@ function showRfqForm(rfq = null) {
   const card = appendCard(rfq ? `${t('edit')} · ${rfq.id.slice(0, 8)}` : t('quote'));
   const form = node('form');
   const submissionKey = crypto.randomUUID();
+  // 产品型号：产品详情页进入时默认当前型号；其他入口由买家手动填写（带可选项建议）。
+  const contextModel = (chatContext && chatContext.model) || '';
+  const candidates = current?.recommendation?.results || [];
+  const defaultModel = rfq
+    ? (rfq.requested_model || rfq.model || contextModel || (candidates[0]?.model || ''))
+    : (contextModel || candidates[0]?.model || '');
+  const modelField = field(form, t('model'), 'requested_model', defaultModel);
+  modelField.placeholder = locale === 'en' ? 'e.g. CB-80A' : '例如：CB-80A';
+  const suggestions = [...new Set([contextModel, ...candidates.map((item) => item.model)].filter(Boolean))];
+  if (suggestions.length) {
+    const modelList = node('datalist');
+    modelList.id = `rfq-models-${submissionKey.slice(0, 8)}`;
+    for (const value of suggestions) { const option = node('option'); option.value = value; modelList.append(option); }
+    modelField.setAttribute('list', modelList.id);
+    form.append(modelList);
+  }
   const email = field(form, 'Email', 'contact_email', rfq?.contact_email || '', 'email');
   const phone = field(form, 'Phone', 'contact_phone', rfq?.contact_phone || '', 'tel');
   const quantity = field(form, t('quantity'), 'quantity', rfq?.quantity || '');
@@ -365,9 +409,21 @@ function showRfqForm(rfq = null) {
     if (!confirmed.checked || (!email.value.trim() && !phone.value.trim())) { showNotice(t('contact')); return; }
     submit.disabled = true;
     try {
+      // 型号解析：与页面上下文 / 当前推荐候选 / 原绑定型号匹配则绑定 product_id；否则只记文字。
+      const modelText = modelField.value.trim();
+      const normalizedModel = modelText.toLowerCase();
+      let boundProductId = null;
+      if (modelText) {
+        if (chatContext && chatContext.productId && String(chatContext.model || '').trim().toLowerCase() === normalizedModel) boundProductId = chatContext.productId;
+        if (!boundProductId) {
+          const hit = candidates.find((item) => String(item.model || '').trim().toLowerCase() === normalizedModel);
+          if (hit) boundProductId = hit.product_id;
+        }
+        if (!boundProductId && rfq && rfq.product_id && String(rfq.model || '').trim().toLowerCase() === normalizedModel) boundProductId = rfq.product_id;
+      }
       const saved = rfq
-        ? await api(`/conversations/${conversationId}/rfqs/${rfq.id}/revisions`, 'POST', { expected_revision: rfq.current_revision, contact_confirmed: true, contact: { contact_email: email.value.trim(), contact_phone: phone.value.trim() }, quantity: quantity.value.trim(), destination: destination.value.trim(), notes: notes.value.trim() }, { 'Idempotency-Key': submissionKey })
-        : await api(`/conversations/${conversationId}/rfqs`, 'POST', { entry_surface: 'chat', contact_confirmed: true, contact: { contact_email: email.value.trim(), contact_phone: phone.value.trim(), quantity: quantity.value.trim(), region: destination.value.trim() }, notes: notes.value.trim() }, { 'Idempotency-Key': submissionKey });
+        ? await api(`/conversations/${conversationId}/rfqs/${rfq.id}/revisions`, 'POST', { expected_revision: rfq.current_revision, contact_confirmed: true, contact: { contact_email: email.value.trim(), contact_phone: phone.value.trim() }, quantity: quantity.value.trim(), destination: destination.value.trim(), notes: notes.value.trim(), product_id: boundProductId, requested_model: modelText }, { 'Idempotency-Key': submissionKey })
+        : await api(`/conversations/${conversationId}/rfqs`, 'POST', { entry_surface: 'chat', contact_confirmed: true, product_id: boundProductId, requested_model: modelText, contact: { contact_email: email.value.trim(), contact_phone: phone.value.trim(), quantity: quantity.value.trim(), region: destination.value.trim() }, notes: notes.value.trim() }, { 'Idempotency-Key': submissionKey });
       await refresh();
       if (!rfq && saved?.related_rfq_hint?.length) {
         showNotice((locale === 'zh' ? '本会话 24 小时内已有同型号询价（不会自动合并，请检查是否相关）：' : 'A same-model RFQ from this conversation exists within 24h (no auto-merge; please check if related): ')
@@ -382,7 +438,10 @@ $('chat-launcher').addEventListener('click', () => {
   $('chat-panel').hidden = false;
   $('chat-launcher').setAttribute('aria-expanded', 'true');
   setBadge(0);
-  if (conversationId) refresh().catch((error) => showNotice(error.message)); else $('site-key').focus();
+  // 产品详情页上下文：打开即自动连接（共享存储已有会话时直接续接）。
+  if (conversationId) refresh().catch((error) => showNotice(error.message));
+  else if (chatContext) connect();
+  else $('site-key').focus();
 });
 $('chat-close').addEventListener('click', () => { $('chat-panel').hidden = true; $('chat-launcher').setAttribute('aria-expanded', 'false'); });
 $('connect').addEventListener('click', connect);
@@ -419,7 +478,8 @@ $('message-form').addEventListener('submit', async (event) => {
     return;
   }
   if (looksLikeQuestion(value)) {
-    const productId = current?.recommendation?.results?.[0]?.product_id || null;
+    // 提问的产品归属：产品详情页上下文优先（页面即语境）；否则绑定当前推荐的首个型号。
+    const productId = (chatContext && chatContext.productId) || current?.recommendation?.results?.[0]?.product_id || null;
     const payload = { product_id: productId, question: value };
     const signature = JSON.stringify(payload);
     if (!pendingQuestion || pendingQuestion.signature !== signature) pendingQuestion = { key: crypto.randomUUID(), signature };

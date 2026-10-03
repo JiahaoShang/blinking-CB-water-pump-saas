@@ -168,6 +168,8 @@ class ReferenceChatBrowserTests(unittest.TestCase):
             "questionToken": created_b["access_token"],
             "taskConversationId": created_c["conversation_id"],
             "taskToken": created_c["access_token"],
+            "contextProductId": cls.expected_product_id,
+            "contextProductModel": cls.expected_model,
             "engineerEmail": "demo-engineer@example.invalid",
             "engineerPassword": "demo-engineer",
         }, ensure_ascii=False), encoding="utf-8")
@@ -303,6 +305,35 @@ class ReferenceChatBrowserTests(unittest.TestCase):
         self.assertIn("6-8 weeks", item["reopenedText"])
         self.assertNotIn("工程师回复：", item["reopenedText"])
         self.assertIn("Engineer reply", item["reopenedText"])
+
+    def test_product_page_context_defaults_model_and_connects(self):
+        results = self.results["results"]
+        item = results["product_page_context"]
+        # 打开聊天窗即自动连接（无需手动点连接）
+        self.assertTrue(item["connected"], item)
+        # 询价表单默认带入当前详情页型号
+        self.assertEqual(item["modelPrefill"], self.expected_model)
+        # 提交的询价绑定该型号（product_id + 型号文字同行提交）
+        rfq_posts = [record for record in item["rfqRequests"] if record["method"] == "POST" and record["url"].endswith("/rfqs")]
+        self.assertEqual(len(rfq_posts), 1, item["rfqRequests"])
+        self.assertEqual(rfq_posts[0]["requestBody"]["product_id"], self.expected_product_id)
+        self.assertEqual(rfq_posts[0]["requestBody"]["requested_model"], self.expected_model)
+        # 提问同样默认绑定当前详情页型号，并得到有据回答
+        question_posts = [record for record in item["questionRequests"] if record["method"] == "POST" and record["url"].endswith("/questions")]
+        self.assertEqual(len(question_posts), 1, item["questionRequests"])
+        self.assertEqual(question_posts[0]["requestBody"]["product_id"], self.expected_product_id)
+        self.assertEqual(question_posts[0]["responseBody"]["status"], "grounded")
+
+    def test_product_page_carries_chat_widget(self):
+        product = self.db.list_products("demo-tenant")[0]
+        status, _, page = request_via(self.server, "GET", f"/s/site-a/products/{product['slug']}")
+        self.assertEqual(status, 200)
+        for marker in ("chat-launcher", "chat-launcher-label", "PUMP_CHAT_CONTEXT", product["id"], product["model"], "/reference-client/app.js", "/reference-client/chat.css", "chat-panel", "/reference-client/product-page.js"):
+            self.assertIn(marker, page)
+        # 静态资源路由必须真的能服务聊天样式（历史坑：白名单漏文件 → 404 → 样式全丢）
+        for asset in ("/reference-client/chat.css", "/reference-client/style.css", "/reference-client/app.js", "/reference-client/product-page.js", "/reference-client/product-page.css"):
+            asset_status, _, _ = request_via(self.server, "GET", asset)
+            self.assertEqual(asset_status, 200, asset)
 
 
 if __name__ == "__main__":

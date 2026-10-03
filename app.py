@@ -506,6 +506,7 @@ class Database:
                 destination TEXT NOT NULL DEFAULT '',
                 requested_delivery TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
+                requested_model TEXT NOT NULL DEFAULT '',
                 missing_json TEXT NOT NULL DEFAULT '[]',
                 status TEXT NOT NULL DEFAULT 'needs_info',
                 snapshot_json TEXT NOT NULL,
@@ -560,6 +561,8 @@ class Database:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN request_hash TEXT")
         if "current_revision" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN current_revision INTEGER NOT NULL DEFAULT 1")
+        if "requested_model" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
+            self.conn.execute("ALTER TABLE rfqs ADD COLUMN requested_model TEXT NOT NULL DEFAULT ''")
         source_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(source_documents)")}
         for column, definition in (
             ("scope", "TEXT NOT NULL DEFAULT 'unknown'"),
@@ -1355,6 +1358,7 @@ class Database:
             "contact_email": row["contact_email"], "contact_phone": row["contact_phone"],
             "quantity": row["quantity"], "destination": row["destination"],
             "requested_delivery": row["requested_delivery"], "notes": row["notes"],
+            "requested_model": row["requested_model"],
             "status": row["status"], "missing": json.loads(row["missing_json"]),
         }
 
@@ -1398,7 +1402,7 @@ class Database:
         if rfq["current_revision"] != expected_revision:
             raise ConflictError("询价已更新，请刷新后再修改")
         current = self.rfq_current_content(rfq)
-        editable = ("contact_name", "company", "contact_email", "contact_phone", "quantity", "destination", "requested_delivery", "notes")
+        editable = ("contact_name", "company", "contact_email", "contact_phone", "quantity", "destination", "requested_delivery", "notes", "requested_model")
         for key in editable:
             if key in changes:
                 current[key] = str(changes[key]).strip()
@@ -1419,8 +1423,8 @@ class Database:
         next_revision = expected_revision + 1
         with self.conn:
             updated = self.conn.execute(
-                "UPDATE rfqs SET current_revision=?, product_id=?, product_version_id=?, contact_name=?, company=?, contact_email=?, contact_phone=?, quantity=?, destination=?, requested_delivery=?, notes=?, missing_json=?, status=? WHERE tenant_id=? AND conversation_id=? AND id=? AND current_revision=?",
-                (next_revision, product_id, version["id"] if version else None, current["contact_name"], current["company"], current["contact_email"], current["contact_phone"], current["quantity"], current["destination"], current["requested_delivery"], current["notes"], json.dumps(missing, ensure_ascii=False), status, tenant_id, conversation_id, rfq_id, expected_revision),
+                "UPDATE rfqs SET current_revision=?, product_id=?, product_version_id=?, contact_name=?, company=?, contact_email=?, contact_phone=?, quantity=?, destination=?, requested_delivery=?, notes=?, requested_model=?, missing_json=?, status=? WHERE tenant_id=? AND conversation_id=? AND id=? AND current_revision=?",
+                (next_revision, product_id, version["id"] if version else None, current["contact_name"], current["company"], current["contact_email"], current["contact_phone"], current["quantity"], current["destination"], current["requested_delivery"], current["notes"], current["requested_model"], json.dumps(missing, ensure_ascii=False), status, tenant_id, conversation_id, rfq_id, expected_revision),
             )
             if updated.rowcount != 1:
                 raise ConflictError("询价已更新，请刷新后再修改")
@@ -1442,11 +1446,14 @@ class Database:
         notes: str,
         selected_product_id: str | None = None,
         entry_surface: str = "chat",
+        requested_model: str = "",
     ) -> tuple[str, bool]:
+        requested_model = str(requested_model or "").strip()
         normalized_contact = {key: contact.get(key, "").strip() for key in ("contact_name", "company", "contact_email", "contact_phone", "quantity", "region", "delivery")}
         request_hash = hashlib.sha256(json.dumps({
             "conversation_id": conversation_id, "contact": normalized_contact, "notes": notes.strip(),
             "selected_product_id": selected_product_id or None, "entry_surface": entry_surface,
+            "requested_model": requested_model,
         }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         existing = self.get_rfq_by_submission_key(tenant_id, submission_key)
         if existing:
@@ -1462,16 +1469,30 @@ class Database:
         recommendation = self.latest_active_recommendation(tenant_id, conversation_id)
         revision_values = json.loads(revision["values_json"]) if revision else {}
         recommendation_results = json.loads(recommendation["results_json"]) if recommendation else []
+        # 型号选择优先级：① 明确指定的产品（推荐结果匹配 → 已发布产品直绑）；
+        # ② 买家明确填写的型号文字（推荐结果 → 已发布产品按名称匹配；匹配不上就不绑定，尊重买家表述）；
+        # ③ 两者都没有（旧客户端）：沿用原有行为，自动绑定当前推荐的首个候选。
         selected_result = None
         if selected_product_id:
             selected_result = next((result for result in recommendation_results if result.get("product_id") == selected_product_id), None)
-        if not selected_result:
+            if not selected_result:
+                product = self.get_product(tenant_id, selected_product_id)
+                version = self.get_published_version(tenant_id, selected_product_id) if product else None
+                if product is not None and version:
+                    selected_result = {"product_id": selected_product_id, "product_version_id": version["id"], "model": product["model"], "status": "direct_view"}
+        if not selected_result and requested_model:
+            wanted = requested_model.lower()
+            selected_result = next((result for result in recommendation_results if str(result.get("model") or "").strip().lower() == wanted), None)
+            if not selected_result:
+                for candidate_product in self.list_products(tenant_id):
+                    if str(candidate_product["model"] or "").strip().lower() != wanted:
+                        continue
+                    version = self.get_published_version(tenant_id, candidate_product["id"])
+                    if version:
+                        selected_result = {"product_id": candidate_product["id"], "product_version_id": version["id"], "model": candidate_product["model"], "status": "direct_view"}
+                    break
+        if not selected_result and not requested_model:
             selected_result = next((result for result in recommendation_results if result.get("status") in {"candidate", "needs_confirmation"}), None)
-        if not selected_result and selected_product_id:
-            product = self.get_product(tenant_id, selected_product_id)
-            version = self.get_published_version(tenant_id, selected_product_id) if product else None
-            if version:
-                selected_result = {"product_id": selected_product_id, "product_version_id": version["id"], "model": product["model"], "status": "direct_view"}
         product_id = selected_result.get("product_id") if selected_result else None
         product_version_id = selected_result.get("product_version_id") if selected_result else None
         missing = []
@@ -1496,8 +1517,8 @@ class Database:
         rfq_id = secrets.token_hex(12)
         timestamp = now_iso()
         self.conn.execute(
-            "INSERT INTO rfqs(id, tenant_id, conversation_id, requirement_revision_id, recommendation_id, product_id, product_version_id, submission_key, request_hash, contact_name, company, contact_email, contact_phone, quantity, destination, requested_delivery, notes, missing_json, status, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (rfq_id, tenant_id, conversation_id, revision["id"] if revision else None, recommendation["id"] if recommendation else None, product_id, product_version_id, submission_key, request_hash, normalized_contact["contact_name"], normalized_contact["company"], normalized_contact["contact_email"], normalized_contact["contact_phone"], normalized_contact["quantity"], normalized_contact["region"], normalized_contact["delivery"], notes.strip(), json.dumps(missing, ensure_ascii=False), status, json.dumps(snapshot, ensure_ascii=False), timestamp),
+            "INSERT INTO rfqs(id, tenant_id, conversation_id, requirement_revision_id, recommendation_id, product_id, product_version_id, submission_key, request_hash, contact_name, company, contact_email, contact_phone, quantity, destination, requested_delivery, notes, requested_model, missing_json, status, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (rfq_id, tenant_id, conversation_id, revision["id"] if revision else None, recommendation["id"] if recommendation else None, product_id, product_version_id, submission_key, request_hash, normalized_contact["contact_name"], normalized_contact["company"], normalized_contact["contact_email"], normalized_contact["contact_phone"], normalized_contact["quantity"], normalized_contact["region"], normalized_contact["delivery"], notes.strip(), requested_model, json.dumps(missing, ensure_ascii=False), status, json.dumps(snapshot, ensure_ascii=False), timestamp),
         )
         initial = self.get_rfq(tenant_id, rfq_id)
         self.conn.execute(
@@ -3408,6 +3429,7 @@ class Handler(BaseHTTPRequestHandler):
             "/reference-client": ("index.html", "text/html; charset=utf-8"),
             "/reference-client/app.js": ("app.js", "text/javascript; charset=utf-8"),
             "/reference-client/style.css": ("style.css", "text/css; charset=utf-8"),
+            "/reference-client/chat.css": ("chat.css", "text/css; charset=utf-8"),
             "/reference-client/product-page.js": ("product-page.js", "text/javascript; charset=utf-8"),
             "/reference-client/product-page.css": ("product-page.css", "text/css; charset=utf-8"),
         }
@@ -4132,7 +4154,7 @@ class Handler(BaseHTTPRequestHandler):
             site, conversation = access
             contact = payload.get("contact")
             submission_key = self.headers.get("Idempotency-Key", "").strip()
-            entry_surface = payload.get("entry_surface", "chat")
+            entry_surface = str(payload.get("entry_surface", "chat"))
             if not isinstance(contact, dict) or not all(isinstance(value, str) for value in contact.values()) or payload.get("contact_confirmed") is not True or not submission_key or entry_surface not in {"chat", "product_page"}:
                 self.send_json({"error": "confirmed_contact_and_submission_key_required"}, 422)
                 return
@@ -4141,14 +4163,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             notes = payload.get("notes", "")
             product_id = payload.get("product_id")
-            if not isinstance(notes, str) or (product_id is not None and not isinstance(product_id, str)):
+            requested_model = payload.get("requested_model", "")
+            if not isinstance(notes, str) or (product_id is not None and not isinstance(product_id, str)) or not isinstance(requested_model, str):
                 self.send_json({"error": "invalid_rfq"}, 422)
                 return
             if product_id and not self.db.get_published_version(site["tenant_id"], product_id):
                 self.send_json({"error": "product_not_found"}, 404)
                 return
             try:
-                rfq_id, created = self.db.create_rfq(site["tenant_id"], conversation["id"], submission_key, contact, notes, product_id, entry_surface)
+                rfq_id, created = self.db.create_rfq(site["tenant_id"], conversation["id"], submission_key, contact, notes, product_id, entry_surface, requested_model)
             except ConflictError:
                 self.send_json({"error": "idempotency_conflict"}, 409)
                 return
@@ -4185,7 +4208,7 @@ class Handler(BaseHTTPRequestHandler):
             if payload.get("contact_confirmed") is not True or not key or type(expected) is not int or not isinstance(contact, dict) or not all(isinstance(value, str) for value in contact.values()):
                 self.send_json({"error": "invalid_rfq_revision"}, 422)
                 return
-            allowed = {"quantity", "destination", "requested_delivery", "notes", "product_id"}
+            allowed = {"quantity", "destination", "requested_delivery", "notes", "product_id", "requested_model"}
             contact_allowed = {"contact_name", "company", "contact_email", "contact_phone"}
             if any(field not in allowed for field in payload if field not in {"expected_revision", "contact_confirmed", "contact"}) or any(field not in contact_allowed for field in contact):
                 self.send_json({"error": "invalid_rfq_fields"}, 422)
@@ -5095,8 +5118,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def admin_rfqs(self, query: dict[str, list[str]]) -> None:
         rfqs = self.db.list_rfqs(self.tenant_id)
+        def model_label(row: sqlite3.Row) -> str:
+            base = row["model"] or ""
+            if row["requested_model"] and row["requested_model"] != base:
+                base = f"{base}（买家填写：{row['requested_model']}）" if base else f"买家填写：{row['requested_model']}"
+            return base or "未指定型号"
         items = "".join(
-            f"<div class='simple-item'><div><strong>{esc(rfq['id'])} · {esc(rfq['model'] or '未指定型号')}</strong>"
+            f"<div class='simple-item'><div><strong>{esc(rfq['id'])} · {esc(model_label(rfq))}</strong>"
             f"<small>{esc(rfq['contact_email'] or '未提供联系人')} · <span class='badge'>{esc(rfq['status'])}</span> · {esc(rfq['created_at'])}</small></div>"
             f"<div class='actions'><a class='button secondary' href='/admin/rfqs/{rfq['id']}'>查看 →</a></div></div>"
             for rfq in rfqs
@@ -5122,9 +5150,13 @@ class Handler(BaseHTTPRequestHandler):
         else:
             focus_label, focus_title, focus_text = "当前状态 · 字段完整", "提交字段完整，仍不等于自动承诺可报价", "如需调整商务信息，由买家在原页面修改同一张询价。"
         focus_html = f"<div class='focus'><div><span class='focus-label'>{esc(focus_label)}</span><strong>{esc(focus_title)}</strong><p>{esc(focus_text)}</p></div><div class='actions'></div></div>"
+        model_display = rfq["model"] or ""
+        if rfq["requested_model"] and rfq["requested_model"] != model_display:
+            model_display = f"{model_display}（买家填写：{rfq['requested_model']}）" if model_display else f"买家填写：{rfq['requested_model']}"
+        model_display = model_display or "未指定"
         revision_rows = []
         previous_data = None
-        diff_labels = (("product_id", "型号"), ("contact_email", "邮箱"), ("contact_phone", "电话"), ("quantity", "数量"), ("destination", "目的地"), ("requested_delivery", "期望交期"), ("notes", "说明"))
+        diff_labels = (("product_id", "型号"), ("requested_model", "填写型号"), ("contact_email", "邮箱"), ("contact_phone", "电话"), ("quantity", "数量"), ("destination", "目的地"), ("requested_delivery", "期望交期"), ("notes", "说明"))
         for item in self.db.list_rfq_revisions(self.tenant_id, rfq_id):
             data = json.loads(item["content_json"])
             history_product = self.db.get_product(self.tenant_id, data["product_id"]) if data["product_id"] else None
@@ -5147,7 +5179,7 @@ class Handler(BaseHTTPRequestHandler):
                 diff_text = "；".join(pieces) or "无字段变化"
             revision_rows.append(
                 f"<tr><td>v{item['revision']}</td><td>{esc(item['created_at'])}</td><td>{esc(item['actor'])}</td><td>{diff_text}</td>"
-                f"<td>{esc(history_product['model'] if history_product else '未指定')}</td><td>{esc(data['contact_email'] or data['contact_phone'] or '未提供')}</td><td>{esc(data['quantity'] or '待补充')}</td>"
+                f"<td>{esc(history_product['model'] if history_product else (data.get('requested_model') or '未指定'))}</td><td>{esc(data['contact_email'] or data['contact_phone'] or '未提供')}</td><td>{esc(data['quantity'] or '待补充')}</td>"
                 f"<td>{esc(data['destination'] or '待补充')}</td><td>{esc(data['notes'] or '无')}</td></tr>"
             )
             previous_data = data
@@ -5155,7 +5187,7 @@ class Handler(BaseHTTPRequestHandler):
         body = f"""
 <div class='toolbar'><div><a href='/admin/rfqs'>← 返回 RFQ 列表</a><h1>RFQ {esc(rfq['id'])}</h1><div class='muted'>状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])} · {esc(rfq['created_at'])}</div></div></div>
 {focus_html}
-<div class='grid'><section class='card'><h2>联系人（后台可见）</h2><p><b>姓名：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p></section><section class='card'><h2>询价信息</h2><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'}</p><p><b>目的地：</b>{esc(rfq['destination']) or '待补充'}</p><p><b>期望交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>补充说明：</b>{esc(rfq['notes']) or '无'}</p></section></div>
+<div class='grid'><section class='card'><h2>联系人（后台可见）</h2><p><b>姓名：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p></section><section class='card'><h2>询价信息</h2><p><b>型号：</b>{esc(model_display)}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'}</p><p><b>目的地：</b>{esc(rfq['destination']) or '待补充'}</p><p><b>期望交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>补充说明：</b>{esc(rfq['notes']) or '无'}</p></section></div>
 <section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>
 <section class='card' style='margin-top:18px'><h2>RFQ 提交与修改记录（仅卖方可见）</h2><table><thead><tr><th>版本</th><th>时间</th><th>修改者</th><th>变更内容（相对上一版）</th><th>型号</th><th>联系</th><th>数量</th><th>目的地</th><th>说明</th></tr></thead><tbody>{revision_rows}</tbody></table></section>
 <div class='footer-note'>该 RFQ 保存了提交时的需求、推荐和产品版本快照；后续产品更新不会静默改写这条历史询价。</div>
@@ -5371,6 +5403,20 @@ class Handler(BaseHTTPRequestHandler):
         comparison_links = "".join(f"<li><a href='{source_prefix}/products/{esc(item['slug'])}'>{esc(item['model'])}</a></li>" for item, _ in comparison_snapshots)
         title = f"{product['model']} | Industrial Pump"
         inquiry_link = "<a class='button' href='#product-rfq'>Request a quote / 发起询价</a>" if site else "<p class='muted'>Open the seller's website link to request a quote.</p>"
+        chat_html = ""
+        if site:
+            context_json = json.dumps({"siteKey": site["site_key"], "productId": product["id"], "model": product["model"]}, ensure_ascii=False).replace("</", "<\\/")
+            chat_html = f"""<script>window.PUMP_CHAT_CONTEXT={context_json};</script>
+<button id="chat-launcher" class="chat-launcher" aria-controls="chat-panel" aria-expanded="false"><span id="chat-launcher-label">Ask me about products</span><span id="chat-badge" class="chat-badge" hidden></span></button>
+<aside id="chat-panel" class="chat-panel" aria-label="Pump product conversation" hidden>
+<div class="chat-header"><div><strong id="chat-title">Pump product assistant</strong><small id="chat-subtitle">Technical information with sources</small></div><button id="chat-language" type="button" title="Switch language">中文</button><button id="chat-close" type="button" aria-label="Close chat">−</button></div>
+<div class="site-config"><label for="site-key">Website key</label><div><input id="site-key" autocomplete="off" placeholder="Paste key from seller workspace"><button id="connect" type="button">Connect</button></div><small>This page connects to the seller chat automatically.</small></div>
+<div id="chat-log" class="chat-log" role="log" aria-live="polite"></div>
+<div id="chat-notice" class="chat-notice" role="status"></div>
+<div id="chat-actions" class="chat-actions"><button id="show-rfq" type="button">Request a quote</button><button id="stop-contact" type="button" class="secondary">Stop proactive contact</button></div>
+<form id="message-form" class="message-form"><label for="message">Your message</label><div><textarea id="message" rows="2"></textarea><button type="submit">Send</button></div></form>
+</aside>
+<script src='/reference-client/app.js' defer></script>"""
         rfq_html = f"""<section class='card' id='product-rfq' data-site-key='{esc(site['site_key'])}' data-product-id='{esc(product['id'])}' style='margin-top:18px'>
 <h2>Request a quotation / 发起询价</h2><p class='muted'>You may send a request at any time. Please confirm an email or phone so the seller can reply.</p>
 <p id='product-rfq-session' class='muted' role='status'></p>
@@ -5393,12 +5439,13 @@ class Handler(BaseHTTPRequestHandler):
 <section class='page-section' id='downloads' data-section='downloads'><h2>{t('Approved documents', '已获准公开的资料')}</h2><ul class='file-list'>{source_links}</ul><p class='muted'>{t('Documents without publication permission, outside the current version, or revoked are not downloadable.', '未获准公开、未纳入当前版本或已撤销许可的文件不提供下载。')}</p></section>
 <section class='page-section' id='faq' data-section='faq'><h2>{t('Frequently asked questions', '常见问题')}</h2><details><summary>{t('Can this model meet my exact duty point?', '这个型号能满足我的具体工况吗？')}</summary><p>{t('Compare the sourced flow and head information above, then ask an engineer to check your actual conditions.', '先核对上方有出处的流量、扬程数据，再请工程师检查实际工况。')}</p></details><details><summary>{t('What are the MOQ and lead time?', '起订量和交期是多少？')}</summary><p>{t('The published record does not confirm these commercial terms. Include your quantity and destination in an RFQ.', '当前已发布资料没有确认这些商务条件。请在询价中提供数量和目的地。')}</p></details></section>
 {rfq_html}
+{chat_html}
 {mobile_cta_html}
 <footer class='page-footer'>{t('Initial technical display; not a quotation or final engineering approval.', '初步技术展示；并非报价或最终工程适配结论。')} · <a href='{public_path}?lang={'zh' if lang == 'en' else 'en'}'>{'切换中文' if lang == 'en' else 'Switch to English'}</a></footer>
 """
         page = layout(title, body, lang=lang, public=True)
         json_ld = json.dumps({'@context': 'https://schema.org', '@type': 'Product', 'name': product['name'], 'model': product['model']}, ensure_ascii=False).replace("</", "<\\/")
-        page = page.replace("</head>", f"<meta name='description' content='{esc(product['name'])} - approved industrial pump specifications'><script type='application/ld+json'>{json_ld}</script><link rel='stylesheet' href='/reference-client/product-page.css'></head>")
+        page = page.replace("</head>", f"<meta name='description' content='{esc(product['name'])} - approved industrial pump specifications'><script type='application/ld+json'>{json_ld}</script><link rel='stylesheet' href='/reference-client/product-page.css'><link rel='stylesheet' href='/reference-client/chat.css'><style>@media(max-width:760px){{.chat-launcher{{bottom:74px}}.chat-panel{{bottom:64px;max-height:calc(100vh - 80px)}}}}</style></head>")
         self.send_html(page, 200)
 
     def public_source(self, slug: str, source_id: str, site: sqlite3.Row | None = None, preview: bool = False) -> None:

@@ -770,6 +770,29 @@ class BuyerApiTests(unittest.TestCase):
         self.assertEqual(self.db.get_rfq("demo-tenant", rfq_id)["current_revision"], 2)
         self.assertEqual(len(self.db.list_rfq_revisions("demo-tenant", rfq_id)), 2)
 
+    def test_rfq_requested_model_text_binds_only_when_matching(self):
+        self.db.seed_demo_products("demo-tenant")
+        product = self.db.list_products("demo-tenant")[0]
+        approve_all_fields(self.db, "demo-tenant", product["id"])
+        self.db.publish_product("demo-tenant", product["id"])
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        # 买方手填的型号文字匹配已发布产品 → 绑定该产品
+        _, _, matched = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "requested_model": product["model"]}, {**headers, "Idempotency-Key": "model-1"})
+        row = self.db.get_rfq("demo-tenant", matched["rfq_id"])
+        self.assertEqual(row["product_id"], product["id"])
+        self.assertEqual(row["requested_model"], product["model"])
+        # 手填型号无匹配 → 只记录文字、不绑定任何产品（尊重买方表述）
+        _, _, custom = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "requested_model": "ZZ-999（定制款）"}, {**headers, "Idempotency-Key": "model-2"})
+        row = self.db.get_rfq("demo-tenant", custom["rfq_id"])
+        self.assertIsNone(row["product_id"])
+        self.assertEqual(row["requested_model"], "ZZ-999（定制款）")
+        # 买方侧会话载荷可见该型号文字（询价卡展示用）
+        _, _, current = self.request("GET", path, headers=headers)
+        payload = next(item for item in current["rfqs"] if item["id"] == custom["rfq_id"])
+        self.assertEqual(payload["requested_model"], "ZZ-999（定制款）")
+
     def test_same_model_rfq_hint_within_24h_same_conversation(self):
         self.db.seed_demo_products("demo-tenant")
         product = self.db.list_products("demo-tenant")[0]
