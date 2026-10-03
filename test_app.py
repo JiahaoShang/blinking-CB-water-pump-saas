@@ -1,6 +1,8 @@
 import json
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from pathlib import Path
 
@@ -481,6 +483,27 @@ class SalesWorkspaceTests(unittest.TestCase):
         self.assertEqual({self.db.get_lead_for_rfq("demo-tenant", rfq_id)["owner"] for rfq_id in (self.rfq_id, other_rfq, third_rfq)}, {"sales-two@example.invalid"})
         with self.assertRaises(ValueError):
             self.db.assign_conversation_leads("demo-tenant", self.rfq_id, "demo-engineer@example.invalid", "demo-sales@example.invalid")
+
+    def test_concurrent_claims_keep_one_conversation_owner(self):
+        self.db.create_user("demo-tenant", "sales-two@example.invalid", "Second sales", "sales", "test-pass-123", "demo-admin@example.invalid")
+        barrier = threading.Barrier(2)
+
+        def claim(email):
+            db = Database(self.db.path, initialize=False)
+            try:
+                barrier.wait(timeout=5)
+                try:
+                    db.claim_conversation_leads("demo-tenant", self.rfq_id, email)
+                    return "claimed"
+                except ValueError:
+                    return "already_owned"
+            finally:
+                db.conn.close()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(claim, ("demo-sales@example.invalid", "sales-two@example.invalid")))
+        self.assertCountEqual(results, ["claimed", "already_owned"])
+        self.assertIn(self.db.get_lead_for_rfq("demo-tenant", self.rfq_id)["owner"], ("demo-sales@example.invalid", "sales-two@example.invalid"))
 
     def test_stop_contact_preserves_rfq_and_clears_proactive_followup(self):
         rfq = self.db.get_rfq("demo-tenant", self.rfq_id)

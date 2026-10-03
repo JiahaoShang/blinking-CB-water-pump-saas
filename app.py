@@ -85,13 +85,15 @@ def parse_float(value: str | None) -> float | None:
 
 
 class Database:
-    def __init__(self, path: str | os.PathLike[str]):
+    def __init__(self, path: str | os.PathLike[str], *, initialize: bool = True):
         self.path = str(path)
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
-        self.init_schema()
+        self.conn.execute("PRAGMA busy_timeout = 5000")
+        if initialize:
+            self.init_schema()
 
     def init_schema(self) -> None:
         self.conn.executescript(
@@ -604,13 +606,16 @@ class Database:
         return self.get_conversation(tenant_id, conversation_id)
 
     def stop_proactive_contact(self, tenant_id: str, conversation_id: str, reason: str, source: str, actor: str) -> bool:
-        conversation = self.get_conversation(tenant_id, conversation_id)
-        if not conversation or not reason.strip() or source not in {"buyer_chat", "seller_record"}:
+        if not reason.strip() or source not in {"buyer_chat", "seller_record"}:
             raise ValueError("需要有效会话和买方停止联系的原话")
-        if conversation["stop_proactive_contact"]:
-            return False
         timestamp = now_iso()
         with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            conversation = self.get_conversation(tenant_id, conversation_id)
+            if not conversation:
+                raise ValueError("需要有效会话和买方停止联系的原话")
+            if conversation["stop_proactive_contact"]:
+                return False
             self.conn.execute(
                 "UPDATE conversations SET stop_proactive_contact=1, stop_reason=?, stop_source=?, stopped_at=?, updated_at=? WHERE tenant_id=? AND id=?",
                 (reason.strip(), source, timestamp, timestamp, tenant_id, conversation_id),
@@ -1080,6 +1085,7 @@ class Database:
         if not user or not user["active"] or user["role"] != "sales" or not lead:
             raise ValueError("没有可领取的线索")
         with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
             owners = {row["owner"] for row in self.conn.execute("SELECT owner FROM leads WHERE tenant_id=? AND conversation_id=? AND owner IS NOT NULL", (tenant_id, lead["conversation_id"]))}
             if owners:
                 raise ValueError("该会话已由销售负责")
@@ -1163,16 +1169,17 @@ class Database:
         lead = self.get_lead_for_rfq(tenant_id, rfq_id)
         if not lead:
             raise ValueError("线索不存在")
-        preference = self.get_contact_preference(tenant_id, lead["conversation_id"])
-        if preference and preference["stop_proactive_contact"] and next_follow_up.strip():
-            raise ValueError("买方已要求停止主动联系，不能安排主动跟进日期")
-        timestamp = now_iso()
-        self.conn.execute(
-            "UPDATE leads SET stage=?, next_follow_up=?, note=?, updated_at=? WHERE tenant_id=? AND rfq_id=?",
-            (stage, next_follow_up.strip() or None, note.strip(), timestamp, tenant_id, rfq_id),
-        )
-        self._audit(tenant_id, "lead", lead["id"], "updated", actor, f"rfq={rfq_id};stage={stage};next_follow_up={next_follow_up}")
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            preference = self.get_contact_preference(tenant_id, lead["conversation_id"])
+            if preference and preference["stop_proactive_contact"] and next_follow_up.strip():
+                raise ValueError("买方已要求停止主动联系，不能安排主动跟进日期")
+            timestamp = now_iso()
+            self.conn.execute(
+                "UPDATE leads SET stage=?, next_follow_up=?, note=?, updated_at=? WHERE tenant_id=? AND rfq_id=?",
+                (stage, next_follow_up.strip() or None, note.strip(), timestamp, tenant_id, rfq_id),
+            )
+            self._audit(tenant_id, "lead", lead["id"], "updated", actor, f"rfq={rfq_id};stage={stage};next_follow_up={next_follow_up}")
 
     def list_entity_audit(self, tenant_id: str, entity_ids: list[str]) -> list[sqlite3.Row]:
         if not entity_ids:
@@ -1772,6 +1779,16 @@ class Handler(BaseHTTPRequestHandler):
     actor = "demo-admin"
     user_role = "admin"
     user_id = ""
+
+    def setup(self) -> None:
+        super().setup()
+        self.db = Database(self.db.path, initialize=False)
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        finally:
+            self.db.conn.close()
 
     def log_message(self, format: str, *args: object) -> None:
         return
