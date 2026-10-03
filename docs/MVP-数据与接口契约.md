@@ -75,6 +75,6 @@ tenant ─ conversation ─ original_message ─ requirement_revision
 
 ## 5. 当前实现状态（2026-10-03）
 
-已由代码和 HTTP 测试覆盖：登记网站标识与允许来源的数据库对象；`POST /api/v1/buyer/conversations`、`GET /api/v1/buyer/conversations/{id}`、`POST .../messages`、`POST .../requirements/confirm`、`POST .../recommendations`、`POST .../questions`、`POST .../human-requests`、`POST .../rfqs`。API 使用网站标识确定企业，以每会话随机凭据访问私有对象；会话读取返回当前需求、推荐、问答、任务和 RFQ 摘要。推荐目前沿用明确标为演示的水泵规则；RFQ 初次提交要求联系信息和确认标记，同一提交键的相同内容重试不重复建单，改内容返回冲突。
+已由代码和 HTTP 测试覆盖：登记网站标识与允许来源的数据库对象；`POST /api/v1/buyer/conversations`、`GET /api/v1/buyer/conversations/{id}`、`POST .../messages`、`POST .../requirements/confirm`、`POST .../recommendations`、`POST .../questions`、`POST .../human-requests`、`POST .../rfqs`、`POST .../rfqs/{rfq_id}/revisions`。API 使用网站标识确定企业，以每会话随机凭据访问私有对象；会话读取返回当前需求、推荐、问答、任务和 RFQ 当前值。推荐目前沿用明确标为演示的水泵规则；RFQ 初次提交要求联系信息和确认标记，同一提交键的相同内容重试不重复建单，改内容返回冲突。RFQ 修订沿用原编号，以期望版本号处理过期修改；初次提交和修订只在卖方 RFQ 详情显示历史，测试证明重开数据库后仍在。
 
-仍未完成：通过卖家界面配置网站接入；创建会话、消息、问答与人工请求的完整并发幂等；RFQ 修订接口与卖方历史；已发布产品的公开 JSON API；详情页与官网参考聊天窗口真实调用同一 RFQ API；跨站凭据交接、模型失败处理、完整 CORS 错误响应、部署环境与恢复演练。因此本文件仍是开发契约，不能称作外部接入已验收。
+仍未完成：通过卖家界面配置网站接入；创建会话、消息、问答与人工请求的完整并发幂等；买方聊天历史中的 RFQ 编辑卡；已发布产品的公开 JSON API；详情页与官网参考聊天窗口真实调用同一 RFQ API；跨站凭据交接、模型失败处理、完整 CORS 错误响应、部署环境与恢复演练。因此本文件仍是开发契约，不能称作外部接入已验收。

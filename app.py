@@ -284,6 +284,7 @@ class Database:
                 product_version_id TEXT REFERENCES product_versions(id),
                 submission_key TEXT NOT NULL,
                 request_hash TEXT,
+                current_revision INTEGER NOT NULL DEFAULT 1,
                 contact_name TEXT NOT NULL DEFAULT '',
                 company TEXT NOT NULL DEFAULT '',
                 contact_email TEXT NOT NULL DEFAULT '',
@@ -297,6 +298,19 @@ class Database:
                 snapshot_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 UNIQUE (tenant_id, submission_key)
+            );
+            CREATE TABLE IF NOT EXISTS rfq_revisions (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                rfq_id TEXT NOT NULL REFERENCES rfqs(id),
+                revision INTEGER NOT NULL,
+                content_json TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                idempotency_key TEXT,
+                request_hash TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE (rfq_id, revision),
+                UNIQUE (rfq_id, idempotency_key)
             );
             CREATE TABLE IF NOT EXISTS leads (
                 id TEXT PRIMARY KEY,
@@ -315,6 +329,13 @@ class Database:
         )
         if "request_hash" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN request_hash TEXT")
+        if "current_revision" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
+            self.conn.execute("ALTER TABLE rfqs ADD COLUMN current_revision INTEGER NOT NULL DEFAULT 1")
+        for rfq in self.conn.execute("SELECT * FROM rfqs WHERE NOT EXISTS (SELECT 1 FROM rfq_revisions WHERE rfq_id=rfqs.id)").fetchall():
+            self.conn.execute(
+                "INSERT INTO rfq_revisions(id, tenant_id, rfq_id, revision, content_json, actor, created_at) VALUES (?, ?, ?, 1, ?, 'legacy-import', ?)",
+                (secrets.token_hex(12), rfq["tenant_id"], rfq["id"], json.dumps(self.rfq_current_content(rfq), ensure_ascii=False), rfq["created_at"]),
+            )
         self.conn.execute(
             "INSERT OR IGNORE INTO tenants(id, name, created_at) VALUES (?, ?, ?)",
             ("demo-tenant", "示例水泵企业（演示）", now_iso()),
@@ -803,11 +824,78 @@ class Database:
             (tenant_id, rfq_id),
         ).fetchone()
 
+    @staticmethod
+    def rfq_current_content(row: sqlite3.Row) -> dict[str, object]:
+        return {
+            "product_id": row["product_id"], "contact_name": row["contact_name"], "company": row["company"],
+            "contact_email": row["contact_email"], "contact_phone": row["contact_phone"],
+            "quantity": row["quantity"], "destination": row["destination"],
+            "requested_delivery": row["requested_delivery"], "notes": row["notes"],
+            "status": row["status"], "missing": json.loads(row["missing_json"]),
+        }
+
+    def list_rfq_revisions(self, tenant_id: str, rfq_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM rfq_revisions WHERE tenant_id=? AND rfq_id=? ORDER BY revision",
+            (tenant_id, rfq_id),
+        ).fetchall()
+
     def list_rfqs(self, tenant_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT r.*, p.model FROM rfqs r LEFT JOIN products p ON p.id=r.product_id WHERE r.tenant_id=? ORDER BY r.created_at DESC",
             (tenant_id,),
         ).fetchall()
+
+    def revise_rfq(self, tenant_id: str, conversation_id: str, rfq_id: str, expected_revision: int, changes: dict[str, object], idempotency_key: str) -> tuple[int, bool]:
+        rfq = self.get_rfq(tenant_id, rfq_id)
+        if not rfq or rfq["conversation_id"] != conversation_id:
+            raise ValueError("询价不存在")
+        request_hash = hashlib.sha256(json.dumps(changes, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        prior = self.conn.execute(
+            "SELECT revision, request_hash FROM rfq_revisions WHERE tenant_id=? AND rfq_id=? AND idempotency_key=?",
+            (tenant_id, rfq_id, idempotency_key),
+        ).fetchone()
+        if prior:
+            if not hmac.compare_digest(prior["request_hash"], request_hash):
+                raise ConflictError("同一修改标识不能用于不同内容")
+            return prior["revision"], False
+        if rfq["current_revision"] != expected_revision:
+            raise ConflictError("询价已更新，请刷新后再修改")
+        current = self.rfq_current_content(rfq)
+        editable = ("contact_name", "company", "contact_email", "contact_phone", "quantity", "destination", "requested_delivery", "notes")
+        for key in editable:
+            if key in changes:
+                current[key] = str(changes[key]).strip()
+        if "product_id" in changes:
+            current["product_id"] = changes["product_id"] or None
+        if not (current["contact_email"] or current["contact_phone"]):
+            raise ValueError("请保留至少一种可回复联系方式")
+        product_id = current["product_id"]
+        version = self.get_published_version(tenant_id, product_id) if product_id else None
+        if product_id and not version:
+            raise ValueError("所选产品未发布或不属于当前企业")
+        technical_missing = [item for item in json.loads(rfq["missing_json"]) if item not in {"数量", "目的地", "期望交期"}]
+        if "product_id" in changes and product_id != rfq["product_id"] and "产品适用性待核实" not in technical_missing:
+            technical_missing.append("产品适用性待核实")
+        missing = technical_missing + [label for key, label in (("quantity", "数量"), ("destination", "目的地"), ("requested_delivery", "期望交期")) if not current[key]]
+        status = "needs_info" if missing else "submitted"
+        timestamp = now_iso()
+        next_revision = expected_revision + 1
+        with self.conn:
+            updated = self.conn.execute(
+                "UPDATE rfqs SET current_revision=?, product_id=?, product_version_id=?, contact_name=?, company=?, contact_email=?, contact_phone=?, quantity=?, destination=?, requested_delivery=?, notes=?, missing_json=?, status=? WHERE tenant_id=? AND conversation_id=? AND id=? AND current_revision=?",
+                (next_revision, product_id, version["id"] if version else None, current["contact_name"], current["company"], current["contact_email"], current["contact_phone"], current["quantity"], current["destination"], current["requested_delivery"], current["notes"], json.dumps(missing, ensure_ascii=False), status, tenant_id, conversation_id, rfq_id, expected_revision),
+            )
+            if updated.rowcount != 1:
+                raise ConflictError("询价已更新，请刷新后再修改")
+            revised = self.get_rfq(tenant_id, rfq_id)
+            self.conn.execute(
+                "INSERT INTO rfq_revisions(id, tenant_id, rfq_id, revision, content_json, actor, idempotency_key, request_hash, created_at) VALUES (?, ?, ?, ?, ?, 'buyer', ?, ?, ?)",
+                (secrets.token_hex(12), tenant_id, rfq_id, next_revision, json.dumps(self.rfq_current_content(revised), ensure_ascii=False), idempotency_key, request_hash, timestamp),
+            )
+            self.conn.execute("UPDATE leads SET updated_at=? WHERE tenant_id=? AND rfq_id=?", (timestamp, tenant_id, rfq_id))
+            self._audit(tenant_id, "rfq", rfq_id, "buyer_revised", "buyer", f"revision={next_revision}")
+        return next_revision, True
 
     def create_rfq(
         self,
@@ -874,6 +962,11 @@ class Database:
         self.conn.execute(
             "INSERT INTO rfqs(id, tenant_id, conversation_id, requirement_revision_id, recommendation_id, product_id, product_version_id, submission_key, request_hash, contact_name, company, contact_email, contact_phone, quantity, destination, requested_delivery, notes, missing_json, status, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (rfq_id, tenant_id, conversation_id, revision["id"] if revision else None, recommendation["id"] if recommendation else None, product_id, product_version_id, submission_key, request_hash, normalized_contact["contact_name"], normalized_contact["company"], normalized_contact["contact_email"], normalized_contact["contact_phone"], normalized_contact["quantity"], normalized_contact["region"], normalized_contact["delivery"], notes.strip(), json.dumps(missing, ensure_ascii=False), status, json.dumps(snapshot, ensure_ascii=False), timestamp),
+        )
+        initial = self.get_rfq(tenant_id, rfq_id)
+        self.conn.execute(
+            "INSERT INTO rfq_revisions(id, tenant_id, rfq_id, revision, content_json, actor, created_at) VALUES (?, ?, ?, 1, ?, 'buyer', ?)",
+            (secrets.token_hex(12), tenant_id, rfq_id, json.dumps(self.rfq_current_content(initial), ensure_ascii=False), timestamp),
         )
         lead_id = secrets.token_hex(12)
         self.conn.execute(
@@ -1749,7 +1842,7 @@ class Handler(BaseHTTPRequestHandler):
                 for row in self.db.list_human_tasks(site["tenant_id"]) if row["conversation_id"] == conversation["id"]
             ]
             rfqs = [
-                {"id": row["id"], "status": row["status"], "model": row["model"], "quantity": row["quantity"], "missing": json.loads(row["missing_json"]), "created_at": row["created_at"]}
+                {"id": row["id"], "current_revision": row["current_revision"], "model": row["model"], "created_at": row["created_at"], **self.db.rfq_current_content(row)}
                 for row in self.db.list_rfqs(site["tenant_id"]) if row["conversation_id"] == conversation["id"]
             ]
             latest_revision = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
@@ -2031,6 +2124,50 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(
                 {"rfq_id": rfq_id, "status": row["status"], "missing": json.loads(row["missing_json"])}, 201 if created else 200,
                 site["allowed_origin"] if self.headers.get("Origin") else None,
+            )
+            return
+        api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/rfqs/([a-f0-9]+)/revisions", path)
+        if api_match:
+            access = self.api_conversation(api_match.group(1))
+            if not access:
+                return
+            payload = self.read_json()
+            if payload is None:
+                return
+            site, conversation = access
+            rfq_id = api_match.group(2)
+            rfq = self.db.get_rfq(site["tenant_id"], rfq_id)
+            if not rfq or rfq["conversation_id"] != conversation["id"]:
+                self.send_json({"error": "rfq_not_found"}, 404)
+                return
+            key = self.headers.get("Idempotency-Key", "").strip()
+            expected = payload.get("expected_revision")
+            contact = payload.get("contact", {})
+            if payload.get("contact_confirmed") is not True or not key or type(expected) is not int or not isinstance(contact, dict) or not all(isinstance(value, str) for value in contact.values()):
+                self.send_json({"error": "invalid_rfq_revision"}, 422)
+                return
+            allowed = {"quantity", "destination", "requested_delivery", "notes", "product_id"}
+            contact_allowed = {"contact_name", "company", "contact_email", "contact_phone"}
+            if any(field not in allowed for field in payload if field not in {"expected_revision", "contact_confirmed", "contact"}) or any(field not in contact_allowed for field in contact):
+                self.send_json({"error": "invalid_rfq_fields"}, 422)
+                return
+            changes = {field: value for field, value in payload.items() if field in allowed}
+            changes.update(contact)
+            if not all((value is None or isinstance(value, str)) if field == "product_id" else isinstance(value, str) for field, value in changes.items()):
+                self.send_json({"error": "invalid_rfq_fields"}, 422)
+                return
+            try:
+                revision, created = self.db.revise_rfq(site["tenant_id"], conversation["id"], rfq_id, expected, changes, key)
+            except ConflictError:
+                self.send_json({"error": "revision_conflict"}, 409)
+                return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 422)
+                return
+            current = self.db.get_rfq(site["tenant_id"], rfq_id)
+            self.send_json(
+                {"rfq_id": rfq_id, "current_revision": revision, "status": current["status"], "missing": json.loads(current["missing_json"])},
+                201 if created else 200, site["allowed_origin"] if self.headers.get("Origin") else None,
             )
             return
         if path == "/login":
@@ -2517,11 +2654,20 @@ class Handler(BaseHTTPRequestHandler):
         requirement_rows = "".join(f"<tr><td>{esc(item.get('label', key))}</td><td>{esc(item.get('value', ''))} {esc(item.get('unit', ''))}</td><td>{esc(item.get('state', ''))}</td></tr>" for key, item in requirements.items()) or "<tr><td colspan='3' class='muted'>暂无需求快照</td></tr>"
         missing = json.loads(rfq["missing_json"])
         missing_html = f"<div class='error'>待补充：{esc('、'.join(missing))}</div>" if missing else "<div class='notice'>提交字段完整，仍不等于系统自动承诺可报价。</div>"
+        revision_rows = "".join(
+            f"<tr><td>v{item['revision']}</td><td>{esc(item['created_at'])}</td><td>{esc(item['actor'])}</td>"
+            f"<td>{esc(history_product['model'] if history_product else '未指定')}</td><td>{esc(data['contact_email'] or data['contact_phone'] or '未提供')}</td><td>{esc(data['quantity'] or '待补充')}</td>"
+            f"<td>{esc(data['destination'] or '待补充')}</td><td>{esc(data['notes'] or '无')}</td></tr>"
+            for item in self.db.list_rfq_revisions(self.tenant_id, rfq_id)
+            for data in [json.loads(item["content_json"])]
+            for history_product in [self.db.get_product(self.tenant_id, data["product_id"]) if data["product_id"] else None]
+        )
         body = f"""
 <div class='toolbar'><div><a href='/admin/rfqs'>← 返回 RFQ 列表</a><h1>RFQ {esc(rfq['id'])}</h1><div class='muted'>状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])}</div></div></div>
 {missing_html}
 <div class='grid'><section class='card'><h2>联系人（后台可见）</h2><p><b>姓名：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p></section><section class='card'><h2>询价信息</h2><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'}</p><p><b>目的地：</b>{esc(rfq['destination']) or '待补充'}</p><p><b>期望交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>补充说明：</b>{esc(rfq['notes']) or '无'}</p></section></div>
 <section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>
+<section class='card' style='margin-top:18px'><h2>RFQ 提交与修改记录（仅卖方可见）</h2><table><thead><tr><th>版本</th><th>时间</th><th>修改者</th><th>型号</th><th>联系</th><th>数量</th><th>目的地</th><th>说明</th></tr></thead><tbody>{revision_rows}</tbody></table></section>
 <div class='footer-note'>该 RFQ 保存了提交时的需求、推荐和产品版本快照；后续产品更新不会静默改写这条历史询价。</div>
 """
         self.send_html(layout("RFQ 详情", body), 200)
@@ -2571,7 +2717,7 @@ class Handler(BaseHTTPRequestHandler):
         body = f"""
 <div class='toolbar'><div><a href='/admin/sales'>← 返回销售工作台</a><h1>销售线索 {esc(rfq['id'])}</h1><div class='muted'>RFQ 状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])}</div></div></div>
 {notice}
-<div class='grid'><section class='card'><h2>线索处理</h2><form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>负责人</label><input name='owner' value='{esc(lead['owner'] or '')}' placeholder='例如 Alex / 售前工程师'><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}'><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p></section></div>
+<div class='grid'><section class='card'><h2>线索处理</h2><form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>负责人</label><input name='owner' value='{esc(lead['owner'] or '')}' placeholder='例如 Alex / 售前工程师'><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}'><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
 <section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>
 <div class='grid' style='margin-top:18px'><section class='card'><h2>推荐快照</h2>{recommendation_html}</section><section class='card'><h2>问答与人工任务</h2>{answer_rows}{task_rows}</section></div>
 <section class='card' style='margin-top:18px'><h2>操作记录</h2>{audit_html}</section>

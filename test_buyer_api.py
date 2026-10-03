@@ -5,7 +5,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from app import make_server
+from app import Database, Handler, make_server
 
 
 class BuyerApiTests(unittest.TestCase):
@@ -164,6 +164,50 @@ class BuyerApiTests(unittest.TestCase):
         self.assertEqual(len(self.db.list_rfqs("demo-tenant")), 1)
         _, _, current = self.request("GET", path, headers=headers)
         self.assertEqual(current["rfqs"][0]["id"], first["rfq_id"])
+
+    def test_buyer_edits_same_rfq_with_seller_history_and_stale_revision_conflict(self):
+        self.db.seed_demo_products("demo-tenant")
+        product = self.db.list_products("demo-tenant")[0]
+        self.db.approve_product("demo-tenant", product["id"])
+        self.db.publish_product("demo-tenant", product["id"])
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        rfq_headers = {**headers, "Idempotency-Key": "initial-rfq"}
+        payload = {"entry_surface": "chat", "contact": {"contact_email": "buyer@example.com"}, "contact_confirmed": True, "notes": "First request"}
+        _, _, first = self.request("POST", path + "/rfqs", payload, rfq_headers)
+        rfq_id = first["rfq_id"]
+        revision_path = path + f"/rfqs/{rfq_id}/revisions"
+        revision = {"expected_revision": 1, "contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "product_id": product["id"], "quantity": "3", "notes": "Updated request"}
+        status, _, updated = self.request("POST", revision_path, revision, {**headers, "Idempotency-Key": "edit-1"})
+        self.assertEqual(status, 201)
+        self.assertEqual(updated["rfq_id"], rfq_id)
+        self.assertEqual(updated["current_revision"], 2)
+        self.assertEqual(self.request("POST", revision_path, revision, {**headers, "Idempotency-Key": "edit-2"})[0], 409)
+        _, _, current = self.request("GET", path, headers=headers)
+        self.assertEqual(current["rfqs"][0]["quantity"], "3")
+        self.assertNotIn("revisions", current["rfqs"][0])
+        self.assertEqual(len(self.db.list_rfq_revisions("demo-tenant", rfq_id)), 2)
+
+        class SellerView:
+            db = self.db
+            tenant_id = "demo-tenant"
+            html = ""
+
+            def send_html(self, content, status=200):
+                self.html = content
+
+        seller = SellerView()
+        Handler.admin_rfq(seller, rfq_id, {})
+        self.assertIn("First request", seller.html)
+        self.assertIn("Updated request", seller.html)
+        self.assertGreaterEqual(seller.html.count(product["model"]), 2)
+        Handler.admin_sales_detail(seller, rfq_id, {})
+        self.assertIn(f"/admin/rfqs/{rfq_id}", seller.html)
+        reopened = Database(Path(self.temp_dir.name) / "app.db")
+        self.assertEqual(reopened.get_rfq("demo-tenant", rfq_id)["current_revision"], 2)
+        self.assertEqual(len(reopened.list_rfq_revisions("demo-tenant", rfq_id)), 2)
+        reopened.conn.close()
 
 
 if __name__ == "__main__":
