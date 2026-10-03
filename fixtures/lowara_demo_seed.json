@@ -12,16 +12,19 @@
         {
           "filename": "_数据详情.md",
           "file_type": "MARKDOWN",
+          "scope": "exact_model",
           "source_location": "用户资料 B2B_Pump_Demo_Research/Lowara/_数据详情.md：产品用途、型号配置和授权说明"
         },
         {
           "filename": "Lowara_e-SV_技术手册_50Hz_镜像brownbros_revB.pdf",
           "file_type": "PDF",
+          "scope": "series",
           "source_location": "Rev. B Ed.06/2012，第 24 页：1/3/5SV 50 Hz、2 poles 性能表，3SV08 行"
         },
         {
           "filename": "LOWARA_CAD与官方手册说明.md",
           "file_type": "MARKDOWN",
+          "scope": "exact_model",
           "source_location": "用户资料 Lowara/LOWARA_CAD与官方手册说明.md：CAD 型号映射、版本和再发布限制"
         }
       ],

@@ -9,6 +9,14 @@ from pathlib import Path
 from app import Database, Handler, answer_from_approved_material, confirm_requirement_values, curve_head_at_flow, extract_requirement_values, layout, match_products, performance_points_from_text
 
 
+def approve_all_fields(db, tenant_id, product_id):
+    """Simulate an admin who individually approved every sourced candidate field."""
+    for field in db.get_fields(tenant_id, product_id):
+        if field["state"] == "candidate":
+            db.approve_field(tenant_id, product_id, field["field_key"])
+    db.finalize_product_review(tenant_id, product_id)
+
+
 class ProductApprovalTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -23,14 +31,23 @@ class ProductApprovalTests(unittest.TestCase):
         product_id = self.db.create_product("demo-tenant", "T-1", "测试泵", "清水")
         source_id = self.db.add_source("demo-tenant", product_id, "manual.pdf", "PDF", "第 2 页")
         with self.assertRaises(ValueError):
-            self.db.approve_product("demo-tenant", product_id)
+            self.db.finalize_product_review("demo-tenant", product_id)
         self.db.save_field("demo-tenant", product_id, "flow_range", "10-30", "m3/h", source_id, "第 2 页")
         self.db.save_field("demo-tenant", product_id, "material", "未核对材质", "", None, "")
-        self.db.approve_product("demo-tenant", product_id)
+        with self.assertRaises(ValueError):
+            self.db.finalize_product_review("demo-tenant", product_id)  # 候选字段未逐项处理
+        with self.assertRaises(ValueError):
+            self.db.approve_field("demo-tenant", product_id, "material")  # 缺来源位置不能核准
+        self.db.approve_field("demo-tenant", product_id, "flow_range")
+        self.db.reject_field("demo-tenant", product_id, "material", "没有来源位置，暂不公开")
+        self.db.finalize_product_review("demo-tenant", product_id)
         version = self.db.publish_product("demo-tenant", product_id)
         self.assertEqual(version, 1)
         product = self.db.get_product("demo-tenant", product_id)
         self.assertEqual(product["status"], "published")
+        fields = {field["field_key"]: field for field in self.db.get_fields("demo-tenant", product_id)}
+        self.assertEqual(fields["material"]["state"], "rejected")
+        self.assertEqual(fields["material"]["review_note"], "没有来源位置，暂不公开")
         snapshot = json.loads(self.db.get_published_version("demo-tenant", product_id)["snapshot_json"])
         self.assertEqual([item["field_key"] for item in snapshot["fields"]], ["flow_range"])
         self.assertIn("head_range", snapshot["missing_fields"])
@@ -54,7 +71,7 @@ class ProductApprovalTests(unittest.TestCase):
         source_id = self.db.add_source("demo-tenant", product_id, "manual.pdf", "PDF", "第 1 页")
         for key, value in [("flow_range", "10-30"), ("head_range", "20-40"), ("media", "清水"), ("material", "铸铁")]:
             self.db.save_field("demo-tenant", product_id, key, value, "", source_id, "第 1 页")
-        self.db.approve_product("demo-tenant", product_id)
+        approve_all_fields(self.db, "demo-tenant", product_id)
         self.db.publish_product("demo-tenant", product_id)
         self.db.save_field("demo-tenant", product_id, "flow_range", "12-32", "m3/h", source_id, "第 3 页")
         self.assertEqual(self.db.get_product("demo-tenant", product_id)["status"], "pending_review")
@@ -104,7 +121,7 @@ class PublicPageTests(unittest.TestCase):
             product_id = db.create_product("demo-tenant", "T-PUBLIC", "测试泵", "清水")
             source_id = db.add_source("demo-tenant", product_id, "manual.pdf", "PDF", "p. 2")
             db.save_field("demo-tenant", product_id, "flow_range", "10-30", "m³/h", source_id, "p. 2")
-            db.approve_product("demo-tenant", product_id)
+            approve_all_fields(db, "demo-tenant", product_id)
             db.publish_product("demo-tenant", product_id)
             db.conn.execute("UPDATE source_documents SET storage_path='README.md' WHERE id=?", (source_id,))
             db.conn.commit()
@@ -127,7 +144,17 @@ class PublicPageTests(unittest.TestCase):
             self.assertNotIn(f"/sources/{source_id}'", fake.captured[0])
             Handler.public_source(fake, "t-public", source_id)
             self.assertEqual(fake.captured[1], 404)
+            # 归属未确认的文件不能开放公开下载（新校验）
+            with self.assertRaises(ValueError):
+                db.allow_public_source("demo-tenant", product_id, source_id, "demo-admin")
+            db.set_source_scope("demo-tenant", product_id, source_id, "exact_model")
             db.allow_public_source("demo-tenant", product_id, source_id, "demo-admin")
+            # 发布版本冻结文件清单：发布后才开放的文件要等新版本才进入买方页
+            Handler.public_product(fake, "t-public", {})
+            self.assertNotIn(f"/sources/{source_id}'", fake.captured[0])
+            Handler.public_source(fake, "t-public", source_id)
+            self.assertEqual(fake.captured[1], 404)
+            db.publish_product("demo-tenant", product_id)
             Handler.public_product(fake, "t-public", {})
             self.assertIn(f"/sources/{source_id}'", fake.captured[0])
             Handler.public_source(fake, "t-public", source_id)
@@ -144,7 +171,7 @@ class RequirementMatchingTests(unittest.TestCase):
         self.db = Database(Path(self.temp_dir.name) / "app.db")
         self.db.seed_demo_products("demo-tenant")
         for product in self.db.list_products("demo-tenant"):
-            self.db.approve_product("demo-tenant", product["id"])
+            approve_all_fields(self.db, "demo-tenant", product["id"])
             self.db.publish_product("demo-tenant", product["id"])
 
     def tearDown(self):
@@ -204,7 +231,7 @@ class GroundedAnswerTests(unittest.TestCase):
         self.db = Database(Path(self.temp_dir.name) / "app.db")
         self.db.seed_demo_products("demo-tenant")
         for product in self.db.list_products("demo-tenant"):
-            self.db.approve_product("demo-tenant", product["id"])
+            approve_all_fields(self.db, "demo-tenant", product["id"])
             self.db.publish_product("demo-tenant", product["id"])
         self.product = self.db.conn.execute("SELECT * FROM products WHERE tenant_id=? AND model=?", ("demo-tenant", "CB-80A")).fetchone()
 
@@ -274,7 +301,7 @@ class RfqTests(unittest.TestCase):
         self.db = Database(Path(self.temp_dir.name) / "app.db")
         self.db.seed_demo_products("demo-tenant")
         for product in self.db.list_products("demo-tenant"):
-            self.db.approve_product("demo-tenant", product["id"])
+            approve_all_fields(self.db, "demo-tenant", product["id"])
             self.db.publish_product("demo-tenant", product["id"])
         self.product = self.db.conn.execute("SELECT * FROM products WHERE tenant_id=? AND model=?", ("demo-tenant", "CB-80A")).fetchone()
 
@@ -445,7 +472,7 @@ class SalesWorkspaceTests(unittest.TestCase):
         self.db = Database(Path(self.temp_dir.name) / "app.db")
         self.db.seed_demo_products("demo-tenant")
         for product in self.db.list_products("demo-tenant"):
-            self.db.approve_product("demo-tenant", product["id"])
+            approve_all_fields(self.db, "demo-tenant", product["id"])
             self.db.publish_product("demo-tenant", product["id"])
         conversation_id = self.db.create_conversation("demo-tenant")
         values = confirm_requirement_values(extract_requirement_values("flow 50, head 30, clean water", {}, None))

@@ -55,17 +55,158 @@ FIELD_LABELS = {
     "power": "功率",
     "temperature": "介质温度",
     "performance_points": "性能曲线目录点",
+    "dimension": "安装尺寸",
 }
 FIELD_LABELS_EN = {
     "flow_range": "Flow range", "head_range": "Head range", "media": "Suitable medium",
     "material": "Material", "power": "Power", "temperature": "Liquid temperature",
-    "performance_points": "Performance points",
+    "performance_points": "Performance points", "dimension": "Installation dimensions",
 }
 PRODUCT_PAGE_GROUPS = (
     ("Basics and application", "基本与用途", ("media", "temperature")),
     ("Hydraulic performance", "水力性能", ("flow_range", "head_range", "performance_points")),
     ("Power and materials", "电气与材料", ("power", "material")),
+    ("Installation and dimensions", "安装尺寸", ("dimension",)),
 )
+# File attribution scope for a source document. Only files explicitly attributed
+# to this model (exact_model) or its series (series) may be approved for public
+# download; unfiled documents never appear on a public page.
+SOURCE_SCOPES = {"exact_model": "本型号", "series": "系列", "unknown": "归属待核对"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".avif"}
+CAD_3D_EXTENSIONS = {".step", ".stp", ".stl", ".iges", ".igs", ".obj", ".3mf", ".sldprt", ".sldasm"}
+CAD_2D_EXTENSIONS = {".dxf", ".dwg"}
+# Binary or layout-heavy formats that the dependency-free local environment cannot
+# parse reliably. They must fail extraction explicitly instead of guessing values.
+UNSUPPORTED_EXTRACTION_EXTENSIONS = {
+    ".pdf": "PDF 版式解析不在当前本地环境内；请打开文件后按页码人工录入字段",
+    ".xlsx": "Excel 文件需要人工打开核对；请人工录入字段并标注单元格位置",
+    ".xls": "Excel 文件需要人工打开核对；请人工录入字段并标注单元格位置",
+    ".doc": "Office 文档需要人工打开核对；请人工录入字段",
+    ".docx": "Office 文档需要人工打开核对；请人工录入字段",
+    ".dwg": "CAD 二进制文件不做参数抽取；人工录入参数后可用作本型号文件",
+    ".dxf": "二维图纸不做自动参数抽取；请人工录入参数并标注出处",
+    ".step": "三维模型不做参数抽取；人工录入参数后可用作本型号文件",
+    ".stp": "三维模型不做参数抽取；人工录入参数后可用作本型号文件",
+    ".stl": "三维模型不做参数抽取；人工录入参数后可用作本型号文件",
+    ".iges": "三维模型不做参数抽取；人工录入参数后可用作本型号文件",
+    ".igs": "三维模型不做参数抽取；人工录入参数后可用作本型号文件",
+    ".zip": "压缩包需要解压后逐份核对；请先解压再上传各文件",
+    ".rar": "压缩包需要解压后逐份核对；请先解压再上传各文件",
+}
+# Label synonyms accepted by the content-based extractor. Matching is conservative:
+# the label part of a line must equal one of these after whitespace/punctuation
+# normalization, so ambiguous phrases like “最大流量” are never guessed as a field.
+FIELD_SYNONYMS = {
+    "flow_range": ("流量范围", "流量", "flow range", "flow", "flow rate", "rated flow", "delivery flow"),
+    "head_range": ("扬程范围", "扬程", "head range", "head", "rated head", "delivery head"),
+    "media": ("介质适用条件", "适用介质", "介质", "medium", "media", "suitable medium"),
+    "material": ("材质", "材料", "material", "construction", "body material"),
+    "power": ("功率", "电机功率", "power", "motor power", "rated power", "shaft power"),
+    "temperature": ("介质温度", "液体温度", "温度", "temperature", "liquid temperature", "temp"),
+    "performance_points": ("性能曲线目录点", "性能曲线", "性能点", "performance points", "performance curve", "curve points"),
+    "dimension": ("安装尺寸", "外形尺寸", "尺寸", "dimensions", "installation dimensions", "overall dimensions"),
+}
+_NUMERIC_FIELDS = {"flow_range", "head_range", "power", "temperature", "dimension"}
+
+
+def normalize_field_label(text: str) -> str:
+    cleaned = re.sub(r"[（(【\[][^）)】\]]*[）)】\]]", "", text or "")
+    cleaned = re.sub(r"[\s：:，,。.;；=＝\-_/\\]+", "", cleaned)
+    return cleaned.lower()
+
+
+def extract_candidate_items(content: bytes, filename: str) -> tuple[str, list[dict[str, str]], str]:
+    """Extract field candidates from file content only, never from the filename.
+
+    Returns (processing_status, items, note) where status is one of
+    ``extracted`` / ``extraction_failed`` / ``extraction_unsupported``.
+    """
+    suffix = Path(filename or "").suffix.lower()
+    if suffix in UNSUPPORTED_EXTRACTION_EXTENSIONS:
+        return "extraction_unsupported", [], f"{suffix} 格式不支持自动抽取：{UNSUPPORTED_EXTRACTION_EXTENSIONS[suffix]}。"
+    if not content:
+        return "extraction_unsupported", [], "没有可解析的文件内容；请人工录入字段。"
+    if b"\x00" in content[:8192]:
+        return "extraction_unsupported", [], "文件包含二进制内容，当前环境不做自动抽取；请人工录入字段并标注出处。"
+    text = None
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            text = content.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        return "extraction_unsupported", [], "文件无法按文本解码，当前环境不做自动抽取；请人工录入字段。"
+    items: list[dict[str, str]] = []
+    for index, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip().strip("|").strip()
+        if not line:
+            continue
+        label, value_text, unit_hint = _split_candidate_line(line)
+        if not label:
+            continue
+        field_key = _match_field_key(label)
+        if not field_key:
+            continue
+        value, unit = _split_value_unit(field_key, value_text)
+        if unit_hint and not unit:
+            unit = unit_hint
+        if not value:
+            continue
+        items.append({
+            "field_key": field_key,
+            "label": FIELD_LABELS[field_key],
+            "value": value,
+            "unit": unit,
+            "location": f"第 {index} 行",
+            "raw": raw_line.strip(),
+        })
+    if not items:
+        return "extraction_failed", [], "未识别到已知字段标签（支持“标签: 值 单位”或“标签,值,单位”，标签如流量范围/扬程范围/介质/材质/功率/介质温度/安装尺寸）。"
+    return "extracted", items, ""
+
+
+def _split_candidate_line(line: str) -> tuple[str, str, str]:
+    for separator in ("\t", ",", "；", ";"):
+        if separator in line:
+            parts = [part.strip() for part in line.split(separator)]
+            if len(parts) >= 2 and parts[0]:
+                return parts[0], parts[1], parts[2] if len(parts) >= 3 else ""
+    for separator in ("：", ":", "=", "＝"):
+        if separator in line:
+            label, _, rest = line.partition(separator)
+            return label.strip(), rest.strip(), ""
+    return "", "", ""
+
+
+def _match_field_key(label: str) -> str | None:
+    normalized = normalize_field_label(label)
+    if not normalized:
+        return None
+    for field_key, synonyms in FIELD_SYNONYMS.items():
+        if any(normalized == normalize_field_label(synonym) for synonym in synonyms):
+            return field_key
+    return None
+
+
+def _split_value_unit(field_key: str, raw: str) -> tuple[str, str]:
+    raw = (raw or "").strip().strip("：: ")
+    if not raw:
+        return "", ""
+    if field_key not in _NUMERIC_FIELDS:
+        return raw, ""
+    match = re.match(
+        r"^(-?\d+(?:[.,]\d+)?(?:\s*(?:-|~|至|到|to)\s*-?\d+(?:[.,]\d+)?)?)\s*(\S.*)?$",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return raw, ""
+    value = match.group(1).strip()
+    unit = (match.group(2) or "").strip()
+    if len(unit) > 16:
+        return raw, ""
+    return value, unit
 
 
 class ConflictError(ValueError):
@@ -160,6 +301,10 @@ class Database:
                 sha256 TEXT,
                 storage_path TEXT,
                 processing_status TEXT NOT NULL DEFAULT 'registered',
+                scope TEXT NOT NULL DEFAULT 'unknown',
+                extraction_json TEXT NOT NULL DEFAULT '[]',
+                extraction_note TEXT NOT NULL DEFAULT '',
+                processed_at TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS public_source_permissions (
@@ -180,6 +325,8 @@ class Database:
                 source_document_id TEXT REFERENCES source_documents(id),
                 source_location TEXT NOT NULL DEFAULT '',
                 state TEXT NOT NULL DEFAULT 'candidate',
+                origin TEXT NOT NULL DEFAULT 'manual',
+                review_note TEXT NOT NULL DEFAULT '',
                 approved_by TEXT,
                 approved_at TEXT,
                 updated_at TEXT NOT NULL,
@@ -347,6 +494,22 @@ class Database:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN request_hash TEXT")
         if "current_revision" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN current_revision INTEGER NOT NULL DEFAULT 1")
+        source_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(source_documents)")}
+        for column, definition in (
+            ("scope", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ("extraction_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("extraction_note", "TEXT NOT NULL DEFAULT ''"),
+            ("processed_at", "TEXT"),
+        ):
+            if column not in source_columns:
+                self.conn.execute(f"ALTER TABLE source_documents ADD COLUMN {column} {definition}")
+        field_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(product_fields)")}
+        for column, definition in (
+            ("origin", "TEXT NOT NULL DEFAULT 'manual'"),
+            ("review_note", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column not in field_columns:
+                self.conn.execute(f"ALTER TABLE product_fields ADD COLUMN {column} {definition}")
         conversation_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(conversations)")}
         for column, definition in (
             ("stop_proactive_contact", "INTEGER NOT NULL DEFAULT 0"),
@@ -556,15 +719,13 @@ class Database:
 
     def allow_public_source(self, tenant_id: str, product_id: str, source_id: str, actor: str) -> None:
         source = self.conn.execute(
-            "SELECT id, storage_path FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
+            "SELECT id, storage_path, scope FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
             (tenant_id, product_id, source_id),
         ).fetchone()
-        version = self.get_published_version(tenant_id, product_id)
-        if not source or not source["storage_path"] or not version:
-            raise ValueError("需要已发布产品及已保存的来源文件")
-        snapshot = json.loads(version["snapshot_json"])
-        if source_id not in {field["source_document_id"] for field in snapshot["fields"]}:
-            raise ValueError("文件未关联当前已发布的核准事实")
+        if not source or not source["storage_path"]:
+            raise ValueError("需要已保存的来源文件才能开放下载")
+        if source["scope"] == "unknown":
+            raise ValueError("请先确认文件归属（本型号或系列），再开放公开下载；归属未核对的文件不上公开页")
         self.conn.execute(
             "INSERT OR REPLACE INTO public_source_permissions(source_id, tenant_id, product_id, approved_by, approved_at) VALUES (?, ?, ?, ?, ?)",
             (source_id, tenant_id, product_id, actor, now_iso()),
@@ -1230,28 +1391,118 @@ class Database:
         source_location: str,
         content: bytes | None = None,
         actor: str = "demo-admin",
+        scope: str = "unknown",
     ) -> str:
         if not self.get_product(tenant_id, product_id):
             raise ValueError("产品不存在")
+        if scope not in SOURCE_SCOPES:
+            raise ValueError("文件归属范围无效")
         source_id = secrets.token_hex(12)
         sha256 = hashlib.sha256(content).hexdigest() if content else None
         storage_path = None
         status = "registered"
         if content:
             UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-            safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", Path(filename).name) or "source.bin"
+            safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", Path(filename).name).strip(".") or "source.bin"
             target = UPLOAD_DIR / f"{source_id}-{safe_name}"
             target.write_bytes(content)
             storage_path = str(target.relative_to(ROOT))
             status = "stored"
         self.conn.execute(
-            "INSERT INTO source_documents(id, tenant_id, product_id, filename, file_type, source_location, sha256, storage_path, processing_status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (source_id, tenant_id, product_id, filename.strip(), file_type.strip() or "other", source_location.strip(), sha256, storage_path, status, now_iso()),
+            "INSERT INTO source_documents(id, tenant_id, product_id, filename, file_type, source_location, sha256, storage_path, processing_status, scope, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (source_id, tenant_id, product_id, filename.strip(), file_type.strip() or "other", source_location.strip(), sha256, storage_path, status, scope, now_iso()),
         )
+        if content:
+            self._apply_source_extraction(tenant_id, product_id, source_id, content, filename, actor)
         self._audit(tenant_id, "source_document", source_id, "registered", actor, filename)
         self.conn.commit()
         return source_id
+
+    def set_source_scope(self, tenant_id: str, product_id: str, source_id: str, scope: str, actor: str = "demo-admin") -> None:
+        if scope not in SOURCE_SCOPES:
+            raise ValueError("文件归属范围无效")
+        source = self.conn.execute(
+            "SELECT * FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
+            (tenant_id, product_id, source_id),
+        ).fetchone()
+        if not source:
+            raise ValueError("来源文件不属于当前产品")
+        if scope == "unknown" and source_id in self.public_source_ids(tenant_id, product_id):
+            raise ValueError("该文件已开放公开下载；请先撤销公开许可，再标记为归属未核对")
+        self.conn.execute("UPDATE source_documents SET scope=? WHERE id=?", (scope, source_id))
+        self._audit(tenant_id, "source_document", source_id, "scope_updated", actor, scope)
+        self.conn.commit()
+
+    def rerun_source_extraction(self, tenant_id: str, product_id: str, source_id: str, actor: str = "demo-admin") -> None:
+        source = self.conn.execute(
+            "SELECT * FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
+            (tenant_id, product_id, source_id),
+        ).fetchone()
+        if not source or not source["storage_path"]:
+            raise ValueError("该来源没有已保存文件，无法重新解析")
+        target = ROOT / source["storage_path"]
+        if not target.is_file():
+            raise ValueError("文件存储不可用，无法重新解析")
+        self._apply_source_extraction(tenant_id, product_id, source_id, target.read_bytes(), source["filename"], actor)
+        self._audit(tenant_id, "source_document", source_id, "extraction_rerun", actor, source["filename"])
+        self.conn.commit()
+
+    def _apply_source_extraction(self, tenant_id: str, product_id: str, source_id: str, content: bytes, filename: str, actor: str) -> None:
+        """Run content-based extraction and store reviewable candidates.
+
+        Extraction never invents values: unsupported formats fail explicitly, and a
+        candidate that differs from an already approved fact is recorded as a
+        conflict instead of silently overwriting the approved value.
+        """
+        status, items, note = extract_candidate_items(content, filename)
+        applied: list[dict[str, str]] = []
+        field_changed = False
+        for item in items:
+            existing = self.conn.execute(
+                "SELECT * FROM product_fields WHERE tenant_id=? AND product_id=? AND field_key=?",
+                (tenant_id, product_id, item["field_key"]),
+            ).fetchone()
+            entry = dict(item)
+            if existing is None:
+                self.conn.execute(
+                    "INSERT INTO product_fields(id, tenant_id, product_id, field_key, label, value, unit, source_document_id, source_location, state, origin, review_note, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', 'extracted', '', ?)",
+                    (secrets.token_hex(12), tenant_id, product_id, item["field_key"], FIELD_LABELS[item["field_key"]], item["value"], item["unit"], source_id, item["location"], now_iso()),
+                )
+                entry["review_status"] = "new"
+                field_changed = True
+            elif existing["state"] == "approved":
+                if existing["value"].strip() == item["value"] and existing["unit"].strip() == item["unit"]:
+                    entry["review_status"] = "duplicate"
+                else:
+                    entry["review_status"] = "conflict"
+                    entry["existing_value"] = existing["value"]
+                    entry["existing_unit"] = existing["unit"]
+            elif existing["state"] == "rejected":
+                entry["review_status"] = "rejected_kept"
+                entry["existing_value"] = existing["value"]
+            elif existing["origin"] == "manual" and existing["value"].strip():
+                entry["review_status"] = "kept_manual"
+                entry["existing_value"] = existing["value"]
+            else:
+                self.conn.execute(
+                    "UPDATE product_fields SET value=?, unit=?, source_document_id=?, source_location=?, origin='extracted', review_note='', updated_at=? WHERE id=?",
+                    (item["value"], item["unit"], source_id, item["location"], now_iso(), existing["id"]),
+                )
+                entry["review_status"] = "updated"
+                field_changed = True
+            applied.append(entry)
+        self.conn.execute(
+            "UPDATE source_documents SET processing_status=?, extraction_json=?, extraction_note=?, processed_at=? WHERE tenant_id=? AND id=?",
+            (status, json.dumps(applied, ensure_ascii=False), note, now_iso(), tenant_id, source_id),
+        )
+        if field_changed:
+            self.conn.execute(
+                "UPDATE products SET status='pending_review', updated_at=? WHERE tenant_id=? AND id=? AND status IN ('draft','approved','published')",
+                (now_iso(), tenant_id, product_id),
+            )
+        self._audit(tenant_id, "source_document", source_id, "extraction_completed", actor, f"{status}; items={len(applied)}")
 
     def save_field(
         self,
@@ -1263,6 +1514,7 @@ class Database:
         source_document_id: str | None,
         source_location: str,
         actor: str = "demo-admin",
+        origin: str = "manual",
     ) -> None:
         if field_key not in FIELD_LABELS:
             raise ValueError("不支持的字段")
@@ -1277,29 +1529,111 @@ class Database:
             if not source:
                 raise ValueError("来源文件不属于当前产品")
         self.conn.execute(
-            "INSERT INTO product_fields(id, tenant_id, product_id, field_key, label, value, unit, source_document_id, source_location, state, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?) "
-            "ON CONFLICT(product_id, field_key) DO UPDATE SET value=excluded.value, unit=excluded.unit, source_document_id=excluded.source_document_id, source_location=excluded.source_location, state='candidate', approved_by=NULL, approved_at=NULL, updated_at=excluded.updated_at",
-            (secrets.token_hex(12), tenant_id, product_id, field_key, FIELD_LABELS[field_key], value.strip(), unit.strip(), source_document_id or None, source_location.strip(), now_iso()),
+            "INSERT INTO product_fields(id, tenant_id, product_id, field_key, label, value, unit, source_document_id, source_location, state, origin, review_note, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?, '', ?) "
+            "ON CONFLICT(product_id, field_key) DO UPDATE SET value=excluded.value, unit=excluded.unit, source_document_id=excluded.source_document_id, source_location=excluded.source_location, state='candidate', origin=excluded.origin, review_note='', approved_by=NULL, approved_at=NULL, updated_at=excluded.updated_at",
+            (secrets.token_hex(12), tenant_id, product_id, field_key, FIELD_LABELS[field_key], value.strip(), unit.strip(), source_document_id or None, source_location.strip(), origin, now_iso()),
         )
         self.conn.execute("UPDATE products SET status='pending_review', updated_at=? WHERE id=? AND tenant_id=?", (now_iso(), product_id, tenant_id))
         self._audit(tenant_id, "product_field", product_id, "updated_candidate", actor, field_key)
         self.conn.commit()
 
-    def approve_product(self, tenant_id: str, product_id: str, actor: str = "demo-admin") -> None:
+    def approve_field(self, tenant_id: str, product_id: str, field_key: str, actor: str = "demo-admin") -> None:
+        if field_key not in FIELD_LABELS:
+            raise ValueError("不支持的字段")
+        field = self.conn.execute(
+            "SELECT * FROM product_fields WHERE tenant_id=? AND product_id=? AND field_key=?",
+            (tenant_id, product_id, field_key),
+        ).fetchone()
+        if not field:
+            raise ValueError("字段不存在")
+        if not field["value"].strip():
+            raise ValueError("字段没有值，不能核准；请先保存候选值")
+        if not field["source_document_id"] or not field["source_location"].strip():
+            raise ValueError("字段缺少来源文件或原文位置，不能核准；请先补充出处")
+        source = self.conn.execute(
+            "SELECT id FROM source_documents WHERE id=? AND tenant_id=? AND product_id=?",
+            (field["source_document_id"], tenant_id, product_id),
+        ).fetchone()
+        if not source:
+            raise ValueError("来源文件不属于当前产品，不能核准")
+        self.conn.execute(
+            "UPDATE product_fields SET state='approved', review_note='', approved_by=?, approved_at=?, updated_at=? WHERE id=?",
+            (actor, now_iso(), now_iso(), field["id"]),
+        )
+        self._audit(tenant_id, "product_field", product_id, "field_approved", actor, f"{field_key}={field['value'].strip()}")
+        self.conn.commit()
+
+    def reject_field(self, tenant_id: str, product_id: str, field_key: str, reason: str = "", actor: str = "demo-admin") -> None:
+        if field_key not in FIELD_LABELS:
+            raise ValueError("不支持的字段")
+        field = self.conn.execute(
+            "SELECT id FROM product_fields WHERE tenant_id=? AND product_id=? AND field_key=?",
+            (tenant_id, product_id, field_key),
+        ).fetchone()
+        if not field:
+            raise ValueError("字段不存在")
+        self.conn.execute(
+            "UPDATE product_fields SET state='rejected', review_note=?, approved_by=NULL, approved_at=NULL, updated_at=? WHERE id=?",
+            (reason.strip(), now_iso(), field["id"]),
+        )
+        self.conn.execute(
+            "UPDATE products SET status='pending_review', updated_at=? WHERE tenant_id=? AND id=? AND status IN ('approved','published')",
+            (now_iso(), tenant_id, product_id),
+        )
+        self._audit(tenant_id, "product_field", product_id, "field_rejected", actor, f"{field_key}; {reason.strip()}")
+        self.conn.commit()
+
+    def reopen_field(self, tenant_id: str, product_id: str, field_key: str, actor: str = "demo-admin") -> None:
+        if field_key not in FIELD_LABELS:
+            raise ValueError("不支持的字段")
+        field = self.conn.execute(
+            "SELECT id FROM product_fields WHERE tenant_id=? AND product_id=? AND field_key=?",
+            (tenant_id, product_id, field_key),
+        ).fetchone()
+        if not field:
+            raise ValueError("字段不存在")
+        self.conn.execute(
+            "UPDATE product_fields SET state='candidate', review_note='', approved_by=NULL, approved_at=NULL, updated_at=? WHERE id=?",
+            (now_iso(), field["id"]),
+        )
+        self.conn.execute(
+            "UPDATE products SET status='pending_review', updated_at=? WHERE tenant_id=? AND id=? AND status IN ('approved','published')",
+            (now_iso(), tenant_id, product_id),
+        )
+        self._audit(tenant_id, "product_field", product_id, "field_reopened", actor, field_key)
+        self.conn.commit()
+
+    def finalize_product_review(self, tenant_id: str, product_id: str, actor: str = "demo-admin") -> None:
+        """Finish the review gate: every candidate must be individually approved or rejected."""
         product = self.get_product(tenant_id, product_id)
         if not product:
             raise ValueError("产品不存在")
         fields = self.get_fields(tenant_id, product_id)
-        if not any(row["value"].strip() and row["source_document_id"] and row["source_location"].strip() for row in fields):
-            raise ValueError("至少需要一项有来源位置的产品事实供人工核准")
-        self.conn.execute(
-            "UPDATE product_fields SET state='approved', approved_by=?, approved_at=? WHERE tenant_id=? AND product_id=? AND value <> '' AND source_document_id IS NOT NULL AND source_location <> ''",
-            (actor, now_iso(), tenant_id, product_id),
-        )
+        pending = [field["label"] for field in fields if field["state"] == "candidate"]
+        if pending:
+            raise ValueError("还有候选字段未逐项处理（核准或驳回）：" + "、".join(pending) + "。请逐项处理后再完成核对。")
+        approved = [
+            field for field in fields
+            if field["state"] == "approved" and field["value"].strip() and field["source_document_id"] and field["source_location"].strip()
+        ]
+        if not approved:
+            raise ValueError("至少需要一项带来源位置的产品事实被逐项核准后才能完成核对")
         self.conn.execute("UPDATE products SET status='approved', updated_at=? WHERE tenant_id=? AND id=?", (now_iso(), tenant_id, product_id))
-        self._audit(tenant_id, "product", product_id, "approved", actor)
+        self._audit(tenant_id, "product", product_id, "review_finalized", actor, f"approved_fields={len(approved)}")
         self.conn.commit()
+
+    def approve_seeded_fields(self, tenant_id: str, product_id: str, actor: str = "demo-admin") -> None:
+        """Demo-fixture helper only: approve every sourced candidate for tracked demo data.
+
+        Values from fixtures/demo seed files are pre-reviewed for the local demo. This
+        bypass must not become a seller UI action; the product page exposes per-field
+        approve/reject instead.
+        """
+        for field in self.get_fields(tenant_id, product_id):
+            if field["state"] == "candidate" and field["value"].strip() and field["source_document_id"] and field["source_location"].strip():
+                self.approve_field(tenant_id, product_id, field["field_key"], actor)
+        self.finalize_product_review(tenant_id, product_id, actor)
 
     def publish_product(self, tenant_id: str, product_id: str, actor: str = "demo-admin") -> int:
         product = self.get_product(tenant_id, product_id)
@@ -1314,10 +1648,25 @@ class Database:
         missing = [key for key in REQUIRED_FIELDS if not any(field["field_key"] == key for field in approved_fields)]
         previous = self.get_published_version(tenant_id, product_id)
         version = (previous["version"] if previous else 0) + 1
+        public_ids = self.public_source_ids(tenant_id, product_id)
+        public_files = [
+            {
+                "id": source["id"],
+                "filename": source["filename"],
+                "file_type": source["file_type"],
+                "scope": source["scope"],
+                "sha256": source["sha256"],
+                "source_location": source["source_location"],
+                "created_at": source["created_at"],
+            }
+            for source in self.get_sources(tenant_id, product_id)
+            if source["id"] in public_ids and source["storage_path"] and source["scope"] in ("exact_model", "series")
+        ]
         snapshot = {
             "product": {"model": product["model"], "name": product["name"], "use_case": product["use_case"], "slug": product["slug"]},
             "fields": [dict(field) for field in approved_fields],
             "missing_fields": missing,
+            "public_sources": public_files,
             "published_at": now_iso(),
         }
         if previous:
@@ -1372,7 +1721,7 @@ class Database:
             if self.conn.execute("SELECT 1 FROM products WHERE tenant_id=? AND model=?", (tenant_id, sample["model"])).fetchone():
                 continue
             product_id = self.create_product(tenant_id, sample["model"], sample["name"], sample["use_case"], actor)
-            source_id = self.add_source(tenant_id, product_id, f"{sample['model']}-模拟产品手册.pdf", "PDF", "第 1 页：规格参数表", actor=actor)
+            source_id = self.add_source(tenant_id, product_id, f"{sample['model']}-模拟产品手册.pdf", "PDF", "第 1 页：规格参数表", actor=actor, scope="exact_model")
             for key, (value, unit) in sample["fields"].items():
                 self.save_field(tenant_id, product_id, key, value, unit, source_id, "第 1 页：规格参数表", actor)
             created += 1
@@ -1385,7 +1734,7 @@ class Database:
         self.seed_demo_products(tenant_id, actor)
         for product in self.list_products(tenant_id):
             if product["model"] in {"CB-80A", "CB-120C"} and product["status"] in {"draft", "pending_review", "approved"}:
-                self.approve_product(tenant_id, product["id"], actor)
+                self.approve_seeded_fields(tenant_id, product["id"], actor)
                 self.publish_product(tenant_id, product["id"], actor)
         fixture = json.loads(DEMO_SEED_FILE.read_text(encoding="utf-8"))
         created_rfqs = 0
@@ -1479,6 +1828,7 @@ class Database:
                         source.get("file_type", "OTHER"),
                         source["source_location"],
                         actor=actor,
+                        scope=source.get("scope", "unknown"),
                     )
                 )
             if not source_ids:
@@ -1494,7 +1844,7 @@ class Database:
                     field["source_location"],
                     actor,
                 )
-            self.approve_product(tenant_id, product_id, actor)
+            self.approve_seeded_fields(tenant_id, product_id, actor)
             self.publish_product(tenant_id, product_id, actor)
             created += 1
         return {"products": created}
@@ -2578,19 +2928,28 @@ class Handler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources", path)
             if match:
                 product_id = match.group(1)
-                content = form.get("source_file") if isinstance(form.get("source_file"), bytes) else None
+                raw_file = form.get("source_file")
+                content = raw_file if isinstance(raw_file, bytes) else None
                 filename = str(form.get("source_file__filename", "")) or str(form.get("filename", ""))
-                self.db.add_source(self.tenant_id, product_id, filename or "未命名资料", str(form.get("file_type", "other")), str(form.get("source_location", "")), content, self.actor)
+                self.db.add_source(
+                    self.tenant_id, product_id, filename or "未命名资料",
+                    str(form.get("file_type", "other")), str(form.get("source_location", "")),
+                    content, self.actor, scope=str(form.get("scope", "unknown") or "unknown"),
+                )
                 self.redirect(f"/admin/products/{product_id}?notice=source")
                 return
-            match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources/([a-f0-9]+)/(allow-public|revoke-public)", path)
+            match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources/([a-f0-9]+)/(allow-public|revoke-public|scope|extract)", path)
             if match:
                 product_id, source_id, action = match.groups()
                 if action == "allow-public":
                     self.db.allow_public_source(self.tenant_id, product_id, source_id, self.actor)
-                else:
+                elif action == "revoke-public":
                     self.db.revoke_public_source(self.tenant_id, product_id, source_id, self.actor)
-                self.redirect(f"/admin/products/{product_id}?notice=source-permission")
+                elif action == "scope":
+                    self.db.set_source_scope(self.tenant_id, product_id, source_id, str(form.get("scope", "")), self.actor)
+                else:
+                    self.db.rerun_source_extraction(self.tenant_id, product_id, source_id, self.actor)
+                self.redirect(f"/admin/products/{product_id}?notice={action}")
                 return
             match = re.fullmatch(r"/admin/products/([a-f0-9]+)/fields", path)
             if match:
@@ -2598,19 +2957,35 @@ class Handler(BaseHTTPRequestHandler):
                 self.db.save_field(self.tenant_id, product_id, str(form.get("field_key", "")), str(form.get("value", "")), str(form.get("unit", "")), str(form.get("source_document_id", "")) or None, str(form.get("source_location", "")), self.actor)
                 self.redirect(f"/admin/products/{product_id}?notice=field")
                 return
-            match = re.fullmatch(r"/admin/products/([a-f0-9]+)/(approve|publish|withdraw)", path)
+            match = re.fullmatch(r"/admin/products/([a-f0-9]+)/fields/([a-z_]+)/(approve|reject|reopen)", path)
+            if match:
+                product_id, field_key, action = match.groups()
+                if action == "approve":
+                    self.db.approve_field(self.tenant_id, product_id, field_key, self.actor)
+                elif action == "reject":
+                    self.db.reject_field(self.tenant_id, product_id, field_key, str(form.get("reason", "")), self.actor)
+                else:
+                    self.db.reopen_field(self.tenant_id, product_id, field_key, self.actor)
+                self.redirect(f"/admin/products/{product_id}?notice=field-{action}")
+                return
+            match = re.fullmatch(r"/admin/products/([a-f0-9]+)/(approve|finalize-review|publish|withdraw)", path)
             if match:
                 product_id, action = match.groups()
-                if action == "approve":
-                    self.db.approve_product(self.tenant_id, product_id, self.actor)
+                if action in ("approve", "finalize-review"):
+                    self.db.finalize_product_review(self.tenant_id, product_id, self.actor)
                 elif action == "publish":
                     self.db.publish_product(self.tenant_id, product_id, self.actor)
                 else:
                     self.db.withdraw_product(self.tenant_id, product_id, self.actor)
-                self.redirect(f"/admin/products/{product_id}?notice={action}")
+                notice = "approve" if action == "finalize-review" else action
+                self.redirect(f"/admin/products/{product_id}?notice={notice}")
                 return
         except (ValueError, sqlite3.Error) as exc:
-            return_path = path.rsplit("/", 1)[0] if path.startswith("/inquiry/") else "/admin/products"
+            if path.startswith("/inquiry/"):
+                return_path = path.rsplit("/", 1)[0]
+            else:
+                product_match = re.match(r"(/admin/products/[a-f0-9]+)(/|$)", path)
+                return_path = product_match.group(1) if product_match else "/admin/products"
             self.send_html(layout("操作未完成", f"<div class='error'>{esc(exc)}</div><p><a href='{esc(return_path)}'>返回并修改</a></p>"), 400)
             return
         self.send_html(layout("未找到", "<div class='error'>操作不存在</div>"), 404)
@@ -2654,28 +3029,152 @@ class Handler(BaseHTTPRequestHandler):
         sources = self.db.get_sources(self.tenant_id, product_id)
         fields = self.db.get_fields(self.tenant_id, product_id)
         published_version = self.db.get_published_version(self.tenant_id, product_id)
-        published_source_ids = {field["source_document_id"] for field in json.loads(published_version["snapshot_json"])["fields"]} if published_version else set()
+        published_snapshot = json.loads(published_version["snapshot_json"]) if published_version else None
+        published_source_ids = {entry["id"] for entry in (published_snapshot or {}).get("public_sources", [])}
         notice = query.get("notice", [""])[0]
-        notice_text = {"source": "来源资料已保存。", "source-permission": "文件公开权限已更新。", "field": "字段已保存为候选值，需重新核准。", "approve": "产品字段已核准。", "publish": "产品版本已发布。", "withdraw": "公开版本已撤回。"}.get(notice, "")
-        field_rows = "".join(
-            f"<tr><td><b>{esc(field['label'])}</b><br><span class='field-state'>{esc(field['field_key'])}</span></td><td>{esc(field['value'])} {esc(field['unit'])}</td><td>{status_badge(field['state'])}<br><span class='field-state'>{esc(field['source_filename'] or '未关联来源')} · {esc(field['source_location'])}</span></td></tr>"
-            for field in fields
-        ) or "<tr><td colspan='3' class='muted'>尚未登记字段。</td></tr>"
+        notice_text = {
+            "source": "来源已保存。已上传的文件已按内容尝试抽取；请核对下方提取结果后逐项处理。",
+            "source-permission": "文件公开权限已更新；新文件在下次发布后才会进入买方页。",
+            "scope": "文件归属已更新。",
+            "extract": "文件已按内容重新解析，结果在来源区显示。",
+            "field": "字段已保存为候选值，需逐项核准或驳回后才能完成核对。",
+            "field-approve": "字段已核准。",
+            "field-reject": "字段已驳回；未核准内容不会进入匹配、问答或公开页。",
+            "field-reopen": "字段已退回待核；请重新逐项处理。",
+            "approve": "核对完成：全部候选字段已逐项处理，可发布新版本。",
+            "publish": "产品版本已发布。",
+            "withdraw": "公开版本已撤回。",
+        }.get(notice, "")
+        processing_labels = {
+            "registered": "仅登记元数据（无文件内容）",
+            "stored": "已保存文件",
+            "extracted": "已提取待核对",
+            "extraction_failed": "提取失败：未识别到字段",
+            "extraction_unsupported": "不支持自动抽取",
+        }
+        review_labels = {
+            "new": "新候选",
+            "updated": "更新候选",
+            "duplicate": "与已核准值一致",
+            "conflict": "与已核准值冲突，未覆盖",
+            "kept_manual": "保留手工值",
+            "rejected_kept": "字段已驳回，未变更",
+        }
+        review_css = {"duplicate": "approved"}
+        origin_labels = {"manual": "手工录入", "extracted": "文件提取", "seed": "示例数据"}
+        approved_keys = {field["field_key"] for field in fields if field["state"] == "approved"}
+        missing_keys = [key for key in REQUIRED_FIELDS if key not in approved_keys]
+        missing_html = (
+            "<div class='error'>关键字段缺项：" + esc("、".join(FIELD_LABELS[key] for key in missing_keys))
+            + "。有限信息页仍可发布；缺项会在买方页标为待补充，不会填写推测值。</div>"
+            if missing_keys else "<div class='notice'>关键字段已齐全；买方页展示当前版本已核准内容。</div>"
+        )
+        pending_fields = [field for field in fields if field["state"] == "candidate"]
+        pending_html = (
+            f"<div class='error'>还有 {len(pending_fields)} 个候选字段未逐项处理（核准或驳回），全部处理后才能完成核对与发布。</div>"
+            if pending_fields else "<p class='muted'>候选字段已全部逐项处理。</p>"
+        )
+
+        def field_state_badge(state: str) -> str:
+            label = {"candidate": "待核对", "approved": "已核准", "rejected": "已驳回"}.get(state, state)
+            css = {"candidate": "pending_review", "approved": "approved", "rejected": "withdrawn"}.get(state, "")
+            return f"<span class='badge {css}'>{label}</span>"
+
+        field_rows = []
+        for field in fields:
+            review_bits = []
+            if field["state"] == "approved":
+                review_bits.append(f"核准：{esc(field['approved_by'] or '')} · {esc(field['approved_at'] or '')}")
+            if field["state"] == "rejected" and field["review_note"]:
+                review_bits.append(f"驳回原因：{esc(field['review_note'])}")
+            if field["state"] == "candidate":
+                actions = (
+                    f"<form method='post' action='/admin/products/{product_id}/fields/{esc(field['field_key'])}/approve' class='inline'><button class='secondary'>核准此字段</button></form> "
+                    f"<form method='post' action='/admin/products/{product_id}/fields/{esc(field['field_key'])}/reject' class='inline'><input name='reason' placeholder='驳回原因（可选）' style='width:160px'><button class='danger'>驳回</button></form>"
+                )
+            elif field["state"] == "approved":
+                actions = f"<form method='post' action='/admin/products/{product_id}/fields/{esc(field['field_key'])}/reopen' class='inline'><button class='secondary'>退回待核</button></form>"
+            else:
+                actions = f"<form method='post' action='/admin/products/{product_id}/fields/{esc(field['field_key'])}/approve' class='inline'><button class='secondary'>重新核准</button></form>"
+            field_rows.append(
+                f"<tr><td><b>{esc(field['label'])}</b><br><span class='field-state'>{esc(field['field_key'])} · {esc(origin_labels.get(field['origin'], field['origin']))}</span></td>"
+                f"<td>{esc(field['value'])} {esc(field['unit'])}</td>"
+                f"<td>{field_state_badge(field['state'])}<br><span class='field-state'>{esc(field['source_filename'] or '未关联来源')} · {esc(field['source_location'])}</span>"
+                + ("<br><span class='field-state'>" + "<br>".join(review_bits) + "</span>" if review_bits else "")
+                + f"</td><td>{actions}</td></tr>"
+            )
+        field_table = "".join(field_rows) or "<tr><td colspan='4' class='muted'>尚未登记字段。</td></tr>"
         source_options = "<option value=''>请选择来源</option>" + "".join(f"<option value='{esc(source['id'])}'>{esc(source['filename'])} · {esc(source['source_location'])}</option>" for source in sources)
         public_source_ids = self.db.public_source_ids(self.tenant_id, product_id)
-        source_rows = "".join(
-            f"<div class='source'><span><b>{esc(source['filename'])}</b><br><span class='muted'>{esc(source['file_type'])} · {esc(source['source_location'])}</span></span><span class='field-state'>{esc(source['processing_status'])} · {'公开下载已授权' if source['id'] in public_source_ids else '未授权公开下载'}</span>"
-            + (f"<form method='post' action='/admin/products/{product_id}/sources/{source['id']}/{'revoke-public' if source['id'] in public_source_ids else 'allow-public'}' class='inline'><button class='secondary'>{'撤销公开下载' if source['id'] in public_source_ids else '确认许可并开放下载'}</button></form>" if source["storage_path"] and source["id"] in published_source_ids else "")
-            + "</div>" for source in sources
-        ) or "<p class='muted'>还没有来源资料。</p>"
+
+        source_blocks = []
+        for source in sources:
+            extraction_items = json.loads(source["extraction_json"] or "[]")
+            item_html = "".join(
+                f"<li><b>{esc(item.get('label', item.get('field_key', '')))}</b>：{esc(item.get('value', ''))} {esc(item.get('unit', ''))}"
+                f" <span class='field-state'>{esc(item.get('location', ''))}</span> "
+                f"<span class='badge {review_css.get(item.get('review_status', ''), 'pending_review' if item.get('review_status') in ('new', 'updated') else 'withdrawn')}'>{esc(review_labels.get(item.get('review_status', ''), item.get('review_status', '')))}</span>"
+                + (f" <span class='field-state'>原值：{esc(item.get('existing_value', ''))} {esc(item.get('existing_unit', ''))}</span>" if item.get("existing_value") else "")
+                + "</li>"
+                for item in extraction_items
+            )
+            extraction_html = f"<ul style='margin:8px 0 0 18px;padding:0'>{item_html}</ul>" if item_html else ""
+            scope_options = "".join(
+                f"<option value='{key}' {'selected' if source['scope'] == key else ''}>{label}</option>"
+                for key, label in SOURCE_SCOPES.items()
+            )
+            scope_form = (
+                f"<form method='post' action='/admin/products/{product_id}/sources/{source['id']}/scope' class='inline'>"
+                f"<select name='scope'>{scope_options}</select> <button class='secondary'>保存归属</button></form>"
+            )
+            if source["storage_path"]:
+                extract_button = f"<form method='post' action='/admin/products/{product_id}/sources/{source['id']}/extract' class='inline'><button class='secondary'>按内容重新解析</button></form>"
+                if source["id"] in public_source_ids:
+                    perm_html = (
+                        f"<form method='post' action='/admin/products/{product_id}/sources/{source['id']}/revoke-public' class='inline'><button class='danger'>撤销公开下载</button></form>"
+                        + (" <span class='field-state'>已纳入当前公开版本</span>" if source["id"] in published_source_ids else " <span class='field-state'>将在下次发布后收录</span>")
+                    )
+                elif source["scope"] != "unknown":
+                    perm_html = (
+                        f"<form method='post' action='/admin/products/{product_id}/sources/{source['id']}/allow-public' class='inline'><button class='secondary'>确认许可并开放下载</button></form>"
+                        " <span class='field-state'>开放后需发布新版本才进入买方页</span>"
+                    )
+                else:
+                    perm_html = "<span class='field-state'>先保存文件归属（本型号或系列），才能开放公开下载</span>"
+            else:
+                extract_button = ""
+                perm_html = "<span class='field-state'>无文件内容，仅登记元数据；参数请人工录入并标注位置</span>"
+            source_blocks.append(
+                "<div class='source' style='display:block'><div style='display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap'>"
+                f"<span><b>{esc(source['filename'])}</b><br><span class='muted'>{esc(source['file_type'])} · {esc(source['source_location'])}</span></span>"
+                f"<span class='field-state'>{esc(processing_labels.get(source['processing_status'], source['processing_status']))} · 归属：{esc(SOURCE_SCOPES.get(source['scope'], source['scope']))}"
+                + (f" · 校验码 {esc((source['sha256'] or '')[:10])}…" if source["sha256"] else "")
+                + "</span></div>"
+                + (f"<p class='field-state' style='margin:6px 0 0'>{esc(source['extraction_note'])}</p>" if source["extraction_note"] else "")
+                + extraction_html
+                + f"<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>{scope_form}{extract_button}{perm_html}</div>"
+                + "</div>"
+            )
+        source_rows = "".join(source_blocks) or "<p class='muted'>还没有来源资料。</p>"
         field_options = "".join(f"<option value='{key}'>{esc(label)}</option>" for key, label in FIELD_LABELS.items())
-        action_buttons = f"<form method='post' action='/admin/products/{product_id}/approve' class='inline'><button>核准字段</button></form> <form method='post' action='/admin/products/{product_id}/publish' class='inline'><button class='secondary'>发布新版本</button></form>" + (f" <form method='post' action='/admin/products/{product_id}/withdraw' class='inline'><button class='danger'>撤回公开页</button></form>" if published_version else "")
+        action_buttons = (
+            f"<form method='post' action='/admin/products/{product_id}/finalize-review' class='inline'><button>完成字段核对</button></form> "
+            f"<form method='post' action='/admin/products/{product_id}/publish' class='inline'><button class='secondary'>发布新版本</button></form>"
+            + (f" <form method='post' action='/admin/products/{product_id}/withdraw' class='inline'><button class='danger'>撤回公开页</button></form>" if published_version else "")
+        )
         notice_banner = f"<div class='notice'>{esc(notice_text)}</div>" if notice_text else ""
+        version_line = (
+            f"当前已发布版本 v{esc(published_version['version'])} · 公开文件 {len(published_source_ids)} 份（文件清单随版本冻结）"
+            if published_version else "尚未发布；完成核对后可发布有限信息页"
+        )
         body = f"""
 <div class='toolbar'><div><a href='/admin/products'>← 返回产品列表</a><h1>{esc(product['model'])}</h1><div class='muted'>{esc(product['name'])} · {status_badge(product['status'])}</div></div><div>{action_buttons}</div></div>
 {notice_banner}
-<div class='grid'><section class='card'><h2>产品基本信息</h2><p><b>主要用途：</b>{esc(product['use_case']) or '未填写'}</p><p><b>固定买方链接：</b>{('/products/' + esc(product['slug'])) if published_version else '发布后生成'}</p><p class='muted'>型号是产品通用事实；买方本次工况将在后续会话中单独保存，不写回这里。</p></section><section class='card'><h2>登记来源资料</h2>{source_rows}<p class='muted'>文件默认不对外下载。确认已有对外展示许可后，才可在此开放已关联核准事实的文件。</p><hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>IMAGE</option><option>CAD</option><option>OTHER</option></select></div><div><label>原文位置</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section></div>
-<section class='card' style='margin-top:18px'><h2>字段核对</h2><p class='muted'>可先核准已核对且有来源位置的字段，再发布有限信息页。未核准字段不会公开；缺少的关键字段会在页面标为待补充。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th></tr></thead><tbody>{field_rows}</tbody></table><hr><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></section>
+{missing_html}
+{pending_html}
+<div class='grid'><section class='card'><h2>产品基本信息</h2><p><b>主要用途：</b>{esc(product['use_case']) or '未填写'}</p><p><b>固定买方链接：</b>{('/products/' + esc(product['slug'])) if published_version else '发布后生成'}</p><p class='muted'>{version_line}</p><p class='muted'>型号是产品通用事实；买方本次工况将在后续会话中单独保存，不写回这里。</p><p class='muted'>核准动作按字段逐项执行；未被逐项核准或已被驳回的内容不会进入匹配、问答和公开页。</p></section>
+<section class='card'><h2>登记来源资料</h2>{source_rows}<p class='muted'>文件默认不对外下载。上传后的文本/CSV 会按内容识别已知字段标签；PDF、图片、CAD 等不支持的格式会明确失败，请人工录入。开放公开下载前必须确认文件归属。</p><hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>MARKDOWN</option><option>TXT</option><option>IMAGE</option><option>DXF</option><option>STEP</option><option>OTHER</option></select></div><div><label>文件归属 *</label><select name='scope' required><option value=''>请选择文件归属</option><option value='exact_model'>本型号专属文件</option><option value='series'>系列级资料（非本型号专属）</option><option value='unknown'>归属待核对（不上公开页）</option></select></div><div class='full'><label>原文位置 *</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section></div>
+<section class='card' style='margin-top:18px'><h2>字段核对（逐项）</h2><p class='muted'>候选字段需逐项核准或驳回；驳回保留原值并记录原因。已核准关键字段被修改后会回到待核对，需重新核准并发布新版本；缺项不会被推测值填充。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th><th>操作</th></tr></thead><tbody>{field_table}</tbody></table><hr><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置 *</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></section>
 """
         self.send_html(layout(f"{product['model']} · 字段核对", body), 200)
 
@@ -3024,7 +3523,16 @@ class Handler(BaseHTTPRequestHandler):
         snapshot = json.loads(version["snapshot_json"])
         sources = self.db.get_sources(tenant_id, product["id"])
         allowed_source_ids = self.db.public_source_ids(tenant_id, product["id"])
-        cited_source_ids = {field["source_document_id"] for field in snapshot["fields"]}
+        db_source_rows = {source["id"]: source for source in sources}
+        # The published version freezes the model-file mapping: files approved for
+        # public download after this publication only appear after the next release.
+        # Live permission revocation still hides a file immediately for safety.
+        published_sources = []
+        for entry in snapshot.get("public_sources", []):
+            row = db_source_rows.get(entry["id"])
+            if not row or not row["storage_path"] or entry["id"] not in allowed_source_ids:
+                continue
+            published_sources.append(entry)
         lang = query.get("lang", ["en"])[0]
         approved_fields = {field["field_key"]: field for field in snapshot["fields"]}
         def t(en: str, zh: str) -> str:
@@ -3042,21 +3550,75 @@ class Handler(BaseHTTPRequestHandler):
             f"<section class='page-group'><h3>{t(en, zh)}</h3><dl>" + "".join(f"<div><dt>{esc(field_label(key))}</dt><dd>{fact(key)}</dd></div>" for key in keys) + "</dl></section>"
             for en, zh, keys in PRODUCT_PAGE_GROUPS
         )
-        group_html += f"<section class='page-group'><h3>{t('Installation and dimensions', '安装尺寸')}</h3><p class='page-missing'>{t('No approved dimensions or installation drawing in this product version.', '当前产品版本没有已核准的尺寸或安装图。')}</p></section>"
         group_html += f"<section class='page-group'><h3>{t('Purchasing and delivery', '采购交付')}</h3><p class='page-missing'>{t('MOQ, lead time and sample availability require seller confirmation.', '起订量、交期和样品状态待卖方确认。')}</p></section>"
         missing_labels = [FIELD_LABELS[key] for key in snapshot.get("missing_fields", []) if key in FIELD_LABELS]
         missing_html = "<p class='muted'>" + ("Pending information: " if lang == "en" else "待补充信息：") + esc("、".join(missing_labels)) + "</p>" if missing_labels else ""
         source_prefix = f"/s/{quote(site['site_key'])}" if site else ""
-        published_sources = [source for source in sources if source["id"] in allowed_source_ids and source["id"] in cited_source_ids and source["storage_path"]]
-        def source_url(source: sqlite3.Row) -> str:
-            return f"{source_prefix}/products/{esc(product['slug'])}/sources/{esc(source['id'])}"
-        image_source = next((source for source in published_sources if Path(source["filename"]).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".avif"}), None)
-        hero_visual = f"<img src='{source_url(image_source)}?preview=1' alt='{esc(product['model'])} · {esc(image_source['filename'])}'>" if image_source else f"<span>{t('Approved product image pending', '已核准产品图片待补充')}</span>"
-        source_links = "".join(
-            f"<li>{esc(source['filename'])} · {esc(source['source_location'])} <a href='{source_url(source)}'>{t('Download', '下载')}</a>"
-            + (f" · <a href='{source_url(source)}?preview=1' target='_blank' rel='noopener'>{t('Preview', '预览')}</a>" if Path(source["filename"]).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".avif", ".pdf"} else "")
-            + "</li>" for source in published_sources
-        ) or f"<li class='muted'>{t('No approved public document', '暂无公开资料附件')}</li>"
+        def source_url(entry: dict[str, object]) -> str:
+            return f"{source_prefix}/products/{esc(product['slug'])}/sources/{esc(entry['id'])}"
+        def scope_chip(entry: dict[str, object]) -> str:
+            return t('This model', '本型号') if entry["scope"] == "exact_model" else t('Series reference (not model-specific)', '系列资料（非本型号专属）')
+        image_entries = [entry for entry in published_sources if Path(str(entry["filename"])).suffix.lower() in IMAGE_EXTENSIONS]
+        gallery_entries = [entry for entry in image_entries if entry["scope"] == "exact_model"][:8]
+        cad_entries = [entry for entry in published_sources if Path(str(entry["filename"])).suffix.lower() in (CAD_3D_EXTENSIONS | CAD_2D_EXTENSIONS)]
+        exact_cad = [entry for entry in cad_entries if entry["scope"] == "exact_model"]
+        series_cad = [entry for entry in cad_entries if entry["scope"] == "series"]
+        if gallery_entries:
+            gallery_rules = "".join(
+                f"#glr-{idx}:checked~.gallery-main .gallery-slide[data-index='{idx}']{{display:block}}"
+                f"#glr-{idx}:checked~.gallery-thumbs label[for='glr-{idx}']{{outline:2px solid #0c688c}}"
+                for idx in range(len(gallery_entries))
+            )
+            gallery_inputs = "".join(
+                f"<input class='gallery-input' type='radio' name='product-gallery' id='glr-{idx}' {'checked' if idx == 0 else ''} aria-label='{t('View approved image', '查看已核准图片')} {idx + 1}'>"
+                for idx in range(len(gallery_entries))
+            )
+            gallery_slides = "".join(
+                f"<figure class='gallery-slide' data-index='{idx}'><img src='{source_url(entry)}?preview=1' alt='{esc(product['model'])} · {esc(entry['filename'])}'><figcaption>{esc(entry['filename'])} · {t('this model', '本型号已核准图片')}</figcaption></figure>"
+                for idx, entry in enumerate(gallery_entries)
+            )
+            gallery_thumbs = "".join(
+                f"<label for='glr-{idx}'><img src='{source_url(entry)}?preview=1' alt='' loading='lazy'><span>{idx + 1}</span></label>"
+                for idx, entry in enumerate(gallery_entries)
+            ) if len(gallery_entries) > 1 else ""
+            hero_visual = f"<style>.product-gallery .gallery-slide{{display:none}}{gallery_rules}</style><div class='product-gallery'>{gallery_inputs}<div class='gallery-main'>{gallery_slides}</div><div class='gallery-thumbs'>{gallery_thumbs}</div></div>"
+        else:
+            hero_visual = f"<span>{t('Approved product image pending', '已核准本型号图片待补充')}</span>"
+        gallery_ids = {entry["id"] for entry in gallery_entries}
+        cad_ids = {entry["id"] for entry in cad_entries}
+        doc_entries = [entry for entry in published_sources if entry["id"] not in gallery_ids and entry["id"] not in cad_ids]
+        def doc_item(entry: dict[str, object]) -> str:
+            suffix = Path(str(entry["filename"])).suffix.lower()
+            preview = (
+                f" · <a href='{source_url(entry)}?preview=1' target='_blank' rel='noopener'>{t('Preview', '预览')}</a>"
+                if suffix in (IMAGE_EXTENSIONS | {".pdf"}) else ""
+            )
+            return (
+                f"<li><b>{esc(entry['filename'])}</b> <span class='file-chip'>{esc(scope_chip(entry))}</span> · {esc(entry['source_location'])}"
+                f" <a href='{source_url(entry)}'>{t('Download', '下载')}</a>{preview}</li>"
+            )
+        source_links = "".join(doc_item(entry) for entry in doc_entries) or f"<li class='muted'>{t('No approved public document', '暂无公开资料附件')}</li>"
+        def cad_block(title: str, entries: list[dict[str, object]]) -> str:
+            items = "".join(
+                f"<li><b>{esc(entry['filename'])}</b> <span class='file-chip'>{'3D' if Path(str(entry['filename'])).suffix.lower() in CAD_3D_EXTENSIONS else '2D'} · {esc(Path(str(entry['filename'])).suffix.lstrip('.').upper())}</span>"
+                f" <a href='{source_url(entry)}'>{t('Download approved original', '下载获准原件')}</a>"
+                f"<small>{t('This format is not rendered in the browser; open the downloaded original in CAD software.', '该格式不提供浏览器内渲染；请下载后在 CAD 软件中打开原件。')}</small></li>"
+                for entry in entries
+            )
+            return f"<h3>{title}</h3><ul class='file-list'>{items}</ul>"
+        if exact_cad or series_cad:
+            drawing_parts = []
+            if exact_cad:
+                drawing_parts.append(cad_block(t('This model’s engineering files', '本型号工程文件'), exact_cad))
+            if series_cad:
+                drawing_parts.append(
+                    f"<p class='page-missing'>{t('The files below belong to the series, not to this model; do not use them as this model’s engineering file.', '下列文件为系列级资料，非本型号专属；不得作为本型号工程依据。')}</p>"
+                    + cad_block(t('Series-level files', '系列级参考文件'), series_cad)
+                )
+            drawings_html = "".join(drawing_parts)
+        else:
+            drawings_html = f"<p class='page-missing'>{t('No approved public 2D/3D file for this model yet. Ask the seller whether a drawing is available.', '当前版本没有本型号已获准公开的 2D/3D 文件；可向卖方询问。')}</p>"
+        drawings_action = f"<a class='button secondary' href='#drawings'>{t('2D/3D files', '图纸与模型')}</a>" if (exact_cad or series_cad) else ""
         comparison_keys = ("flow_range", "head_range", "power", "material", "media")
         comparison_products = [product] + [item for item in self.db.list_products(tenant_id) if item["id"] != product["id"] and item["status"] == "published"][:2]
         comparison_versions = [(item, self.db.get_published_version(tenant_id, item["id"])) for item in comparison_products]
@@ -3075,16 +3637,17 @@ class Handler(BaseHTTPRequestHandler):
         mobile_cta_html = f"<a class='page-mobile-cta' href='#product-rfq'>{t('Request a quote', '发起询价')}</a>" if site else ""
         body = f"""
 <nav class='page-breadcrumb' aria-label='Breadcrumb'>{t('Home › Products › Pump', '首页 › 产品 › 水泵')} › {esc(product['model'])}</nav>
-<section class='page-hero' id='overview' data-section='hero'><div class='page-visual' role='img' aria-label='{t('Approved product image', '已核准产品图片') if image_source else t('Product image pending approval', '产品图片待核准')}'>{hero_visual}</div><div><p class='page-eyebrow'>{t('Published product version', '已发布产品版本')} {version['version']} · {esc(version['published_at'])}</p><h1>{esc(product['model'])}</h1><p class='page-model'>{esc(product['name'])}</p><p class='muted'>{t('Check the sourced flow and head data before asking for a final duty-point review.', '请先核对有出处的流量与扬程，再请工程师确认最终工况。')}</p><div class='page-actions'>{inquiry_link}<a class='button secondary' href='#downloads'>{t('View documents', '查看资料')}</a><a class='button secondary' href='#faq'>{t('Read FAQ', '查看常见问题')}</a></div><div class='page-quick'>{hero_facts}</div>{missing_html}<p class='page-missing'>{t('MOQ, lead time and sample availability: ask the seller.', '起订量、交期、样品状态：请向卖方核实。')}</p></div></section>
+<section class='page-hero' id='overview' data-section='hero'><div class='page-visual' role='img' aria-label='{t('Approved product images', '已核准产品图片') if gallery_entries else t('Product image pending approval', '产品图片待核准')}'>{hero_visual}</div><div><p class='page-eyebrow'>{t('Published product version', '已发布产品版本')} {version['version']} · {esc(version['published_at'])}</p><h1>{esc(product['model'])}</h1><p class='page-model'>{esc(product['name'])}</p><p class='muted'>{t('Check the sourced flow and head data before asking for a final duty-point review.', '请先核对有出处的流量与扬程，再请工程师确认最终工况。')}</p><div class='page-actions'>{inquiry_link}<a class='button secondary' href='#downloads'>{t('View documents', '查看资料')}</a>{drawings_action}<a class='button secondary' href='#faq'>{t('Read FAQ', '查看常见问题')}</a></div><div class='page-quick'>{hero_facts}</div>{missing_html}<p class='page-missing'>{t('MOQ, lead time and sample availability: ask the seller.', '起订量、交期、样品状态：请向卖方核实。')}</p></div></section>
 <nav class='page-anchors' aria-label='Product sections'><a href='#overview'>{t('Overview', '概览')}</a><a href='#specifications'>{t('Specifications', '参数')}</a><a href='#applications'>{t('Applications', '应用')}</a><a href='#customization'>{t('Customization', '定制')}</a><a href='#downloads'>{t('Documents', '资料')}</a><a href='#faq'>FAQ</a></nav>
 <section class='page-section' data-section='advantages'><h2>{t('What the approved record supports', '已核准资料能说明什么')}</h2><p>{t('Flow and head values below are shown with their source. Final suitability depends on the buyer’s operating point and conditions.', '下列流量、扬程值附有出处；最终适用性仍取决于买方工况。')}</p><div class='page-fact-pair'><div><b>{esc(field_label('flow_range'))}</b>{fact('flow_range')}</div><div><b>{esc(field_label('head_range'))}</b>{fact('head_range')}</div></div></section>
 <section class='page-section' id='specifications' data-section='specifications'><h2>{t('Technical specifications', '技术参数')}</h2><div class='page-groups'>{group_html}</div></section>
+<section class='page-section' id='drawings' data-section='drawings'><h2>{t('2D drawings and 3D models', '二维图纸与三维模型')}</h2><p class='muted'>{t('Only approved originals are offered here. STEP/DXF files are not rendered in the browser; download and open them in CAD software.', '这里只提供已核准原件；STEP/DXF 等不在浏览器内渲染，请下载后用 CAD 软件打开。')}</p>{drawings_html}</section>
 <section class='page-section' data-section='comparison'><h2>{t('Compare published models', '对比已发布型号')}</h2><p class='muted'>{t('Only approved published models from this seller appear here. Missing data stays visible.', '仅比较本企业已核准发布的型号；缺项如实显示。')}</p><div class='page-table-scroll'><table><thead><tr><th>{t('Parameter', '参数')}</th>{comparison_header}</tr></thead><tbody>{comparison_rows}</tbody></table></div><ul>{comparison_links}</ul></section>
 <section class='page-section' id='applications' data-section='applications'><h2>{t('Applications', '应用场景')}</h2><p class='page-missing'>{t('No application claim has been approved for this product version. Describe your operating conditions in the original website chat or RFQ.', '当前版本没有已核准的应用场景结论。请在原官网聊天窗口或询价中描述工况。')}</p></section>
 <section class='page-section' id='customization' data-section='customization'><h2>{t('Customization', '定制能力')}</h2><p class='page-missing'>{t('Available changes and turnaround times have not been confirmed by the seller.', '可定制项目及周期尚未由卖方确认。')}</p></section>
 <section class='page-section' data-section='manufacturing'><h2>{t('Manufacturing and quality control', '制造与质量控制')}</h2><p class='page-missing'>{t('Factory and inspection evidence has not been provided for publication.', '尚无获准公开的工厂与质检证据。')}</p></section>
 <section class='page-section' data-section='certification'><h2>{t('Certifications and cases', '认证与案例')}</h2><p class='page-missing'>{t('No verified certificates or customer cases are available in this published record.', '当前已发布记录没有可核验的认证或客户案例。')}</p></section>
-<section class='page-section' id='downloads' data-section='downloads'><h2>{t('Approved documents', '已获准公开的资料')}</h2><ul>{source_links}</ul><p class='muted'>{t('Documents without publication permission are not downloadable.', '未获得公开许可的文件不提供下载。')}</p></section>
+<section class='page-section' id='downloads' data-section='downloads'><h2>{t('Approved documents', '已获准公开的资料')}</h2><ul class='file-list'>{source_links}</ul><p class='muted'>{t('Documents without publication permission, outside the current version, or revoked are not downloadable.', '未获准公开、未纳入当前版本或已撤销许可的文件不提供下载。')}</p></section>
 <section class='page-section' id='faq' data-section='faq'><h2>{t('Frequently asked questions', '常见问题')}</h2><details><summary>{t('Can this model meet my exact duty point?', '这个型号能满足我的具体工况吗？')}</summary><p>{t('Compare the sourced flow and head information above, then ask an engineer to check your actual conditions.', '先核对上方有出处的流量、扬程数据，再请工程师检查实际工况。')}</p></details><details><summary>{t('What are the MOQ and lead time?', '起订量和交期是多少？')}</summary><p>{t('The published record does not confirm these commercial terms. Include your quantity and destination in an RFQ.', '当前已发布资料没有确认这些商务条件。请在询价中提供数量和目的地。')}</p></details></section>
 {rfq_html}
 {mobile_cta_html}
@@ -3109,16 +3672,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(layout("资料不可用", "<div class='error'>该来源资料没有可下载文件。</div>"), 404)
             return
         version = self.db.get_published_version(tenant_id, product["id"])
-        if source_id not in {field["source_document_id"] for field in json.loads(version["snapshot_json"])["fields"]}:
-            self.send_html(layout("资料不可用", "<div class='error'>该来源资料未纳入当前公开版本。</div>"), 404)
+        if not version:
+            self.send_html(layout("资料不可用", "<div class='error'>产品未公开。</div>", public=True), 404)
+            return
+        snapshot = json.loads(version["snapshot_json"])
+        if source_id not in {entry["id"] for entry in snapshot.get("public_sources", [])}:
+            self.send_html(layout("资料不可用", "<div class='error'>该来源资料未纳入当前公开版本。</div>", public=True), 404)
             return
         target = ROOT / source["storage_path"]
         if not target.is_file():
-            self.send_html(layout("资料不可用", "<div class='error'>文件存储不可用，请联系管理员。</div>"), 404)
+            self.send_html(layout("资料不可用", "<div class='error'>文件存储不可用，请联系管理员。</div>", public=True), 404)
+            return
+        content = target.read_bytes()
+        if source["sha256"] and hashlib.sha256(content).hexdigest() != source["sha256"]:
+            self.db._audit(tenant_id, "source_document", source_id, "public_download_blocked_hash_mismatch", "public")
+            self.db.conn.commit()
+            self.send_html(layout("资料不可用", "<div class='error'>文件完整性校验未通过，已阻止下载；请联系管理员重新上传该资料。</div>", public=True), 409)
             return
         content_type = mimetypes.guess_type(source["filename"])[0] or "application/octet-stream"
         previewable = content_type in {"image/png", "image/jpeg", "image/webp", "image/avif", "application/pdf"}
-        self.send_bytes(target.read_bytes(), content_type, source["filename"], inline=preview and previewable)
+        self.send_bytes(content, content_type, source["filename"], inline=preview and previewable)
 
 
 def make_server(db_path: str | os.PathLike[str], host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:

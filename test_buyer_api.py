@@ -1,5 +1,4 @@
 import http.client
-import hashlib
 import json
 import tempfile
 import threading
@@ -8,6 +7,14 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from app import Database, Handler, ROOT, make_server
+
+
+def approve_all_fields(db, tenant_id, product_id):
+    """Simulate an admin who individually approved every sourced candidate field."""
+    for field in db.get_fields(tenant_id, product_id):
+        if field["state"] == "candidate":
+            db.approve_field(tenant_id, product_id, field["field_key"])
+    db.finalize_product_review(tenant_id, product_id)
 
 
 class BuyerApiTests(unittest.TestCase):
@@ -65,22 +72,79 @@ class BuyerApiTests(unittest.TestCase):
         conn.close()
         return result
 
+    def multipart_upload(self, path, cookie, filename, content, fields=None):
+        boundary = "----growave-test-boundary"
+        chunks = []
+        for key, value in (fields or {}).items():
+            chunks.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode("utf-8"))
+        chunks.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="source_file"; filename="{filename}"\r\nContent-Type: text/plain\r\n\r\n'.encode("utf-8")
+            + content + b"\r\n"
+        )
+        chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+        body = b"".join(chunks)
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        conn.request("POST", path, body, {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Cookie": cookie,
+            "Content-Length": str(len(body)),
+        })
+        response = conn.getresponse()
+        status = response.status
+        response.read()
+        conn.close()
+        return status
+
+    def test_admin_upload_extract_review_and_publish_flow(self):
+        _, admin_headers, _ = self.form_request("POST", "/login", {"email": "demo-admin@example.invalid", "password": "demo-admin"})
+        admin_cookie = admin_headers["Set-Cookie"].split(";", 1)[0]
+        self.assertEqual(self.form_request("POST", "/admin/products", {"model": "UI-1", "name": "UI 联调泵", "use_case": "联调"}, admin_cookie)[0], 303)
+        product = next(item for item in self.db.list_products("demo-tenant") if item["model"] == "UI-1")
+        content = "流量范围: 20-80 m³/h\n扬程范围: 18-42 m\n介质: 清水\n".encode("utf-8")
+        status = self.multipart_upload(
+            f"/admin/products/{product['id']}/sources", admin_cookie, "UI-1-参数.txt", content,
+            {"filename": "UI-1-参数.txt", "file_type": "TXT", "scope": "exact_model", "source_location": "第 1 节：参数表"},
+        )
+        self.assertEqual(status, 303)
+        source = self.db.get_sources("demo-tenant", product["id"])[0]
+        self.addCleanup(Path(source["storage_path"]).unlink, missing_ok=True)
+        self.assertEqual(source["processing_status"], "extracted")
+        fields = {field["field_key"]: field for field in self.db.get_fields("demo-tenant", product["id"])}
+        self.assertEqual(fields["flow_range"]["value"], "20-80")
+        self.assertEqual(fields["flow_range"]["origin"], "extracted")
+        # 还有候选未处理时，完成核对被拒绝
+        self.assertEqual(self.form_request("POST", f"/admin/products/{product['id']}/finalize-review", {}, admin_cookie)[0], 400)
+        # 逐项核准/驳回
+        self.assertEqual(self.form_request("POST", f"/admin/products/{product['id']}/fields/flow_range/approve", {}, admin_cookie)[0], 303)
+        self.assertEqual(self.form_request("POST", f"/admin/products/{product['id']}/fields/head_range/reject", {"reason": "范围需工程师确认"}, admin_cookie)[0], 303)
+        self.assertEqual(self.form_request("POST", f"/admin/products/{product['id']}/fields/media/approve", {}, admin_cookie)[0], 303)
+        self.assertEqual(self.form_request("POST", f"/admin/products/{product['id']}/finalize-review", {}, admin_cookie)[0], 303)
+        self.assertEqual(self.db.get_product("demo-tenant", product["id"])["status"], "approved")
+        self.assertEqual(self.form_request("POST", f"/admin/products/{product['id']}/publish", {}, admin_cookie)[0], 303)
+        _, page = self.html_get(f"/products/{product['slug']}")
+        self.assertIn("20-80", page)
+        self.assertIn("清水", page)
+        self.assertNotIn("18-42", page)  # 驳回字段不公开
+        _, _, admin_page = self.form_request("GET", f"/admin/products/{product['id']}", cookie=admin_cookie)
+        self.assertIn("驳回原因：范围需工程师确认", admin_page)
+        self.assertIn("已驳回", admin_page)
+
     def test_public_image_preview_and_download_require_current_permission(self):
         product_id = self.db.create_product("demo-tenant", "IMG-1", "Pump with approved image", "unreviewed use case")
-        source_id = self.db.add_source("demo-tenant", product_id, "pump.png", "PNG", "Image 1")
         contents = b"\x89PNG\r\n\x1a\n" + b"demo-image"
+        source_id = self.db.add_source("demo-tenant", product_id, "pump.png", "PNG", "Image 1", content=contents, scope="exact_model")
         upload = ROOT / "data" / "uploads" / f"{source_id}-pump.png"
-        upload.parent.mkdir(parents=True, exist_ok=True)
-        upload.write_bytes(contents)
         self.addCleanup(upload.unlink, missing_ok=True)
-        self.db.conn.execute("UPDATE source_documents SET storage_path=?, sha256=? WHERE id=?", (f"data/uploads/{upload.name}", hashlib.sha256(contents).hexdigest(), source_id))
-        self.db.conn.commit()
+        self.assertTrue(upload.is_file())
         self.db.save_field("demo-tenant", product_id, "flow_range", "10-30", "m³/h", source_id, "Image 1")
-        self.db.approve_product("demo-tenant", product_id)
+        approve_all_fields(self.db, "demo-tenant", product_id)
         self.db.publish_product("demo-tenant", product_id)
         path = f"/s/site-a/products/img-1/sources/{source_id}"
         self.assertEqual(self.raw_get(path + "?preview=1")[0], 404)
         self.db.allow_public_source("demo-tenant", product_id, source_id, "demo-admin")
+        # 发布版本冻结文件清单：刚开放的文件还没有进入 v1 买方页
+        self.assertNotIn(path + "?preview=1", self.html_get("/s/site-a/products/img-1")[1])
+        self.db.publish_product("demo-tenant", product_id)
         page = self.html_get("/s/site-a/products/img-1")[1]
         self.assertIn(path + "?preview=1", page)
         status, headers, body = self.raw_get(path + "?preview=1")
@@ -93,10 +157,10 @@ class BuyerApiTests(unittest.TestCase):
     def test_site_product_page_is_tenant_scoped_and_has_api_rfq_entry(self):
         self.db.seed_demo_products("demo-tenant")
         product = self.db.list_products("demo-tenant")[0]
-        self.db.approve_product("demo-tenant", product["id"])
+        approve_all_fields(self.db, "demo-tenant", product["id"])
         self.db.publish_product("demo-tenant", product["id"])
         second = next(item for item in self.db.list_products("demo-tenant") if item["id"] != product["id"])
-        self.db.approve_product("demo-tenant", second["id"])
+        approve_all_fields(self.db, "demo-tenant", second["id"])
         self.db.publish_product("demo-tenant", second["id"])
         page_path = f"/s/site-a/products/{product['slug']}"
         status, page = self.html_get(page_path)
@@ -107,7 +171,7 @@ class BuyerApiTests(unittest.TestCase):
         self.assertNotIn("href='/admin'", page)
         self.assertNotIn("mailto:sales@example.invalid", page)
         self.assertIn("product-page.css", page)
-        sections = ["hero", "advantages", "specifications", "comparison", "applications", "customization", "manufacturing", "certification", "downloads", "faq"]
+        sections = ["hero", "advantages", "specifications", "drawings", "comparison", "applications", "customization", "manufacturing", "certification", "downloads", "faq"]
         self.assertEqual([page.index(f"data-section='{name}'") for name in sections], sorted(page.index(f"data-section='{name}'") for name in sections))
         self.assertIn(second["model"], page)
         self.assertIn("MOQ, lead time and sample availability", page)
@@ -204,7 +268,7 @@ class BuyerApiTests(unittest.TestCase):
     def test_recommendation_only_uses_confirmed_revision_and_published_tenant_products(self):
         self.db.seed_demo_products("demo-tenant")
         for product in self.db.list_products("demo-tenant"):
-            self.db.approve_product("demo-tenant", product["id"])
+            approve_all_fields(self.db, "demo-tenant", product["id"])
             self.db.publish_product("demo-tenant", product["id"])
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
@@ -225,7 +289,7 @@ class BuyerApiTests(unittest.TestCase):
     def test_grounded_answer_and_explicit_engineer_request_share_conversation(self):
         self.db.seed_demo_products("demo-tenant")
         product = self.db.list_products("demo-tenant")[0]
-        self.db.approve_product("demo-tenant", product["id"])
+        approve_all_fields(self.db, "demo-tenant", product["id"])
         self.db.publish_product("demo-tenant", product["id"])
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
@@ -336,7 +400,7 @@ class BuyerApiTests(unittest.TestCase):
     def test_buyer_edits_same_rfq_with_seller_history_and_stale_revision_conflict(self):
         self.db.seed_demo_products("demo-tenant")
         product = self.db.list_products("demo-tenant")[0]
-        self.db.approve_product("demo-tenant", product["id"])
+        approve_all_fields(self.db, "demo-tenant", product["id"])
         self.db.publish_product("demo-tenant", product["id"])
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"

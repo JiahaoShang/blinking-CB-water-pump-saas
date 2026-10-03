@@ -6,3 +6,9 @@ html{scroll-behavior:smooth;background:#f4f6f8}body{background:#f4f6f8;backgroun
 @media(max-width:760px){header nav{width:100%;overflow:auto}main{padding:16px 12px 80px}.page-hero{grid-template-columns:1fr;padding:14px;gap:16px}.page-visual{min-height:280px}.page-hero h1{font-size:28px}.page-anchors{top:102px;margin:10px 0}.page-groups{grid-template-columns:1fr}.page-section{padding:17px;scroll-margin-top:160px}.page-actions{display:grid;grid-template-columns:1fr}.page-actions .button{text-align:center}.page-quick{grid-template-columns:1fr 1fr}}
 @media(max-width:760px){.page-mobile-cta{display:block;position:fixed;z-index:20;bottom:10px;left:12px;right:12px;border-radius:10px;background:#0c688c;color:#fff;text-align:center;font-weight:700;padding:12px;box-shadow:0 8px 30px #17212b44}}
 @media print{header,.page-anchors,.page-actions,#product-rfq{display:none!important}body{background:#fff}.page-section,.page-hero{break-inside:avoid;box-shadow:none}}
+
+/* M2: approved-image gallery, file lists and attribution chips */
+.product-gallery{display:grid;gap:10px}
+.product-gallery .gallery-input{position:absolute;width:1px;height:1px;opacity:0}
+.product-gallery .gallery-slide{display:none;margin:0}
+.product-gallery .gallery-slide img{display:block;max-width:100
