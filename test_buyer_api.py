@@ -472,6 +472,98 @@ class BuyerApiTests(unittest.TestCase):
         self.assertFalse(no_match["tentative_available"])
         self.assertTrue(no_match["options"]["engineer_help"])
 
+    def test_confirm_idempotency_dedupes_retry_and_rejects_changed_retry(self):
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        _, _, sent = self.request("POST", path + "/messages", {"text": "flow 50 m3/h, head 30 m"}, headers)
+        draft = sent["requirement_draft"]
+        keyed = {**headers, "Idempotency-Key": "confirm-key-1"}
+        payload = {"base_revision_id": draft["revision_id"], "values": draft["values"]}
+        status, _, first = self.request("POST", path + "/requirements/confirm", payload, keyed)
+        self.assertEqual(status, 201)
+        # 同键同内容重试（双击/断网重发）：返回原始修订，不新建
+        status, _, retry = self.request("POST", path + "/requirements/confirm", payload, keyed)
+        self.assertEqual(status, 200)
+        self.assertEqual(retry["revision_id"], first["revision_id"])
+        self.assertTrue(retry["duplicate"])
+        revisions = self.db.get_revisions("demo-tenant", created["conversation_id"])
+        self.assertEqual(len([row for row in revisions if row["status"] == "confirmed"]), 1)
+        # 成功后又产生新修订时，旧键重试仍返回原始结果：不报“基准过期”、不重复确认
+        _, _, sent2 = self.request("POST", path + "/messages", {"text": "quantity 2"}, headers)
+        status, _, late_retry = self.request("POST", path + "/requirements/confirm", payload, keyed)
+        self.assertEqual(status, 200)
+        self.assertEqual(late_retry["revision_id"], first["revision_id"])
+        # 同键改内容：409，不静默覆盖也不假装成功
+        changed = json.loads(json.dumps(payload))
+        changed["values"]["quantity"] = {"value": "9", "unit": ""}
+        self.assertEqual(self.request("POST", path + "/requirements/confirm", changed, keyed)[0], 409)
+        # 新键代表真实的新动作：允许再次确认并为新修订
+        draft2 = sent2["requirement_draft"]
+        status, _, again = self.request("POST", path + "/requirements/confirm", {"base_revision_id": draft2["revision_id"], "values": draft2["values"]}, {**headers, "Idempotency-Key": "confirm-key-2"})
+        self.assertEqual(status, 201)
+        self.assertNotEqual(again["revision_id"], first["revision_id"])
+        revisions = self.db.get_revisions("demo-tenant", created["conversation_id"])
+        self.assertEqual(len([row for row in revisions if row["status"] == "confirmed"]), 2)
+
+    def test_question_idempotency_dedupes_retry_and_rejects_changed_retry(self):
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        keyed = {**headers, "Idempotency-Key": "question-key-1"}
+        payload = {"question": "Can you confirm the price?"}
+        status, _, first = self.request("POST", path + "/questions", payload, keyed)
+        self.assertEqual(status, 201)
+        # 同键同内容重试：返回原始答案，不重复提问、不重复保存答案
+        status, _, retry = self.request("POST", path + "/questions", payload, keyed)
+        self.assertEqual(status, 200)
+        self.assertEqual(retry["answer_id"], first["answer_id"])
+        self.assertTrue(retry["duplicate"])
+        self.assertEqual(len(self.db.list_answers("demo-tenant", created["conversation_id"])), 1)
+        question_messages = [row for row in self.db.list_messages("demo-tenant", created["conversation_id"]) if row["content"] == "Can you confirm the price?"]
+        self.assertEqual(len(question_messages), 1)
+        # 同键改内容：409
+        self.assertEqual(self.request("POST", path + "/questions", {"question": "What is the lead time?"}, keyed)[0], 409)
+        # 新键同内容（买方真实再次提问）：允许新记录
+        status, _, second = self.request("POST", path + "/questions", payload, {**headers, "Idempotency-Key": "question-key-2"})
+        self.assertEqual(status, 201)
+        self.assertNotEqual(second["answer_id"], first["answer_id"])
+
+    def test_recommendation_idempotency_dedupes_double_click(self):
+        self.db.seed_demo_products("demo-tenant")
+        for product in self.db.list_products("demo-tenant"):
+            approve_all_fields(self.db, "demo-tenant", product["id"])
+            self.db.publish_product("demo-tenant", product["id"])
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        _, _, sent = self.request("POST", path + "/messages", {"text": "Need pump flow 50 m3/h, head 30 m, clean water"}, headers)
+        draft = sent["requirement_draft"]
+        _, _, confirmed = self.request("POST", path + "/requirements/confirm", {"base_revision_id": draft["revision_id"], "values": draft["values"]}, headers)
+        keyed = {**headers, "Idempotency-Key": "find-key-1"}
+        payload = {"revision_id": confirmed["revision_id"]}
+        status, _, first = self.request("POST", path + "/recommendations", payload, keyed)
+        self.assertEqual(status, 201)
+        status, _, retry = self.request("POST", path + "/recommendations", payload, keyed)
+        self.assertEqual(status, 200)
+        self.assertEqual(retry["recommendation_id"], first["recommendation_id"])
+        self.assertTrue(retry["duplicate"])
+        self.assertEqual(len(self.db.get_recommendations("demo-tenant", created["conversation_id"])), 1)
+        # 并发双击（同键两路并发）：唯一索引兜底，仍只有一条推荐记录、两个请求拿到同一结果
+        _, _, created2 = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path2 = f"/api/v1/buyer/conversations/{created2['conversation_id']}"
+        headers2 = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created2['access_token']}"}
+        _, _, sent2 = self.request("POST", path2 + "/messages", {"text": "Need pump flow 50 m3/h, head 30 m, clean water"}, headers2)
+        draft2 = sent2["requirement_draft"]
+        _, _, confirmed2 = self.request("POST", path2 + "/requirements/confirm", {"base_revision_id": draft2["revision_id"], "values": draft2["values"]}, headers2)
+        concurrent_headers = {**headers2, "Idempotency-Key": "find-race-1"}
+        payload2 = {"revision_id": confirmed2["revision_id"]}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: self.request("POST", path2 + "/recommendations", payload2, concurrent_headers), range(2)))
+        self.assertEqual(sorted(status for status, _, _ in results), [200, 201])
+        self.assertEqual(len({body["recommendation_id"] for _, _, body in results}), 1)
+        self.assertEqual(len(self.db.get_recommendations("demo-tenant", created2["conversation_id"])), 1)
+
     def test_public_product_json_serves_only_published_approved_content(self):
         product_id = self.db.create_product("demo-tenant", "PUB-JSON", "公开 JSON 泵", "联调")
         contents = b"\x89PNG\r\n\x1a\n" + b"public-json-image"

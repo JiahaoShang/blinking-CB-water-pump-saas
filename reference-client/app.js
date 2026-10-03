@@ -93,6 +93,7 @@ function renderRequirements(requirement) {
     form.append(row);
   }
   const submit = node('button', '', t('confirm')); submit.type = 'submit'; form.append(submit);
+  let pendingConfirm = null;
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const values = structuredClone(requirement.values || {});
@@ -100,7 +101,10 @@ function renderRequirements(requirement) {
       const unknown = form.elements[`${key}_unknown`].checked;
       values[key] = { value: unknown ? '' : input.value.trim(), unit: key === 'flow' ? 'm³/h' : key === 'head' ? 'm' : '', label: names[key] };
     }
-    try { await api(`/conversations/${conversationId}/requirements/confirm`, 'POST', { base_revision_id: requirement.revision_id, values }); await refresh(); }
+    const payload = { base_revision_id: requirement.revision_id, values };
+    const signature = JSON.stringify(payload);
+    if (!pendingConfirm || pendingConfirm.signature !== signature) pendingConfirm = { key: crypto.randomUUID(), signature };
+    try { await api(`/conversations/${conversationId}/requirements/confirm`, 'POST', payload, { 'Idempotency-Key': pendingConfirm.key }); pendingConfirm = null; await refresh(); }
     catch (error) { showNotice(error.message); }
   });
   card.append(form);
@@ -108,8 +112,10 @@ function renderRequirements(requirement) {
 function renderRecommendation(recommendation, requirement) {
   if (requirement?.status === 'confirmed' && !recommendation) {
     const card = appendCard(t('find'));
+    let findRequestKey = null;
     card.append(action(t('find'), async () => {
-      try { await api(`/conversations/${conversationId}/recommendations`, 'POST', { revision_id: requirement.revision_id }); await refresh(); }
+      findRequestKey = findRequestKey || crypto.randomUUID();
+      try { await api(`/conversations/${conversationId}/recommendations`, 'POST', { revision_id: requirement.revision_id }, { 'Idempotency-Key': findRequestKey }); findRequestKey = null; await refresh(); }
       catch (error) { showNotice(error.message); }
     }));
   }
@@ -153,10 +159,13 @@ function renderRecommendation(recommendation, requirement) {
   drawProducts(recommendation.results || []);
   if (recommendation.status !== 'recommended') {
     const tentativeShown = (recommendation.results || []).some((item) => item.status === 'needs_confirmation');
+    let exploreRequestKey = null;
     const exploreButton = recommendation.options?.tentative_available && !tentativeShown
       ? action(locale === 'zh' ? '查看待核实候选' : 'View tentative candidates', async () => {
+          exploreRequestKey = exploreRequestKey || crypto.randomUUID();
           try {
-            const body = await api(`/conversations/${conversationId}/recommendations`, 'POST', { revision_id: requirement?.revision_id, include_tentative: true });
+            const body = await api(`/conversations/${conversationId}/recommendations`, 'POST', { revision_id: requirement?.revision_id, include_tentative: true }, { 'Idempotency-Key': exploreRequestKey });
+            exploreRequestKey = null;
             recommendation.results = body.results || [];
             drawProducts(recommendation.results);
             exploreButton.remove();
@@ -221,9 +230,13 @@ function renderQuestionForm(recommendation) {
   const label = node('label'); label.append(node('span', '', 'Product context / 产品')); label.append(select); form.append(label);
   const question = node('textarea'); question.name = 'question'; question.required = true; question.rows = 2; question.placeholder = 'e.g. What is the flow range?'; form.append(question);
   const submit = node('button', '', t('ask')); submit.type = 'submit'; form.append(submit);
+  let pendingQuestion = null;
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    try { await api(`/conversations/${conversationId}/questions`, 'POST', { product_id: select.value || null, question: question.value.trim() }); await refresh(); }
+    const payload = { product_id: select.value || null, question: question.value.trim() };
+    const signature = JSON.stringify(payload);
+    if (!pendingQuestion || pendingQuestion.signature !== signature) pendingQuestion = { key: crypto.randomUUID(), signature };
+    try { await api(`/conversations/${conversationId}/questions`, 'POST', payload, { 'Idempotency-Key': pendingQuestion.key }); pendingQuestion = null; await refresh(); }
     catch (error) { showNotice(error.message); }
   });
   card.append(form);

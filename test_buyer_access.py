@@ -111,6 +111,24 @@ class BuyerConversationAccessTests(unittest.TestCase):
         self.assertNotIn("后台已生成待处理人工任务", asked)
         self.assertIn("不会自动安排", asked)
 
+    def test_legacy_confirm_and_ask_dedupe_submission_key(self):
+        """旧页双击/重发同一提交键：不产生重复确认修订与重复问答。"""
+        db = self.server.RequestHandlerClass.db
+        _, headers, _ = self.request("GET", "/inquiry")
+        path = headers["Location"].split("?", 1)[0]
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        conversation_id = path.rsplit("/", 1)[1]
+        self.assertEqual(self.request("POST", path + "/message", urlencode({"message": "flow 50 m3/h, head 30 m, clean water"}), cookie)[0], 303)
+        confirm = urlencode({"submission_key": "legacy-confirm-1", "flow": "50", "head": "30", "media": "clean water", "temperature": "60"})
+        self.assertEqual(self.request("POST", path + "/confirm", confirm, cookie)[0], 303)
+        self.assertEqual(self.request("POST", path + "/confirm", confirm, cookie)[0], 303)
+        revisions = db.get_revisions("demo-tenant", conversation_id)
+        self.assertEqual(len([row for row in revisions if row["status"] == "confirmed"]), 1)
+        ask = urlencode({"submission_key": "legacy-ask-1", "question": "Can you confirm the price?"})
+        self.assertEqual(self.request("POST", path + "/ask", ask, cookie)[0], 303)
+        self.assertEqual(self.request("POST", path + "/ask", ask, cookie)[0], 303)
+        self.assertEqual(len(db.list_answers("demo-tenant", conversation_id)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

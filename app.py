@@ -394,6 +394,8 @@ class Database:
                 values_json TEXT NOT NULL,
                 missing_json TEXT NOT NULL DEFAULT '[]',
                 created_by TEXT NOT NULL,
+                idempotency_key TEXT,
+                request_hash TEXT,
                 created_at TEXT NOT NULL,
                 confirmed_at TEXT,
                 UNIQUE (conversation_id, revision)
@@ -407,6 +409,7 @@ class Database:
                 rule_version TEXT NOT NULL,
                 results_json TEXT NOT NULL,
                 tentative_viewed INTEGER NOT NULL DEFAULT 0,
+                idempotency_key TEXT,
                 created_at TEXT NOT NULL,
                 invalidated_at TEXT
             );
@@ -525,6 +528,23 @@ class Database:
         recommendation_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(recommendations)")}
         if "tentative_viewed" not in recommendation_columns:
             self.conn.execute("ALTER TABLE recommendations ADD COLUMN tentative_viewed INTEGER NOT NULL DEFAULT 0")
+        if "idempotency_key" not in recommendation_columns:
+            self.conn.execute("ALTER TABLE recommendations ADD COLUMN idempotency_key TEXT")
+        revision_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(requirement_revisions)")}
+        for column in ("idempotency_key", "request_hash"):
+            if column not in revision_columns:
+                self.conn.execute(f"ALTER TABLE requirement_revisions ADD COLUMN {column} TEXT")
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_revisions_idempotency ON requirement_revisions(conversation_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
+        )
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_recommendations_idempotency ON recommendations(conversation_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
+        )
+        try:
+            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_answers_question ON answers(question_message_id)")
+        except sqlite3.Error:
+            # 旧库可能存在历史重复行；代码路径仍先查后写，索引仅为并发兜底。
+            pass
         self.conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_idempotency ON messages(conversation_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
         )
@@ -891,6 +911,8 @@ class Database:
         values: dict[str, dict[str, str]],
         status: str = "candidate",
         created_by: str = "buyer-web",
+        idempotency_key: str | None = None,
+        request_hash: str | None = None,
     ) -> str:
         if not self.get_conversation(tenant_id, conversation_id):
             raise ValueError("会话不存在")
@@ -904,8 +926,8 @@ class Database:
             (timestamp, tenant_id, conversation_id),
         )
         self.conn.execute(
-            "INSERT INTO requirement_revisions(id, tenant_id, conversation_id, revision, status, values_json, missing_json, created_by, created_at, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (revision_id, tenant_id, conversation_id, revision, status, json.dumps(values, ensure_ascii=False), json.dumps(missing, ensure_ascii=False), created_by, timestamp, timestamp if status == "confirmed" else None),
+            "INSERT INTO requirement_revisions(id, tenant_id, conversation_id, revision, status, values_json, missing_json, created_by, idempotency_key, request_hash, created_at, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (revision_id, tenant_id, conversation_id, revision, status, json.dumps(values, ensure_ascii=False), json.dumps(missing, ensure_ascii=False), created_by, idempotency_key, request_hash, timestamp, timestamp if status == "confirmed" else None),
         )
         self.conn.execute("UPDATE conversations SET updated_at=? WHERE tenant_id=? AND id=?", (timestamp, tenant_id, conversation_id))
         self._audit(tenant_id, "requirement_revision", revision_id, "confirmed" if status == "confirmed" else "candidate_saved", created_by, f"conversation={conversation_id};revision={revision}")
@@ -927,6 +949,7 @@ class Database:
         results: list[dict[str, object]],
         rule_version: str = "pump-demo-v1",
         tentative_viewed: bool = False,
+        idempotency_key: str | None = None,
     ) -> str:
         self.conn.execute(
             "UPDATE recommendations SET status='invalidated', invalidated_at=? WHERE tenant_id=? AND conversation_id=? AND status <> 'invalidated'",
@@ -934,8 +957,8 @@ class Database:
         )
         recommendation_id = secrets.token_hex(12)
         self.conn.execute(
-            "INSERT INTO recommendations(id, tenant_id, conversation_id, requirement_revision_id, status, rule_version, results_json, tentative_viewed, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (recommendation_id, tenant_id, conversation_id, requirement_revision_id, status, rule_version, json.dumps(results, ensure_ascii=False), 1 if tentative_viewed else 0, now_iso()),
+            "INSERT INTO recommendations(id, tenant_id, conversation_id, requirement_revision_id, status, rule_version, results_json, tentative_viewed, idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (recommendation_id, tenant_id, conversation_id, requirement_revision_id, status, rule_version, json.dumps(results, ensure_ascii=False), 1 if tentative_viewed else 0, idempotency_key, now_iso()),
         )
         self._audit(tenant_id, "recommendation", recommendation_id, "generated", "matching-rule", f"status={status};revision={requirement_revision_id}")
         self.conn.commit()
@@ -2677,32 +2700,51 @@ class Handler(BaseHTTPRequestHandler):
             origin = site["allowed_origin"] if self.headers.get("Origin") else None
             idempotency_key = self.headers.get("Idempotency-Key", "").strip()
             request_hash = hashlib.sha256(text_value.strip().encode("utf-8")).hexdigest()
-            if idempotency_key:
-                existing = self.db.conn.execute(
+
+            def lookup_keyed() -> sqlite3.Row | None:
+                return self.db.conn.execute(
                     "SELECT id, request_hash, result_revision_id FROM messages WHERE tenant_id=? AND conversation_id=? AND idempotency_key=?",
                     (site["tenant_id"], conversation["id"], idempotency_key),
                 ).fetchone()
+
+            def send_duplicate(existing: sqlite3.Row) -> None:
+                draft = None
+                if existing["result_revision_id"]:
+                    stored = self.db.conn.execute(
+                        "SELECT * FROM requirement_revisions WHERE id=? AND tenant_id=?",
+                        (existing["result_revision_id"], site["tenant_id"]),
+                    ).fetchone()
+                    if stored:
+                        values = json.loads(stored["values_json"])
+                        missing = [key for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
+                        askable = [key for key in missing if values.get(key, {}).get("state") != "unknown"]
+                        draft = {"revision_id": stored["id"], "values": values, "missing": missing, "next_question": askable[0] if askable else None}
+                self.send_json({"message_id": existing["id"], "status": "duplicate", "requirement_draft": draft}, 200, origin)
+
+            if idempotency_key:
+                existing = lookup_keyed()
                 if existing:
                     if existing["request_hash"] and not hmac.compare_digest(existing["request_hash"], request_hash):
                         self.send_json({"error": "idempotency_conflict"}, 409, origin)
                         return
-                    draft = None
-                    if existing["result_revision_id"]:
-                        stored = self.db.conn.execute(
-                            "SELECT * FROM requirement_revisions WHERE id=? AND tenant_id=?",
-                            (existing["result_revision_id"], site["tenant_id"]),
-                        ).fetchone()
-                        if stored:
-                            values = json.loads(stored["values_json"])
-                            missing = [key for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
-                            askable = [key for key in missing if values.get(key, {}).get("state") != "unknown"]
-                            draft = {"revision_id": stored["id"], "values": values, "missing": missing, "next_question": askable[0] if askable else None}
-                    self.send_json({"message_id": existing["id"], "status": "duplicate", "requirement_draft": draft}, 200, origin)
+                    send_duplicate(existing)
                     return
-            message_id = self.db.save_message(
-                site["tenant_id"], conversation["id"], "buyer", text_value, "website_api",
-                idempotency_key=idempotency_key or None, request_hash=request_hash if idempotency_key else None,
-            )
+            try:
+                message_id = self.db.save_message(
+                    site["tenant_id"], conversation["id"], "buyer", text_value, "website_api",
+                    idempotency_key=idempotency_key or None, request_hash=request_hash if idempotency_key else None,
+                )
+            except sqlite3.IntegrityError:
+                # 并发同键：另一请求已写入，回滚本次事务并返回已存结果。
+                self.db.conn.rollback()
+                existing = lookup_keyed()
+                if not existing:
+                    raise
+                if existing["request_hash"] and not hmac.compare_digest(existing["request_hash"], request_hash):
+                    self.send_json({"error": "idempotency_conflict"}, 409, origin)
+                    return
+                send_duplicate(existing)
+                return
             try:
                 previous = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
                 previous_values = json.loads(previous["values_json"]) if previous else {}
@@ -2731,6 +2773,32 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             site, conversation = access
+            origin = site["allowed_origin"] if self.headers.get("Origin") else None
+            idempotency_key = self.headers.get("Idempotency-Key", "").strip()
+            request_hash = hashlib.sha256(
+                json.dumps({"base_revision_id": payload.get("base_revision_id"), "values": payload.get("values")}, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+
+            def lookup_keyed_revision() -> sqlite3.Row | None:
+                return self.db.conn.execute(
+                    "SELECT id, request_hash, values_json, status FROM requirement_revisions WHERE tenant_id=? AND conversation_id=? AND idempotency_key=?",
+                    (site["tenant_id"], conversation["id"], idempotency_key),
+                ).fetchone()
+
+            def send_duplicate(existing: sqlite3.Row) -> None:
+                stored_values = json.loads(existing["values_json"])
+                missing = [key for key in MATCH_REQUIRED_FIELDS if not stored_values.get(key, {}).get("value", "").strip()]
+                self.send_json({"revision_id": existing["id"], "values": stored_values, "missing": missing, "duplicate": True}, 200, origin)
+
+            # 幂等重试先于基准版本检查：成功确认后基准版本已前进，重试仍应返回原始结果。
+            if idempotency_key:
+                existing_revision = lookup_keyed_revision()
+                if existing_revision:
+                    if existing_revision["request_hash"] and not hmac.compare_digest(existing_revision["request_hash"], request_hash):
+                        self.send_json({"error": "idempotency_conflict"}, 409, origin)
+                        return
+                    send_duplicate(existing_revision)
+                    return
             latest = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
             if not latest or payload.get("base_revision_id") != latest["id"]:
                 self.send_json({"error": "stale_requirement_revision"}, 409)
@@ -2746,11 +2814,26 @@ class Handler(BaseHTTPRequestHandler):
                 key: {"value": item.get("value", "").strip(), "unit": item.get("unit", ""), "label": REQUIREMENT_LABELS[key]}
                 for key, item in raw_values.items()
             })
-            revision_id = self.db.create_requirement_revision(site["tenant_id"], conversation["id"], values, "confirmed", "website_api")
+            try:
+                revision_id = self.db.create_requirement_revision(
+                    site["tenant_id"], conversation["id"], values, "confirmed", "website_api",
+                    idempotency_key=idempotency_key or None, request_hash=request_hash if idempotency_key else None,
+                )
+            except sqlite3.IntegrityError:
+                # 并发同键：另一请求已写入，回滚本次事务并返回已存结果。
+                self.db.conn.rollback()
+                existing_revision = lookup_keyed_revision()
+                if not existing_revision:
+                    raise
+                if existing_revision["request_hash"] and not hmac.compare_digest(existing_revision["request_hash"], request_hash):
+                    self.send_json({"error": "idempotency_conflict"}, 409, origin)
+                    return
+                send_duplicate(existing_revision)
+                return
             missing = [key for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
             self.send_json(
                 {"revision_id": revision_id, "values": values, "missing": missing}, 201,
-                site["allowed_origin"] if self.headers.get("Origin") else None,
+                origin,
             )
             return
         api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/recommendations", path)
@@ -2767,6 +2850,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             site, conversation = access
             origin = site["allowed_origin"] if self.headers.get("Origin") else None
+            idempotency_key = self.headers.get("Idempotency-Key", "").strip()
             revision = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
             if not revision or revision["status"] != "confirmed" or payload.get("revision_id") != revision["id"]:
                 self.send_json({"error": "confirmed_revision_required"}, 409)
@@ -2779,26 +2863,54 @@ class Handler(BaseHTTPRequestHandler):
                     item["detail_url"] = f"/s/{quote(site['site_key'])}" + url
                 return item
 
-            existing = self.db.latest_active_recommendation(site["tenant_id"], conversation["id"])
-            if existing and existing["requirement_revision_id"] == revision["id"]:
-                stored = json.loads(existing["results_json"])
-                if include_tentative and not existing["tentative_viewed"]:
-                    self.db.conn.execute("UPDATE recommendations SET tentative_viewed=1 WHERE id=?", (existing["id"],))
+            def serve_recommendation(row: sqlite3.Row, code: int, duplicate: bool = False) -> None:
+                stored = json.loads(row["results_json"])
+                if include_tentative and not row["tentative_viewed"]:
+                    self.db.conn.execute("UPDATE recommendations SET tentative_viewed=1 WHERE id=?", (row["id"],))
                     self.db.conn.commit()
-                serve_tentative = include_tentative or bool(existing["tentative_viewed"])
+                serve_tentative = include_tentative or bool(row["tentative_viewed"])
                 results = [with_site_url(result) for result in buyer_visible_results(stored, serve_tentative)]
                 missing_keys = json.loads(revision["missing_json"])
                 missing = [REQUIREMENT_LABELS.get(key, key) for key in missing_keys]
-                self.send_json(
-                    {"recommendation_id": existing["id"], "status": existing["status"], "results": results, "missing": missing, **recommendation_flags(stored, existing["status"])},
-                    200, origin,
-                )
+                response = {"recommendation_id": row["id"], "status": row["status"], "results": results, "missing": missing, **recommendation_flags(stored, row["status"])}
+                if duplicate:
+                    response["duplicate"] = True
+                self.send_json(response, code, origin)
+
+            if idempotency_key:
+                keyed = self.db.conn.execute(
+                    "SELECT * FROM recommendations WHERE tenant_id=? AND conversation_id=? AND idempotency_key=?",
+                    (site["tenant_id"], conversation["id"], idempotency_key),
+                ).fetchone()
+                if keyed:
+                    if keyed["requirement_revision_id"] != revision["id"]:
+                        self.send_json({"error": "idempotency_conflict"}, 409, origin)
+                        return
+                    serve_recommendation(keyed, 200, duplicate=True)
+                    return
+            existing = self.db.latest_active_recommendation(site["tenant_id"], conversation["id"])
+            if existing and existing["requirement_revision_id"] == revision["id"]:
+                serve_recommendation(existing, 200)
                 return
             values = json.loads(revision["values_json"])
             try:
                 full_results, missing = classify_products(self.db, site["tenant_id"], values)
                 status = overall_status(full_results, missing)
-                recommendation_id = self.db.save_recommendation(site["tenant_id"], conversation["id"], revision["id"], status, full_results, tentative_viewed=include_tentative)
+                recommendation_id = self.db.save_recommendation(
+                    site["tenant_id"], conversation["id"], revision["id"], status, full_results,
+                    tentative_viewed=include_tentative, idempotency_key=idempotency_key or None,
+                )
+            except sqlite3.IntegrityError:
+                # 并发同键：另一请求已写入，回滚本次事务并返回已存结果。
+                self.db.conn.rollback()
+                keyed = self.db.conn.execute(
+                    "SELECT * FROM recommendations WHERE tenant_id=? AND conversation_id=? AND idempotency_key=?",
+                    (site["tenant_id"], conversation["id"], idempotency_key),
+                ).fetchone()
+                if not keyed:
+                    raise
+                serve_recommendation(keyed, 200, duplicate=True)
+                return
             except Exception:
                 self.send_json({"error": "matching_unavailable", "message": "匹配服务暂不可用；已确认工况仍保留，可稍后重试或请求工程师协助。"}, 503, origin)
                 return
@@ -2826,11 +2938,69 @@ class Handler(BaseHTTPRequestHandler):
             if product_id and (not isinstance(product_id, str) or not self.db.get_published_version(site["tenant_id"], product_id)):
                 self.send_json({"error": "product_not_found"}, 404)
                 return
-            question_message_id = self.db.save_message(site["tenant_id"], conversation["id"], "buyer", question, "website_api")
+            idempotency_key = self.headers.get("Idempotency-Key", "").strip()
+            request_hash = hashlib.sha256(json.dumps({"question": question.strip(), "product_id": product_id or None}, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+            def lookup_keyed_question() -> sqlite3.Row | None:
+                return self.db.conn.execute(
+                    "SELECT id, request_hash FROM messages WHERE tenant_id=? AND conversation_id=? AND idempotency_key=?",
+                    (site["tenant_id"], conversation["id"], idempotency_key),
+                ).fetchone()
+
+            def saved_answer_for(question_id: str) -> sqlite3.Row | None:
+                return self.db.conn.execute(
+                    "SELECT * FROM answers WHERE tenant_id=? AND conversation_id=? AND question_message_id=?",
+                    (site["tenant_id"], conversation["id"], question_id),
+                ).fetchone()
+
+            def send_answer(answer: sqlite3.Row, code: int, duplicate: bool = False) -> None:
+                response = {"answer_id": answer["id"], "status": answer["answer_status"], "answer": answer["answer_text"], "citations": json.loads(answer["citations_json"])}
+                if duplicate:
+                    response["duplicate"] = True
+                self.send_json(response, code, origin)
+
+            question_message_id = None
+            if idempotency_key:
+                existing = lookup_keyed_question()
+                if existing:
+                    if existing["request_hash"] and not hmac.compare_digest(existing["request_hash"], request_hash):
+                        self.send_json({"error": "idempotency_conflict"}, 409, origin)
+                        return
+                    existing_answer = saved_answer_for(existing["id"])
+                    if existing_answer:
+                        send_answer(existing_answer, 200, duplicate=True)
+                        return
+                    # 首次尝试只落了问题、未落答案（如生成失败）：复用已存问题继续生成，不重复存消息。
+                    question_message_id = existing["id"]
+            if question_message_id is None:
+                try:
+                    question_message_id = self.db.save_message(
+                        site["tenant_id"], conversation["id"], "buyer", question, "website_api",
+                        idempotency_key=idempotency_key or None, request_hash=request_hash if idempotency_key else None,
+                    )
+                except sqlite3.IntegrityError:
+                    # 并发同键：另一请求已写入问题，沿用该问题继续生成。
+                    self.db.conn.rollback()
+                    existing = lookup_keyed_question()
+                    if not existing:
+                        raise
+                    if existing["request_hash"] and not hmac.compare_digest(existing["request_hash"], request_hash):
+                        self.send_json({"error": "idempotency_conflict"}, 409, origin)
+                        return
+                    question_message_id = existing["id"]
             try:
                 status, answer_text, answered_product_id, version_id, citations, _reason = answer_from_approved_material(self.db, site["tenant_id"], question, product_id or None)
                 self.db.save_message(site["tenant_id"], conversation["id"], "assistant", answer_text, "grounded-answer" if status == "grounded" else "unresolved-question")
-                answer_id = self.db.save_answer(site["tenant_id"], conversation["id"], question_message_id, answered_product_id, version_id, status, answer_text, citations)
+                try:
+                    answer_id = self.db.save_answer(site["tenant_id"], conversation["id"], question_message_id, answered_product_id, version_id, status, answer_text, citations)
+                except sqlite3.IntegrityError:
+                    # 并发同键：另一请求已保存答案，回滚本次事务并返回已存答案。
+                    self.db.conn.rollback()
+                    stored = saved_answer_for(question_message_id)
+                    if not stored:
+                        raise
+                    send_answer(stored, 200, duplicate=True)
+                    return
             except Exception:
                 # 生成失败时不落任何答案、不建任务；问题已保留，会话可继续。
                 self.send_json({"error": "service_unavailable", "message": "答案服务暂不可用；您的问题已保存，可稍后重试或请求工程师答复。"}, 503, origin)
@@ -3064,6 +3234,14 @@ class Handler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/inquiry/([a-f0-9]+)/confirm", path)
             if match:
                 conversation_id = match.group(1)
+                submission_key = str(form.get("submission_key", "")).strip()
+                if submission_key and self.db.conn.execute(
+                    "SELECT id FROM requirement_revisions WHERE tenant_id=? AND conversation_id=? AND idempotency_key=?",
+                    (self.tenant_id, conversation_id, submission_key),
+                ).fetchone():
+                    # 同一页面渲染内的重复提交（双击/重试）：沿用首次结果，不新建修订。
+                    self.redirect(f"/inquiry/{conversation_id}?notice=recommendation")
+                    return
                 previous = self.db.get_latest_revision(self.tenant_id, conversation_id)
                 if not previous:
                     raise ValueError("请先发送一条需求消息")
@@ -3081,7 +3259,7 @@ class Handler(BaseHTTPRequestHandler):
                     elif key in values:
                         values[key]["value"] = values[key].get("value", "").strip()
                 confirmed_values = confirm_requirement_values(values)
-                revision_id = self.db.create_requirement_revision(self.tenant_id, conversation_id, confirmed_values, "confirmed", "buyer-web")
+                revision_id = self.db.create_requirement_revision(self.tenant_id, conversation_id, confirmed_values, "confirmed", "buyer-web", idempotency_key=submission_key or None)
                 status, results, _missing = match_products(self.db, self.tenant_id, confirmed_values)
                 self.db.save_recommendation(self.tenant_id, conversation_id, revision_id, status, results)
                 self.redirect(f"/inquiry/{conversation_id}?notice=recommendation")
@@ -3092,7 +3270,20 @@ class Handler(BaseHTTPRequestHandler):
                 question = str(form.get("question", "")).strip()
                 if not question:
                     raise ValueError("问题不能为空")
-                question_message_id = self.db.save_message(self.tenant_id, conversation_id, "buyer", question, "buyer_web")
+                submission_key = str(form.get("submission_key", "")).strip()
+                if submission_key and self.db.conn.execute(
+                    "SELECT id FROM messages WHERE tenant_id=? AND conversation_id=? AND idempotency_key=?",
+                    (self.tenant_id, conversation_id, submission_key),
+                ).fetchone():
+                    # 同一页面渲染内的重复提交：沿用首次问答，不重复提问。
+                    self.redirect(f"/inquiry/{conversation_id}?notice=answer")
+                    return
+                try:
+                    question_message_id = self.db.save_message(self.tenant_id, conversation_id, "buyer", question, "buyer_web", idempotency_key=submission_key or None)
+                except sqlite3.IntegrityError:
+                    self.db.conn.rollback()
+                    self.redirect(f"/inquiry/{conversation_id}?notice=answer")
+                    return
                 selected_product_id = str(form.get("product_id", "")).strip() or None
                 recommendation = self.db.latest_active_recommendation(self.tenant_id, conversation_id)
                 result_for_product = None
@@ -3519,14 +3710,16 @@ class Handler(BaseHTTPRequestHandler):
                     candidate_options += f"<option value='{esc(result['product_id'])}'>{esc(result['model'])} · v{esc(result['product_version'])}</option>"
         prefill = {key: values.get(key, {}).get("value", "") for key in ("quantity", "region", "delivery")}
         submission_key = secrets.token_urlsafe(18)
+        confirm_key = secrets.token_urlsafe(18)
+        ask_key = secrets.token_urlsafe(18)
 
         body = f"""
 <div class='toolbar'><div><h1>Buyer inquiry</h1><div class='muted'>Conversation {esc(conversation_id)} · 原始消息和每次需求修订都会保留</div></div><div><a class='button secondary' href='/inquiry?lang={'zh' if lang == 'en' else 'en'}'>New inquiry / 新询盘</a></div></div>
 {notice_html}
 <div class='grid'><section class='card'><h2>Describe your application</h2><p class='muted'>Tell us the pump use, flow, head and medium in your own words. Structured values are candidates until you confirm them.</p><form method='post' action='/inquiry/{conversation_id}/message'><label>Your message / 需求原话 *</label><textarea name='message' required placeholder='Example: I need a water pump for cooling water, flow 50 m³/h and head 30 m.'></textarea><p><button>Save message and extract fields</button></p></form><hr><h3>Conversation</h3>{message_rows}</section>
-<section class='card'><h2>Requirement summary</h2>{missing_html}<form method='post' action='/inquiry/{conversation_id}/confirm'><div class='form-grid'>{input_fields}</div><p><button>Confirm summary and match</button></p></form><table><thead><tr><th>Field</th><th>Value</th><th>State</th></tr></thead><tbody>{summary_rows}</tbody></table></section></div>
+<section class='card'><h2>Requirement summary</h2>{missing_html}<form method='post' action='/inquiry/{conversation_id}/confirm'><input type='hidden' name='submission_key' value='{esc(confirm_key)}'><div class='form-grid'>{input_fields}</div><p><button>Confirm summary and match</button></p></form><table><thead><tr><th>Field</th><th>Value</th><th>State</th></tr></thead><tbody>{summary_rows}</tbody></table></section></div>
 <section class='card' style='margin-top:18px'><h2>Recommendations</h2>{recommendation_html}</section>
-<section class='card' style='margin-top:18px'><h2>Ask about the recommended product</h2><p class='muted'>资料内问题显示出处。资料外问题先保存为待核实；只有您点击“请求工程师核实”后才会交给工程师，在此对话查看回复无需另留联系方式。</p><form method='post' action='/inquiry/{conversation_id}/ask'><label>Product context</label><select name='product_id'>{candidate_options}</select><label>Your question / 技术问题 *</label><textarea name='question' required placeholder='Example: What is the flow range? Or ask about price, stock, certification to test handoff.'></textarea><p><button>Ask and save answer</button></p></form><h3>Answers and handoff</h3>{answer_html}{task_html}</section>
+<section class='card' style='margin-top:18px'><h2>Ask about the recommended product</h2><p class='muted'>资料内问题显示出处。资料外问题先保存为待核实；只有您点击“请求工程师核实”后才会交给工程师，在此对话查看回复无需另留联系方式。</p><form method='post' action='/inquiry/{conversation_id}/ask'><input type='hidden' name='submission_key' value='{esc(ask_key)}'><label>Product context</label><select name='product_id'>{candidate_options}</select><label>Your question / 技术问题 *</label><textarea name='question' required placeholder='Example: What is the flow range? Or ask about price, stock, certification to test handoff.'></textarea><p><button>Ask and save answer</button></p></form><h3>Answers and handoff</h3>{answer_html}{task_html}</section>
 <section class='card' style='margin-top:18px'><h2>Request for quotation (RFQ)</h2><p class='muted'>您可以随时提交询价，无须先完成选型。请至少提供邮箱或电话，方便销售回复；已确认的工况会随询价保存，缺少的技术或商务信息会标为待补充。</p><form method='post' action='/inquiry/{conversation_id}/rfq'><input type='hidden' name='submission_key' value='{esc(submission_key)}'><div class='form-grid'><div><label>Product / 产品</label><select name='product_id'>{candidate_options}</select></div><div><label>Contact name / 联系人</label><input name='contact_name' placeholder='Your name'></div><div><label>Company / 公司</label><input name='company' placeholder='Company name'></div><div><label>Email / 邮箱</label><input name='contact_email' type='email' placeholder='you@example.com'></div><div><label>Phone / 电话</label><input name='contact_phone' placeholder='+49 ...'></div><div><label>Quantity / 数量</label><input name='quantity' value='{esc(prefill['quantity'])}' placeholder='e.g. 2'></div><div><label>Destination / 目的地</label><input name='region' value='{esc(prefill['region'])}' placeholder='e.g. Germany'></div><div><label>Expected delivery / 期望交期</label><input name='delivery' value='{esc(prefill['delivery'])}' placeholder='e.g. 8 weeks'></div><div class='full'><label>Notes / 补充说明</label><textarea name='notes' placeholder='Additional operating conditions or questions'></textarea></div></div><p><button>Save RFQ / 提交询价</button></p></form></section>
 <div class='footer-note'>产品页面、推荐和后续 chatbot 都只读取已核准并已发布的产品版本。当前规则是透明的水泵演示规则，正式阈值需由企业工程师确认。</div>
 """
