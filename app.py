@@ -58,6 +58,10 @@ FIELD_LABELS = {
 }
 
 
+class ConflictError(ValueError):
+    pass
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -95,6 +99,13 @@ class Database:
             CREATE TABLE IF NOT EXISTS tenants (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS buyer_sites (
+                site_key TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                allowed_origin TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS users (
@@ -272,6 +283,7 @@ class Database:
                 product_id TEXT REFERENCES products(id),
                 product_version_id TEXT REFERENCES product_versions(id),
                 submission_key TEXT NOT NULL,
+                request_hash TEXT,
                 contact_name TEXT NOT NULL DEFAULT '',
                 company TEXT NOT NULL DEFAULT '',
                 contact_email TEXT NOT NULL DEFAULT '',
@@ -301,6 +313,8 @@ class Database:
             );
             """
         )
+        if "request_hash" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
+            self.conn.execute("ALTER TABLE rfqs ADD COLUMN request_hash TEXT")
         self.conn.execute(
             "INSERT OR IGNORE INTO tenants(id, name, created_at) VALUES (?, ?, ?)",
             ("demo-tenant", "示例水泵企业（演示）", now_iso()),
@@ -321,6 +335,21 @@ class Database:
             (tenant_id, name or tenant_id, now_iso()),
         )
         self.conn.commit()
+
+    def register_buyer_site(self, tenant_id: str, site_key: str, allowed_origin: str) -> None:
+        if not site_key.strip() or not allowed_origin.startswith(("https://", "http://localhost:", "http://127.0.0.1:")):
+            raise ValueError("需要网站标识和允许的 HTTPS 来源")
+        self.ensure_tenant(tenant_id)
+        self.conn.execute(
+            "INSERT INTO buyer_sites(site_key, tenant_id, allowed_origin, created_at) VALUES (?, ?, ?, ?)",
+            (site_key.strip(), tenant_id, allowed_origin.rstrip("/"), now_iso()),
+        )
+        self.conn.commit()
+
+    def get_buyer_site(self, site_key: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM buyer_sites WHERE site_key=? AND active=1", (site_key,)
+        ).fetchone()
 
     @staticmethod
     def password_hash(password: str, salt: bytes | None = None) -> str:
@@ -594,6 +623,10 @@ class Database:
         revision_id = secrets.token_hex(12)
         timestamp = now_iso()
         self.conn.execute(
+            "UPDATE recommendations SET status='invalidated', invalidated_at=? WHERE tenant_id=? AND conversation_id=? AND status <> 'invalidated'",
+            (timestamp, tenant_id, conversation_id),
+        )
+        self.conn.execute(
             "INSERT INTO requirement_revisions(id, tenant_id, conversation_id, revision, status, values_json, missing_json, created_by, created_at, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (revision_id, tenant_id, conversation_id, revision, status, json.dumps(values, ensure_ascii=False), json.dumps(missing, ensure_ascii=False), created_by, timestamp, timestamp if status == "confirmed" else None),
         )
@@ -784,9 +817,17 @@ class Database:
         contact: dict[str, str],
         notes: str,
         selected_product_id: str | None = None,
+        entry_surface: str = "chat",
     ) -> tuple[str, bool]:
+        normalized_contact = {key: contact.get(key, "").strip() for key in ("contact_name", "company", "contact_email", "contact_phone", "quantity", "region", "delivery")}
+        request_hash = hashlib.sha256(json.dumps({
+            "conversation_id": conversation_id, "contact": normalized_contact, "notes": notes.strip(),
+            "selected_product_id": selected_product_id or None, "entry_surface": entry_surface,
+        }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         existing = self.get_rfq_by_submission_key(tenant_id, submission_key)
         if existing:
+            if existing["request_hash"] and not hmac.compare_digest(existing["request_hash"], request_hash):
+                raise ConflictError("同一提交标识不能用于不同询价内容")
             return existing["id"], False
         conversation = self.get_conversation(tenant_id, conversation_id)
         if not conversation:
@@ -826,12 +867,13 @@ class Database:
             "recommendation": selected_result,
             "submitted_contact": {"name": contact.get("contact_name", ""), "company": contact.get("company", ""), "email": contact.get("contact_email", ""), "phone": contact.get("contact_phone", "")},
             "submitted_at": now_iso(),
+            "entry_surface": entry_surface,
         }
         rfq_id = secrets.token_hex(12)
         timestamp = now_iso()
         self.conn.execute(
-            "INSERT INTO rfqs(id, tenant_id, conversation_id, requirement_revision_id, recommendation_id, product_id, product_version_id, submission_key, contact_name, company, contact_email, contact_phone, quantity, destination, requested_delivery, notes, missing_json, status, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (rfq_id, tenant_id, conversation_id, revision["id"] if revision else None, recommendation["id"] if recommendation else None, product_id, product_version_id, submission_key, contact.get("contact_name", "").strip(), contact.get("company", "").strip(), contact.get("contact_email", "").strip(), contact.get("contact_phone", "").strip(), contact.get("quantity", "").strip(), contact.get("region", "").strip(), contact.get("delivery", "").strip(), notes.strip(), json.dumps(missing, ensure_ascii=False), status, json.dumps(snapshot, ensure_ascii=False), timestamp),
+            "INSERT INTO rfqs(id, tenant_id, conversation_id, requirement_revision_id, recommendation_id, product_id, product_version_id, submission_key, request_hash, contact_name, company, contact_email, contact_phone, quantity, destination, requested_delivery, notes, missing_json, status, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (rfq_id, tenant_id, conversation_id, revision["id"] if revision else None, recommendation["id"] if recommendation else None, product_id, product_version_id, submission_key, request_hash, normalized_contact["contact_name"], normalized_contact["company"], normalized_contact["contact_email"], normalized_contact["contact_phone"], normalized_contact["quantity"], normalized_contact["region"], normalized_contact["delivery"], notes.strip(), json.dumps(missing, ensure_ascii=False), status, json.dumps(snapshot, ensure_ascii=False), timestamp),
         )
         lead_id = secrets.token_hex(12)
         self.conn.execute(
@@ -1584,6 +1626,75 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_json(self, payload: dict[str, object], status: int = 200, allowed_origin: str | None = None) -> None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        if allowed_origin:
+            self.send_header("Access-Control-Allow-Origin", allowed_origin)
+            self.send_header("Vary", "Origin")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def read_json(self) -> dict[str, object] | None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length < 1 or length > 65536:
+                raise ValueError
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError
+            return data
+        except (ValueError, json.JSONDecodeError):
+            self.send_json({"error": "invalid_json"}, 422)
+            return None
+
+    def api_site(self, site_key: str) -> sqlite3.Row | None:
+        site = self.db.get_buyer_site(site_key)
+        if not site:
+            self.send_json({"error": "site_not_found"}, 404)
+            return None
+        origin = self.headers.get("Origin")
+        if origin and origin != site["allowed_origin"]:
+            self.send_json({"error": "origin_not_allowed"}, 403)
+            return None
+        return site
+
+    def api_conversation(self, conversation_id: str) -> tuple[sqlite3.Row, sqlite3.Row] | None:
+        site = self.api_site(self.headers.get("X-Site-Key", ""))
+        if not site:
+            return None
+        conversation = self.db.get_conversation(site["tenant_id"], conversation_id)
+        if not conversation:
+            self.send_json({"error": "conversation_not_found"}, 404)
+            return None
+        auth = self.headers.get("Authorization", "")
+        token = auth[7:] if auth.startswith("Bearer ") else None
+        if not self.db.has_buyer_access(site["tenant_id"], conversation_id, token):
+            self.send_json({"error": "access_denied"}, 401)
+            return None
+        return site, conversation
+
+    def do_OPTIONS(self) -> None:
+        if not urlparse(self.path).path.startswith("/api/v1/buyer/"):
+            self.send_error(404)
+            return
+        origin = self.headers.get("Origin", "")
+        allowed = self.db.conn.execute(
+            "SELECT 1 FROM buyer_sites WHERE allowed_origin=? AND active=1", (origin,)
+        ).fetchone()
+        if not allowed:
+            self.send_json({"error": "origin_not_allowed"}, 403)
+            return
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Site-Key, Idempotency-Key")
+        self.send_header("Vary", "Origin")
+        self.end_headers()
+
     def send_bytes(self, content: bytes, content_type: str, filename: str, status: int = 200) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -1619,6 +1730,43 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         query = parse_qs(parsed.query)
+        api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)", path)
+        if api_match:
+            access = self.api_conversation(api_match.group(1))
+            if not access:
+                return
+            site, conversation = access
+            messages = [
+                {"id": row["id"], "role": row["role"], "content": row["content"], "created_at": row["created_at"]}
+                for row in self.db.list_messages(site["tenant_id"], conversation["id"])
+            ]
+            answers = [
+                {"id": row["id"], "status": row["answer_status"], "text": row["answer_text"], "citations": json.loads(row["citations_json"])}
+                for row in self.db.list_answers(site["tenant_id"], conversation["id"])
+            ]
+            human_tasks = [
+                {"id": row["id"], "status": row["status"], "question": row["question"]}
+                for row in self.db.list_human_tasks(site["tenant_id"]) if row["conversation_id"] == conversation["id"]
+            ]
+            rfqs = [
+                {"id": row["id"], "status": row["status"], "model": row["model"], "quantity": row["quantity"], "missing": json.loads(row["missing_json"]), "created_at": row["created_at"]}
+                for row in self.db.list_rfqs(site["tenant_id"]) if row["conversation_id"] == conversation["id"]
+            ]
+            latest_revision = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
+            requirement = {
+                "revision_id": latest_revision["id"], "status": latest_revision["status"],
+                "values": json.loads(latest_revision["values_json"]), "missing": json.loads(latest_revision["missing_json"]),
+            } if latest_revision else None
+            latest_recommendation = self.db.latest_active_recommendation(site["tenant_id"], conversation["id"])
+            recommendation = {
+                "recommendation_id": latest_recommendation["id"], "status": latest_recommendation["status"],
+                "results": json.loads(latest_recommendation["results_json"]), "rule_version": latest_recommendation["rule_version"],
+            } if latest_recommendation else None
+            self.send_json(
+                {"conversation_id": conversation["id"], "status": conversation["status"], "locale": conversation["locale"], "messages": messages, "requirement": requirement, "recommendation": recommendation, "answers": answers, "human_tasks": human_tasks, "rfqs": rfqs},
+                allowed_origin=site["allowed_origin"] if self.headers.get("Origin") else None,
+            )
+            return
         if path == "/login":
             self.login_page(query)
             return
@@ -1694,6 +1842,197 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
+        if path == "/api/v1/buyer/conversations":
+            payload = self.read_json()
+            if payload is None:
+                return
+            site = self.api_site(str(payload.get("site_key", "")))
+            if not site:
+                return
+            locale = str(payload.get("locale", "en"))
+            if locale not in {"en", "zh"}:
+                self.send_json({"error": "invalid_locale"}, 422)
+                return
+            conversation_id = self.db.create_conversation(site["tenant_id"], "website_api", locale)
+            token = self.db.issue_buyer_access(site["tenant_id"], conversation_id)
+            self.send_json(
+                {"conversation_id": conversation_id, "access_token": token, "status": "active"}, 201,
+                site["allowed_origin"] if self.headers.get("Origin") else None,
+            )
+            return
+        api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/messages", path)
+        if api_match:
+            access = self.api_conversation(api_match.group(1))
+            if not access:
+                return
+            payload = self.read_json()
+            if payload is None:
+                return
+            text_value = payload.get("text")
+            if not isinstance(text_value, str) or not text_value.strip():
+                self.send_json({"error": "text_required"}, 422)
+                return
+            site, conversation = access
+            message_id = self.db.save_message(site["tenant_id"], conversation["id"], "buyer", text_value, "website_api")
+            previous = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
+            previous_values = json.loads(previous["values_json"]) if previous else {}
+            values = extract_requirement_values(text_value, {}, previous_values)
+            revision_id = self.db.create_requirement_revision(site["tenant_id"], conversation["id"], values, "candidate", "website_api")
+            missing = [key for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
+            self.send_json(
+                {"message_id": message_id, "status": "saved", "requirement_draft": {"revision_id": revision_id, "values": values, "missing": missing, "next_question": missing[0] if missing else None}}, 201,
+                site["allowed_origin"] if self.headers.get("Origin") else None,
+            )
+            return
+        api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/requirements/confirm", path)
+        if api_match:
+            access = self.api_conversation(api_match.group(1))
+            if not access:
+                return
+            payload = self.read_json()
+            if payload is None:
+                return
+            site, conversation = access
+            latest = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
+            if not latest or payload.get("base_revision_id") != latest["id"]:
+                self.send_json({"error": "stale_requirement_revision"}, 409)
+                return
+            raw_values = payload.get("values")
+            if not isinstance(raw_values, dict) or any(
+                key not in REQUIREMENT_LABELS or not isinstance(item, dict) or not isinstance(item.get("value", ""), str) or not isinstance(item.get("unit", ""), str)
+                for key, item in raw_values.items()
+            ):
+                self.send_json({"error": "invalid_requirement_values"}, 422)
+                return
+            values = confirm_requirement_values({
+                key: {"value": item.get("value", "").strip(), "unit": item.get("unit", ""), "label": REQUIREMENT_LABELS[key]}
+                for key, item in raw_values.items()
+            })
+            revision_id = self.db.create_requirement_revision(site["tenant_id"], conversation["id"], values, "confirmed", "website_api")
+            missing = [key for key in MATCH_REQUIRED_FIELDS if not values.get(key, {}).get("value", "").strip()]
+            self.send_json(
+                {"revision_id": revision_id, "values": values, "missing": missing}, 201,
+                site["allowed_origin"] if self.headers.get("Origin") else None,
+            )
+            return
+        api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/recommendations", path)
+        if api_match:
+            access = self.api_conversation(api_match.group(1))
+            if not access:
+                return
+            payload = self.read_json()
+            if payload is None:
+                return
+            site, conversation = access
+            revision = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
+            if not revision or revision["status"] != "confirmed" or payload.get("revision_id") != revision["id"]:
+                self.send_json({"error": "confirmed_revision_required"}, 409)
+                return
+            existing = self.db.latest_active_recommendation(site["tenant_id"], conversation["id"])
+            if existing and existing["requirement_revision_id"] == revision["id"]:
+                self.send_json({"recommendation_id": existing["id"], "status": existing["status"], "results": json.loads(existing["results_json"]), "missing": []}, 200)
+                return
+            values = json.loads(revision["values_json"])
+            status, raw_results, missing = match_products(self.db, site["tenant_id"], values)
+            results = [result for result in raw_results if result.get("status") in {"candidate", "needs_confirmation"}]
+            recommendation_id = self.db.save_recommendation(site["tenant_id"], conversation["id"], revision["id"], status, results)
+            self.send_json(
+                {"recommendation_id": recommendation_id, "status": status, "results": results, "missing": missing}, 201,
+                site["allowed_origin"] if self.headers.get("Origin") else None,
+            )
+            return
+        api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/questions", path)
+        if api_match:
+            access = self.api_conversation(api_match.group(1))
+            if not access:
+                return
+            payload = self.read_json()
+            if payload is None:
+                return
+            question = payload.get("question")
+            if not isinstance(question, str) or not question.strip():
+                self.send_json({"error": "question_required"}, 422)
+                return
+            site, conversation = access
+            product_id = payload.get("product_id")
+            if product_id and (not isinstance(product_id, str) or not self.db.get_published_version(site["tenant_id"], product_id)):
+                self.send_json({"error": "product_not_found"}, 404)
+                return
+            question_message_id = self.db.save_message(site["tenant_id"], conversation["id"], "buyer", question, "website_api")
+            status, answer_text, answered_product_id, version_id, citations, _reason = answer_from_approved_material(self.db, site["tenant_id"], question, product_id or None)
+            self.db.save_message(site["tenant_id"], conversation["id"], "assistant", answer_text, "grounded-answer" if status == "grounded" else "unresolved-question")
+            answer_id = self.db.save_answer(site["tenant_id"], conversation["id"], question_message_id, answered_product_id, version_id, status, answer_text, citations)
+            self.send_json(
+                {"answer_id": answer_id, "status": status, "answer": answer_text, "citations": citations}, 201,
+                site["allowed_origin"] if self.headers.get("Origin") else None,
+            )
+            return
+        api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/human-requests", path)
+        if api_match:
+            access = self.api_conversation(api_match.group(1))
+            if not access:
+                return
+            payload = self.read_json()
+            if payload is None:
+                return
+            if payload.get("reply_path") != "conversation" or not isinstance(payload.get("answer_id"), str):
+                self.send_json({"error": "invalid_human_request"}, 422)
+                return
+            site, conversation = access
+            answer = self.db.conn.execute(
+                "SELECT question_message_id FROM answers WHERE tenant_id=? AND conversation_id=? AND id=? AND answer_status='needs_human'",
+                (site["tenant_id"], conversation["id"], payload["answer_id"]),
+            ).fetchone()
+            if not answer:
+                self.send_json({"error": "unresolved_question_not_found"}, 404)
+                return
+            existing = self.db.conn.execute(
+                "SELECT id FROM human_tasks WHERE tenant_id=? AND conversation_id=? AND question_message_id=?",
+                (site["tenant_id"], conversation["id"], answer["question_message_id"]),
+            ).fetchone()
+            task_id = self.db.request_human_review(site["tenant_id"], conversation["id"], payload["answer_id"])
+            self.send_json(
+                {"task_id": task_id, "status": "pending"}, 200 if existing else 201,
+                site["allowed_origin"] if self.headers.get("Origin") else None,
+            )
+            return
+        api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/rfqs", path)
+        if api_match:
+            access = self.api_conversation(api_match.group(1))
+            if not access:
+                return
+            payload = self.read_json()
+            if payload is None:
+                return
+            site, conversation = access
+            contact = payload.get("contact")
+            submission_key = self.headers.get("Idempotency-Key", "").strip()
+            entry_surface = payload.get("entry_surface", "chat")
+            if not isinstance(contact, dict) or not all(isinstance(value, str) for value in contact.values()) or payload.get("contact_confirmed") is not True or not submission_key or entry_surface not in {"chat", "product_page"}:
+                self.send_json({"error": "confirmed_contact_and_submission_key_required"}, 422)
+                return
+            if not (str(contact.get("contact_email", "")).strip() or str(contact.get("contact_phone", "")).strip()):
+                self.send_json({"error": "reply_contact_required"}, 422)
+                return
+            notes = payload.get("notes", "")
+            product_id = payload.get("product_id")
+            if not isinstance(notes, str) or (product_id is not None and not isinstance(product_id, str)):
+                self.send_json({"error": "invalid_rfq"}, 422)
+                return
+            if product_id and not self.db.get_published_version(site["tenant_id"], product_id):
+                self.send_json({"error": "product_not_found"}, 404)
+                return
+            try:
+                rfq_id, created = self.db.create_rfq(site["tenant_id"], conversation["id"], submission_key, contact, notes, product_id, entry_surface)
+            except ConflictError:
+                self.send_json({"error": "idempotency_conflict"}, 409)
+                return
+            row = self.db.get_rfq(site["tenant_id"], rfq_id)
+            self.send_json(
+                {"rfq_id": rfq_id, "status": row["status"], "missing": json.loads(row["missing_json"])}, 201 if created else 200,
+                site["allowed_origin"] if self.headers.get("Origin") else None,
+            )
+            return
         if path == "/login":
             self.login_post(parse_multipart(self))
             return
