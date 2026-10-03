@@ -2494,7 +2494,7 @@ hr{border:0;border-top:1px solid var(--border-subtle);margin:16px 0}
 .console .side-brand{display:flex;align-items:center;gap:10px;padding:0 6px 16px;border-bottom:1px solid var(--nav-line)}
 .console .side-brand strong{display:block;font-size:13px;font-weight:600;color:var(--nav-text-active);letter-spacing:-.01em}
 .console .side-brand small{display:block;font-size:10px;color:var(--nav-text-2);letter-spacing:.1em;margin-top:1px}
-.brand-mark{display:block;width:30px;height:30px;flex:none;margin:0;border-radius:var(--r-lg);background:#fff;border:1px solid rgba(16,24,40,.06);box-shadow:0 1px 2px rgba(16,24,40,.08);object-fit:contain}
+.brand-mark{display:block;width:30px;height:30px;flex:none;margin:0;border-radius:var(--r-lg);background:#fff;border:1px solid rgba(16,24,40,.06);box-shadow:0 1px 2px rgba(16,24,40,.08);object-fit:contain;transform:none}
 .console .side-tenant{display:flex;align-items:center;gap:8px;margin:12px 0;padding:8px 9px;border:1px solid var(--nav-line);border-radius:var(--r-md);background:var(--tenant-bg);font-size:12px;color:var(--sb-name)}
 .console .side-tenant .tenant-avatar{display:grid;place-items:center;width:22px;height:22px;flex:none;border-radius:var(--r-sm);background:var(--sb-avatar-bg);color:var(--sb-avatar-fg);font-size:11px;font-weight:600}
 .console .side-nav{flex:1;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;gap:1px;padding-top:2px}

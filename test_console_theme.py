@@ -79,6 +79,8 @@ class ConsoleThemeTests(unittest.TestCase):
         cookie = self.login()
         _, _, page = self.request("GET", "/admin", cookie=cookie)
         self.assertIn("src='/assets/brand.png'", page)
+        # 防回归：控制台品牌标必须显式清除 BASE_CSS 遗留的 rotate(45deg)（B-07）
+        self.assertIn("object-fit:contain;transform:none", page)
         _, _, login_page = self.request("GET", "/login")
         self.assertIn("src='/assets/brand.png'", login_page)
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
