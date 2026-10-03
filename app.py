@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import io
 import json
 import mimetypes
 import os
@@ -20,6 +21,8 @@ import secrets
 import sqlite3
 import tempfile
 import hmac
+import zipfile
+import zlib
 from datetime import datetime, timezone
 from email.parser import BytesParser
 from email.policy import default
@@ -27,6 +30,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
+from xml.etree import ElementTree
 
 
 ROOT = Path(__file__).resolve().parent
@@ -78,6 +82,116 @@ def requirement_capture_reply(locale: str, missing: list[str]) -> str:
     if missing:
         return "I captured your message. To compare products, please confirm: " + ", ".join(missing) + "."
     return "I extracted the conditions above. Please check and confirm the summary before matching."
+
+
+def _decode_document_bytes(content: bytes) -> str:
+    for encoding in ("utf-8", "gb18030", "latin-1"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+def _pdf_text(content: bytes) -> str:
+    """Best-effort extraction for text-based PDFs; scanned PDFs stay manual-review."""
+    chunks: list[bytes] = []
+    for match in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", content, re.S):
+        raw = match.group(1)
+        try:
+            raw = zlib.decompress(raw)
+        except zlib.error:
+            pass
+        if raw:
+            chunks.append(raw[:2_000_000])
+        if sum(len(chunk) for chunk in chunks) >= 8_000_000:
+            break
+    strings: list[str] = []
+    payloads = chunks or [content[:8_000_000]]
+    for payload in payloads:
+        for match in re.finditer(rb"\(([^()\r\n]{1,500})\)\s*Tj", payload):
+            value = match.group(1)
+            value = re.sub(rb"\\([\\()\\])", rb"\1", value)
+            value = re.sub(rb"\\[0-7]{1,3}", b"", value)
+            strings.append(_decode_document_bytes(value))
+        for match in re.finditer(rb"\[([^\]\r\n]{1,2000})\]\s*TJ", payload):
+            for value in re.findall(rb"\(([^()\r\n]{1,500})\)", match.group(1)):
+                value = re.sub(rb"\\([\\()\\])", rb"\1", value)
+                strings.append(_decode_document_bytes(value))
+    return "\n".join(item.strip() for item in strings if item.strip())
+
+
+def _xlsx_text(content: bytes) -> str:
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
+            shared = ["".join(node.itertext()) for node in root]
+        lines: list[str] = []
+        for name in sorted(item for item in archive.namelist() if item.startswith("xl/worksheets/") and item.endswith(".xml")):
+            root = ElementTree.fromstring(archive.read(name))
+            for cell in root.iter():
+                if cell.tag.rsplit("}", 1)[-1] != "c":
+                    continue
+                value = next((node.text or "" for node in cell if node.tag.rsplit("}", 1)[-1] == "v"), "")
+                if cell.attrib.get("t") == "s" and value.isdigit() and int(value) < len(shared):
+                    value = shared[int(value)]
+                if value:
+                    lines.append(value)
+        return "\n".join(lines)
+
+
+def extract_document_text(filename: str, content: bytes) -> tuple[str, str, str]:
+    """Return extracted text, status, and a human-readable failure reason."""
+    suffix = Path(filename).suffix.lower()
+    try:
+        if suffix in {".txt", ".md", ".csv", ".json", ".html", ".htm", ".xml"}:
+            text = _decode_document_bytes(content)
+            if suffix in {".html", ".htm", ".xml"}:
+                text = re.sub(r"<[^>]+>", " ", text)
+            return text.strip(), "extracted" if text.strip() else "manual_review", "" if text.strip() else "没有可读文本"
+        if suffix in {".xlsx", ".xlsm"}:
+            text = _xlsx_text(content)
+            return text.strip(), "extracted" if text.strip() else "manual_review", "" if text.strip() else "表格中没有可读文本"
+        if suffix == ".pdf":
+            text = _pdf_text(content)
+            return text.strip(), "extracted" if text.strip() else "manual_review", "" if text.strip() else "PDF 没有可直接提取的文本，可能是扫描件"
+    except (OSError, ValueError, zipfile.BadZipFile, ElementTree.ParseError, zlib.error) as exc:
+        return "", "failed", f"自动识别失败：{exc}"
+    return "", "manual_review", "该格式暂不支持自动读取，请人工录入字段"
+
+
+def extract_product_field_candidates(text: str) -> dict[str, dict[str, str]]:
+    """Extract conservative candidate values; every result remains unapproved."""
+    candidates: dict[str, dict[str, str]] = {}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    def add(field_key: str, value: str, unit: str, line_number: int) -> None:
+        if field_key not in candidates and value.strip():
+            candidates[field_key] = {
+                "value": value.strip(),
+                "unit": unit,
+                "source_location": f"自动识别第 {line_number} 行",
+            }
+
+    for line_number, line in enumerate(lines, 1):
+        normalized = line.replace("–", "-").replace("—", "-").replace(",", ".")
+        flow = re.search(r"(?:flow|流量)(?:\s*(?:range|范围))?\s*[:=：]?\s*(\d+(?:\.\d+)?)\s*(?:-|~|至|to)\s*(\d+(?:\.\d+)?)\s*(?:m3/?h|m³/?h)?", normalized, re.I)
+        if flow:
+            add("flow_range", f"{flow.group(1)}-{flow.group(2)}", "m³/h", line_number)
+        head = re.search(r"(?:head|扬程)(?:\s*(?:range|范围))?\s*[:=：]?\s*(\d+(?:\.\d+)?)\s*(?:-|~|至|to)\s*(\d+(?:\.\d+)?)\s*(?:m|米)?", normalized, re.I)
+        if head:
+            add("head_range", f"{head.group(1)}-{head.group(2)}", "m", line_number)
+        media = re.search(r"(?:medium|media|介质|液体)\s*[:=：]\s*([^,;，；|]+)", line, re.I)
+        if media:
+            add("media", media.group(1), "", line_number)
+        material = re.search(r"(?:material|材质|材料)\s*[:=：]\s*([^,;，；|]+)", line, re.I)
+        if material:
+            add("material", material.group(1), "", line_number)
+        power = re.search(r"(?:power|功率)\s*[:=：]?\s*(\d+(?:[.,]\d+)?)\s*(kw|千瓦)", normalized, re.I)
+        if power:
+            add("power", power.group(1), "kW", line_number)
+    return candidates
 
 
 def slugify(model: str) -> str:
@@ -152,6 +266,17 @@ class Database:
                 storage_path TEXT,
                 processing_status TEXT NOT NULL DEFAULT 'registered',
                 created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS source_extractions (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                source_document_id TEXT NOT NULL UNIQUE REFERENCES source_documents(id),
+                extracted_text TEXT NOT NULL DEFAULT '',
+                candidates_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS product_fields (
                 id TEXT PRIMARY KEY,
@@ -461,6 +586,12 @@ class Database:
             "SELECT * FROM source_documents WHERE tenant_id=? AND product_id=? ORDER BY created_at DESC",
             (tenant_id, product_id),
         ).fetchall()
+
+    def get_source_extraction(self, tenant_id: str, source_document_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM source_extractions WHERE tenant_id=? AND source_document_id=?",
+            (tenant_id, source_document_id),
+        ).fetchone()
 
     def get_fields(self, tenant_id: str, product_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -904,20 +1035,34 @@ class Database:
         sha256 = hashlib.sha256(content).hexdigest() if content else None
         storage_path = None
         status = "registered"
+        extracted_text = ""
+        candidates: dict[str, dict[str, str]] = {}
+        extraction_status = "pending"
+        extraction_error = ""
         if content:
             UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
             safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", Path(filename).name) or "source.bin"
             target = UPLOAD_DIR / f"{source_id}-{safe_name}"
             target.write_bytes(content)
             storage_path = str(target.relative_to(ROOT))
-            status = "stored"
+            extracted_text, extraction_status, extraction_error = extract_document_text(filename, content)
+            candidates = extract_product_field_candidates(extracted_text)
+            status = extraction_status
         self.conn.execute(
             "INSERT INTO source_documents(id, tenant_id, product_id, filename, file_type, source_location, sha256, storage_path, processing_status, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (source_id, tenant_id, product_id, filename.strip(), file_type.strip() or "other", source_location.strip(), sha256, storage_path, status, now_iso()),
         )
+        if content:
+            timestamp = now_iso()
+            self.conn.execute(
+                "INSERT INTO source_extractions(id, tenant_id, source_document_id, extracted_text, candidates_json, status, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (secrets.token_hex(12), tenant_id, source_id, extracted_text[:200000], json.dumps(candidates, ensure_ascii=False), extraction_status, extraction_error, timestamp, timestamp),
+            )
         self._audit(tenant_id, "source_document", source_id, "registered", actor, filename)
         self.conn.commit()
+        for field_key, candidate in candidates.items():
+            self.save_field(tenant_id, product_id, field_key, candidate["value"], candidate["unit"], source_id, candidate["source_location"], "auto-extractor")
         return source_id
 
     def save_field(
@@ -1828,7 +1973,7 @@ class Handler(BaseHTTPRequestHandler):
                 product_id = match.group(1)
                 content = form.get("source_file") if isinstance(form.get("source_file"), bytes) else None
                 filename = str(form.get("source_file__filename", "")) or str(form.get("filename", ""))
-                self.db.add_source(self.tenant_id, product_id, filename or "未命名资料", str(form.get("file_type", "other")), str(form.get("source_location", "")), content, self.actor)
+                self.db.add_source(self.tenant_id, product_id, filename or "未命名资料", str(form.get("file_type", "other")), str(form.get("source_location", "")) or "用户上传文件", content, self.actor)
                 self.redirect(f"/admin/products/{product_id}?notice=source")
                 return
             match = re.fullmatch(r"/admin/products/([a-f0-9]+)/fields", path)
@@ -1898,14 +2043,31 @@ class Handler(BaseHTTPRequestHandler):
             for field in fields
         ) or "<tr><td colspan='3' class='muted'>尚未登记字段。</td></tr>"
         source_options = "<option value=''>请选择来源</option>" + "".join(f"<option value='{esc(source['id'])}'>{esc(source['filename'])} · {esc(source['source_location'])}</option>" for source in sources)
-        source_rows = "".join(f"<div class='source'><span><b>{esc(source['filename'])}</b><br><span class='muted'>{esc(source['file_type'])} · {esc(source['source_location'])}</span></span><span class='field-state'>{esc(source['processing_status'])}</span></div>" for source in sources) or "<p class='muted'>还没有来源资料。</p>"
+        source_parts = []
+        extraction_labels = {"extracted": "已自动读取", "manual_review": "需人工读取", "failed": "识别失败", "pending": "处理中"}
+        for source in sources:
+            extraction = self.db.get_source_extraction(self.tenant_id, source["id"])
+            extraction_html = ""
+            if extraction:
+                candidates = json.loads(extraction["candidates_json"])
+                candidate_text = "、".join(FIELD_LABELS.get(key, key) for key in candidates) or "未识别出关键字段"
+                preview = re.sub(r"\s+", " ", extraction["extracted_text"])[:180]
+                extraction_html = f"<br><span class='field-state'>自动识别：{esc(extraction_labels.get(extraction['status'], extraction['status']))} · 候选字段：{esc(candidate_text)}</span>"
+                if preview:
+                    extraction_html += f"<br><span class='field-state'>内容预览：{esc(preview)}</span>"
+                if extraction["error"]:
+                    extraction_html += f"<br><span class='field-state'>说明：{esc(extraction['error'])}</span>"
+            source_parts.append(
+                f"<div class='source'><span><b>{esc(source['filename'])}</b><br><span class='muted'>{esc(source['file_type'])} · {esc(source['source_location'])}</span>{extraction_html}</span><span class='field-state'>{esc(source['processing_status'])}</span></div>"
+            )
+        source_rows = "".join(source_parts) or "<p class='muted'>还没有来源资料。</p>"
         field_options = "".join(f"<option value='{key}'>{esc(label)}</option>" for key, label in FIELD_LABELS.items())
         action_buttons = f"<form method='post' action='/admin/products/{product_id}/approve' class='inline'><button>核准字段</button></form> <form method='post' action='/admin/products/{product_id}/publish' class='inline'><button class='secondary'>发布新版本</button></form>" + (f" <form method='post' action='/admin/products/{product_id}/withdraw' class='inline'><button class='danger'>撤回公开页</button></form>" if product['status'] == 'published' else "")
         notice_banner = f"<div class='notice'>{esc(notice_text)}</div>" if notice_text else ""
         body = f"""
 <div class='toolbar'><div><a href='/admin/products'>← 返回产品列表</a><h1>{esc(product['model'])}</h1><div class='muted'>{esc(product['name'])} · {status_badge(product['status'])}</div></div><div>{action_buttons}</div></div>
 {notice_banner}
-<div class='grid'><section class='card'><h2>产品基本信息</h2><p><b>主要用途：</b>{esc(product['use_case']) or '未填写'}</p><p><b>固定买方链接：</b>{('/products/' + esc(product['slug'])) if product['status'] == 'published' else '发布后生成'}</p><p class='muted'>型号是产品通用事实；买方本次工况将在后续会话中单独保存，不写回这里。</p></section><section class='card'><h2>登记来源资料</h2>{source_rows}<hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>IMAGE</option><option>CAD</option><option>OTHER</option></select></div><div><label>原文位置</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section></div>
+<div class='grid'><section class='card'><h2>产品基本信息</h2><p><b>主要用途：</b>{esc(product['use_case']) or '未填写'}</p><p><b>固定买方链接：</b>{('/products/' + esc(product['slug'])) if product['status'] == 'published' else '发布后生成'}</p><p class='muted'>型号是产品通用事实；买方本次工况将在后续会话中单独保存，不写回这里。</p></section><section class='card'><h2>登记来源资料</h2><p class='muted'>上传 PDF、TXT、CSV、Markdown 或 XLSX 后，系统会自动读取文本并尝试识别流量、扬程、介质、材质和功率。识别结果只保存为候选值，必须人工核准后才能用于发布、匹配或问答。</p>{source_rows}<hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>上传文件</label><input type='file' name='source_file'><label>或仅登记资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>IMAGE</option><option>CAD</option><option>OTHER</option></select></div><div><label>原文位置（可选）</label><input name='source_location' placeholder='例如第 1 页：规格参数表'></div></div><p><button class='secondary'>上传并自动识别</button></p></form></section></div>
 <section class='card' style='margin-top:18px'><h2>字段核对</h2><p class='muted'>关键字段必须有来源且核准后，才能进入产品版本和公开页面。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th></tr></thead><tbody>{field_rows}</tbody></table><hr><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></section>
 """
         self.send_html(layout(f"{product['model']} · 字段核对", body), 200)

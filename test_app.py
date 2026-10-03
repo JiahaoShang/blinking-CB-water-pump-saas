@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import app as app_module
 from app import Database, Handler, answer_from_approved_material, confirm_requirement_values, curve_head_at_flow, extract_requirement_values, layout, match_products, performance_points_from_text, requirement_capture_reply
 
 
@@ -46,6 +47,32 @@ class ProductApprovalTests(unittest.TestCase):
         self.assertEqual(self.db.get_product("demo-tenant", product_id)["status"], "pending_review")
         old_version = self.db.get_published_version("demo-tenant", product_id)
         self.assertEqual(json.loads(old_version["snapshot_json"])["fields"][0]["value"], "10-30")
+
+    def test_uploaded_text_is_extracted_into_unapproved_candidates(self):
+        product_id = self.db.create_product("demo-tenant", "T-AUTO", "自动识别泵", "清水")
+        previous_root = app_module.ROOT
+        previous_upload_dir = app_module.UPLOAD_DIR
+        app_module.ROOT = Path(self.temp_dir.name) / "root"
+        app_module.UPLOAD_DIR = app_module.ROOT / "uploads"
+        try:
+            source_id = self.db.add_source(
+                "demo-tenant",
+                product_id,
+                "pump-manual.txt",
+                "TXT",
+                "用户上传文件",
+                b"Flow range: 10-30 m3/h\nHead range: 20-40 m\nMedium: clean water\nMaterial: AISI 316\nPower: 0.75 kW",
+            )
+        finally:
+            app_module.ROOT = previous_root
+            app_module.UPLOAD_DIR = previous_upload_dir
+        extraction = self.db.get_source_extraction("demo-tenant", source_id)
+        self.assertEqual(extraction["status"], "extracted")
+        self.assertIn("flow_range", json.loads(extraction["candidates_json"]))
+        fields = {row["field_key"]: row for row in self.db.get_fields("demo-tenant", product_id)}
+        self.assertEqual(fields["flow_range"]["value"], "10-30")
+        self.assertEqual(fields["flow_range"]["state"], "candidate")
+        self.assertEqual(self.db.get_product("demo-tenant", product_id)["status"], "pending_review")
 
     def test_public_page_never_exposes_other_tenant_product(self):
         self.db.ensure_tenant("other-tenant")
