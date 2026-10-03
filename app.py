@@ -186,6 +186,12 @@ class Database:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS buyer_conversation_access (
+                conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                token_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -479,6 +485,26 @@ class Database:
         return self.conn.execute(
             "SELECT * FROM conversations WHERE tenant_id=? AND id=?", (tenant_id, conversation_id)
         ).fetchone()
+
+    def issue_buyer_access(self, tenant_id: str, conversation_id: str) -> str:
+        if not self.get_conversation(tenant_id, conversation_id):
+            raise ValueError("会话不存在")
+        token = secrets.token_urlsafe(32)
+        self.conn.execute(
+            "INSERT INTO buyer_conversation_access(conversation_id, tenant_id, token_hash, created_at) VALUES (?, ?, ?, ?)",
+            (conversation_id, tenant_id, hashlib.sha256(token.encode()).hexdigest(), now_iso()),
+        )
+        self.conn.commit()
+        return token
+
+    def has_buyer_access(self, tenant_id: str, conversation_id: str, token: str | None) -> bool:
+        if not token:
+            return False
+        row = self.conn.execute(
+            "SELECT token_hash FROM buyer_conversation_access WHERE tenant_id=? AND conversation_id=?",
+            (tenant_id, conversation_id),
+        ).fetchone()
+        return bool(row and hmac.compare_digest(row["token_hash"], hashlib.sha256(token.encode()).hexdigest()))
 
     def list_messages(self, tenant_id: str, conversation_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -1429,6 +1455,13 @@ class Handler(BaseHTTPRequestHandler):
                 return value
         return None
 
+    def authorize_buyer_conversation(self, conversation_id: str) -> bool:
+        token = self.cookie_value(f"cb_buyer_{conversation_id}")
+        if self.db.has_buyer_access(self.tenant_id, conversation_id, token):
+            return True
+        self.send_html(layout("Inquiry not found", "<div class='error'>This inquiry is not available in this browser.</div>", lang="en"), 404)
+        return False
+
     def current_user(self) -> sqlite3.Row | None:
         return self.db.get_session_user(self.cookie_value("cb_session"))
 
@@ -1534,7 +1567,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/inquiry":
             conversation_id = self.db.create_conversation(self.tenant_id, "web", query.get("lang", ["en"])[0])
-            self.redirect(f"/inquiry/{conversation_id}?lang={query.get('lang', ['en'])[0]}")
+            token = self.db.issue_buyer_access(self.tenant_id, conversation_id)
+            self.redirect(
+                f"/inquiry/{conversation_id}?lang={query.get('lang', ['en'])[0]}",
+                f"cb_buyer_{conversation_id}={token}; Path=/inquiry/{conversation_id}; HttpOnly; SameSite=Lax",
+            )
             return
         match = re.fullmatch(r"/admin/products/([a-f0-9]+)/?", path)
         if match:
@@ -1542,6 +1579,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         match = re.fullmatch(r"/inquiry/([a-f0-9]+)/?", path)
         if match:
+            if not self.authorize_buyer_conversation(match.group(1)):
+                return
             self.buyer_inquiry(match.group(1), query)
             return
         match = re.fullmatch(r"/admin/tasks/([a-f0-9]+)/?", path)
@@ -1579,6 +1618,9 @@ class Handler(BaseHTTPRequestHandler):
             self.logout()
             return
         if path.startswith("/admin/") and not self.authorize_admin(path, "POST"):
+            return
+        buyer_match = re.fullmatch(r"/inquiry/([a-f0-9]+)/(message|confirm|ask|rfq)", path)
+        if buyer_match and not self.authorize_buyer_conversation(buyer_match.group(1)):
             return
         try:
             form = parse_multipart(self)
