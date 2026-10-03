@@ -102,3 +102,5 @@ tenant ─ conversation ─ original_message ─ requirement_revision
 **2026-10-03 待核实视图持久化补记**：买方「查看待核实候选」的选择按推荐记录记忆（`recommendations.tentative_viewed`）：选中后 `GET /api/v1/buyer/conversations/{id}` 继续返回待核实候选（等价于该推荐记录上 `include_tentative=true`），刷新与重进会话不丢失；需求修订确认后产生的新推荐记录不沿用旧选择。旧 `/inquiry` 页以 `?show_tentative=1` 提供同等展示，默认不下发待核实候选（含产品下拉）。
 
 **2026-10-03 幂等键第二组补记**：`requirements/confirm`、`questions`、`recommendations` 三个买方写路径支持 `Idempotency-Key`（与消息、RFQ 相同语义）：同键同内容重试 → 200 `duplicate: true` 返回原始记录（确认工况的重试先于基准版本校验，成功后的重试不报过期）；同键不同内容 → 409 `idempotency_conflict`；新键 = 新动作。并发同键由唯一索引兜底（并发失败方回滚后返回已存结果）。answers 表 `question_message_id` 唯一（一问一答）。旧 `/inquiry` 页的确认/提问/询价表单各带渲染期提交键，双击不产生重复记录。
+
+**2026-10-03 旧询盘页 RFQ 修订补记**：旧 `/inquiry` 页支持修改同一张询价单（`POST /inquiry/{id}/rfq/{rfq_id}/revise`，表单携带期望版本号与渲染期提交键），复用与买方 API 完全相同的 `revise_rfq` 语义：同一张单推进版本、同键重发去重、陈旧基准版本拒绝（提示刷新）、联系方式不可清空；买方页仅显示当前版本，逐版差异仅卖方可见。与参考客户端行为一致。

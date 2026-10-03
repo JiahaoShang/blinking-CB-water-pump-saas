@@ -3171,7 +3171,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/admin/") and not self.authorize_admin(path, "POST"):
             return
-        buyer_match = re.fullmatch(r"/inquiry/([a-f0-9]+)/(message|confirm|ask|human-request|rfq)", path)
+        buyer_match = re.fullmatch(r"/inquiry/([a-f0-9]+)/(message|confirm|ask|human-request|rfq|rfq/[a-f0-9]+/revise)", path)
         if buyer_match and not self.authorize_buyer_conversation(buyer_match.group(1)):
             return
         try:
@@ -3314,6 +3314,37 @@ class Handler(BaseHTTPRequestHandler):
                 contact = {key: str(form.get(key, "")) for key in ("contact_name", "company", "contact_email", "contact_phone", "quantity", "region", "delivery")}
                 rfq_id, created = self.db.create_rfq(self.tenant_id, conversation_id, submission_key, contact, str(form.get("notes", "")), str(form.get("product_id", "")) or None)
                 self.redirect(f"/inquiry/{conversation_id}?notice=rfq&rfq_id={rfq_id}&created={'1' if created else '0'}")
+                return
+            match = re.fullmatch(r"/inquiry/([a-f0-9]+)/rfq/([a-f0-9]+)/revise", path)
+            if match:
+                conversation_id, rfq_id = match.group(1), match.group(2)
+                submission_key = str(form.get("submission_key", "")).strip()
+                if not submission_key:
+                    raise ValueError("修改标识缺失，请刷新页面后重试")
+                try:
+                    expected_revision = int(str(form.get("expected_revision", "")).strip())
+                except ValueError:
+                    raise ValueError("修改基准版本无效，请刷新页面后重试")
+                changes = {
+                    "contact_name": str(form.get("contact_name", "")),
+                    "company": str(form.get("company", "")),
+                    "contact_email": str(form.get("contact_email", "")),
+                    "contact_phone": str(form.get("contact_phone", "")),
+                    "quantity": str(form.get("quantity", "")),
+                    "destination": str(form.get("region", "")),
+                    "requested_delivery": str(form.get("delivery", "")),
+                    "notes": str(form.get("notes", "")),
+                }
+                try:
+                    self.db.revise_rfq(self.tenant_id, conversation_id, rfq_id, expected_revision, changes, submission_key)
+                except ConflictError:
+                    self.redirect(f"/inquiry/{conversation_id}?notice=rfq_stale&rfq_id={rfq_id}")
+                    return
+                except ValueError as error:
+                    notice = "rfq_contact" if "联系方式" in str(error) else "rfq_missing"
+                    self.redirect(f"/inquiry/{conversation_id}?notice={notice}&rfq_id={rfq_id}")
+                    return
+                self.redirect(f"/inquiry/{conversation_id}?notice=rfq&rfq_id={rfq_id}&created=0&revised=1")
                 return
             match = re.fullmatch(r"/admin/tasks/([a-f0-9]+)/reply", path)
             if match:
@@ -3637,10 +3668,15 @@ class Handler(BaseHTTPRequestHandler):
         notice_html = {
             "recommendation": "<div class='notice'>需求已保存，推荐结果会基于当前已确认摘要重新计算。</div>",
             "answer": "<div class='notice'>问题已保存。资料不足的问题会保留为待核实记录；只有您点击「请求工程师核实」后才会创建人工任务，不会自动安排。</div>",
+            "rfq_stale": "<div class='error'>这张询价已在别处更新，请刷新页面后再修改（避免覆盖较新的版本）。</div>",
+            "rfq_contact": "<div class='error'>请保留至少一种可回复联系方式（邮箱或电话）。</div>",
+            "rfq_missing": "<div class='error'>没有找到要修改的询价，请刷新页面后重试。</div>",
         }.get(notice, "")
         if notice == "rfq" and current_rfq:
             missing_labels = json.loads(current_rfq["missing_json"])
-            if current_rfq["status"] == "submitted":
+            if query.get("revised", [""])[0] == "1":
+                notice_html = f"<div class='notice'><b>已保存修改（v{current_rfq['current_revision']}）：</b>销售侧会看到本次变更；本页仅显示最新内容。</div>"
+            elif current_rfq["status"] == "submitted":
                 notice_html = f"<div class='notice'><b>询价已提交：</b>{esc(current_rfq['id'])}。销售会根据已保存的需求和产品版本继续处理。</div>"
             else:
                 notice_html = f"<div class='error'><b>询价已保存，但仍待补充：</b>{esc('、'.join(missing_labels))}。记录编号：{esc(current_rfq['id'])}。</div>"
@@ -3713,6 +3749,36 @@ class Handler(BaseHTTPRequestHandler):
         confirm_key = secrets.token_urlsafe(18)
         ask_key = secrets.token_urlsafe(18)
 
+        rfq_card_parts = []
+        for rfq_row in self.db.conn.execute(
+            "SELECT * FROM rfqs WHERE tenant_id=? AND conversation_id=? ORDER BY created_at",
+            (self.tenant_id, conversation_id),
+        ):
+            content = self.db.rfq_current_content(rfq_row)
+            edit_key = secrets.token_urlsafe(18)
+            rfq_card_parts.append(
+                f"<div class='source' style='flex-direction:column;align-items:stretch;gap:6px'>"
+                f"<span><b>RFQ {esc(rfq_row['id'][:8])} · v{rfq_row['current_revision']} · {esc(rfq_row['status'])}</b> "
+                f"<span class='field-state'>本页仅显示当前版本；历次修改由销售侧核对</span></span>"
+                f"<span class='field-state'>联系人：{esc(content['contact_name'] or '—')} · 邮箱：{esc(content['contact_email'] or '—')} · 电话：{esc(content['contact_phone'] or '—')}</span>"
+                f"<span class='field-state'>数量：{esc(content['quantity'] or '—')} · 目的地：{esc(content['destination'] or '—')} · 期望交期：{esc(content['requested_delivery'] or '—')}</span>"
+                f"<details><summary>编辑询价 / Edit this RFQ</summary>"
+                f"<form method='post' action='/inquiry/{conversation_id}/rfq/{rfq_row['id']}/revise'>"
+                f"<input type='hidden' name='submission_key' value='{esc(edit_key)}'>"
+                f"<input type='hidden' name='expected_revision' value='{rfq_row['current_revision']}'>"
+                f"<div class='form-grid'>"
+                f"<div><label>Contact name / 联系人</label><input name='contact_name' value='{esc(content['contact_name'] or '')}'></div>"
+                f"<div><label>Company / 公司</label><input name='company' value='{esc(content['company'] or '')}'></div>"
+                f"<div><label>Email / 邮箱</label><input name='contact_email' type='email' value='{esc(content['contact_email'] or '')}'></div>"
+                f"<div><label>Phone / 电话</label><input name='contact_phone' value='{esc(content['contact_phone'] or '')}'></div>"
+                f"<div><label>Quantity / 数量</label><input name='quantity' value='{esc(content['quantity'] or '')}'></div>"
+                f"<div><label>Destination / 目的地</label><input name='region' value='{esc(content['destination'] or '')}'></div>"
+                f"<div><label>Expected delivery / 期望交期</label><input name='delivery' value='{esc(content['requested_delivery'] or '')}'></div>"
+                f"<div class='full'><label>Notes / 补充说明</label><textarea name='notes'>{esc(content['notes'] or '')}</textarea></div>"
+                f"</div><p><button>Save changes / 保存修改</button></p></form></details></div>"
+            )
+        rfq_cards_html = "".join(rfq_card_parts) or "<p class='muted'>本会话还没有询价记录。</p>"
+
         body = f"""
 <div class='toolbar'><div><h1>Buyer inquiry</h1><div class='muted'>Conversation {esc(conversation_id)} · 原始消息和每次需求修订都会保留</div></div><div><a class='button secondary' href='/inquiry?lang={'zh' if lang == 'en' else 'en'}'>New inquiry / 新询盘</a></div></div>
 {notice_html}
@@ -3720,7 +3786,7 @@ class Handler(BaseHTTPRequestHandler):
 <section class='card'><h2>Requirement summary</h2>{missing_html}<form method='post' action='/inquiry/{conversation_id}/confirm'><input type='hidden' name='submission_key' value='{esc(confirm_key)}'><div class='form-grid'>{input_fields}</div><p><button>Confirm summary and match</button></p></form><table><thead><tr><th>Field</th><th>Value</th><th>State</th></tr></thead><tbody>{summary_rows}</tbody></table></section></div>
 <section class='card' style='margin-top:18px'><h2>Recommendations</h2>{recommendation_html}</section>
 <section class='card' style='margin-top:18px'><h2>Ask about the recommended product</h2><p class='muted'>资料内问题显示出处。资料外问题先保存为待核实；只有您点击“请求工程师核实”后才会交给工程师，在此对话查看回复无需另留联系方式。</p><form method='post' action='/inquiry/{conversation_id}/ask'><input type='hidden' name='submission_key' value='{esc(ask_key)}'><label>Product context</label><select name='product_id'>{candidate_options}</select><label>Your question / 技术问题 *</label><textarea name='question' required placeholder='Example: What is the flow range? Or ask about price, stock, certification to test handoff.'></textarea><p><button>Ask and save answer</button></p></form><h3>Answers and handoff</h3>{answer_html}{task_html}</section>
-<section class='card' style='margin-top:18px'><h2>Request for quotation (RFQ)</h2><p class='muted'>您可以随时提交询价，无须先完成选型。请至少提供邮箱或电话，方便销售回复；已确认的工况会随询价保存，缺少的技术或商务信息会标为待补充。</p><form method='post' action='/inquiry/{conversation_id}/rfq'><input type='hidden' name='submission_key' value='{esc(submission_key)}'><div class='form-grid'><div><label>Product / 产品</label><select name='product_id'>{candidate_options}</select></div><div><label>Contact name / 联系人</label><input name='contact_name' placeholder='Your name'></div><div><label>Company / 公司</label><input name='company' placeholder='Company name'></div><div><label>Email / 邮箱</label><input name='contact_email' type='email' placeholder='you@example.com'></div><div><label>Phone / 电话</label><input name='contact_phone' placeholder='+49 ...'></div><div><label>Quantity / 数量</label><input name='quantity' value='{esc(prefill['quantity'])}' placeholder='e.g. 2'></div><div><label>Destination / 目的地</label><input name='region' value='{esc(prefill['region'])}' placeholder='e.g. Germany'></div><div><label>Expected delivery / 期望交期</label><input name='delivery' value='{esc(prefill['delivery'])}' placeholder='e.g. 8 weeks'></div><div class='full'><label>Notes / 补充说明</label><textarea name='notes' placeholder='Additional operating conditions or questions'></textarea></div></div><p><button>Save RFQ / 提交询价</button></p></form></section>
+<section class='card' style='margin-top:18px'><h2>Request for quotation (RFQ)</h2><p class='muted'>您可以随时提交询价，无须先完成选型。请至少提供邮箱或电话，方便销售回复；已确认的工况会随询价保存，缺少的技术或商务信息会标为待补充。</p><form method='post' action='/inquiry/{conversation_id}/rfq'><input type='hidden' name='submission_key' value='{esc(submission_key)}'><div class='form-grid'><div><label>Product / 产品</label><select name='product_id'>{candidate_options}</select></div><div><label>Contact name / 联系人</label><input name='contact_name' placeholder='Your name'></div><div><label>Company / 公司</label><input name='company' placeholder='Company name'></div><div><label>Email / 邮箱</label><input name='contact_email' type='email' placeholder='you@example.com'></div><div><label>Phone / 电话</label><input name='contact_phone' placeholder='+49 ...'></div><div><label>Quantity / 数量</label><input name='quantity' value='{esc(prefill['quantity'])}' placeholder='e.g. 2'></div><div><label>Destination / 目的地</label><input name='region' value='{esc(prefill['region'])}' placeholder='e.g. Germany'></div><div><label>Expected delivery / 期望交期</label><input name='delivery' value='{esc(prefill['delivery'])}' placeholder='e.g. 8 weeks'></div><div class='full'><label>Notes / 补充说明</label><textarea name='notes' placeholder='Additional operating conditions or questions'></textarea></div></div><p><button>Save RFQ / 提交询价</button></p></form><h3>Your RFQs / 我的询价</h3>{rfq_cards_html}</section>
 <div class='footer-note'>产品页面、推荐和后续 chatbot 都只读取已核准并已发布的产品版本。当前规则是透明的水泵演示规则，正式阈值需由企业工程师确认。</div>
 """
         self.send_html(layout("Buyer inquiry", body, lang=lang), 200)
