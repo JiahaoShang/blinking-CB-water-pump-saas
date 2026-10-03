@@ -61,6 +61,9 @@ class BuyerApiTests(unittest.TestCase):
         product = self.db.list_products("demo-tenant")[0]
         self.db.approve_product("demo-tenant", product["id"])
         self.db.publish_product("demo-tenant", product["id"])
+        second = next(item for item in self.db.list_products("demo-tenant") if item["id"] != product["id"])
+        self.db.approve_product("demo-tenant", second["id"])
+        self.db.publish_product("demo-tenant", second["id"])
         page_path = f"/s/site-a/products/{product['slug']}"
         status, page = self.html_get(page_path)
         self.assertEqual(status, 200)
@@ -69,8 +72,15 @@ class BuyerApiTests(unittest.TestCase):
         self.assertIn("data-product-id='" + product["id"] + "'", page)
         self.assertNotIn("href='/admin'", page)
         self.assertNotIn("mailto:sales@example.invalid", page)
+        self.assertIn("product-page.css", page)
+        sections = ["hero", "advantages", "specifications", "comparison", "applications", "customization", "manufacturing", "certification", "downloads", "faq"]
+        self.assertEqual([page.index(f"data-section='{name}'") for name in sections], sorted(page.index(f"data-section='{name}'") for name in sections))
+        self.assertIn(second["model"], page)
+        self.assertIn("MOQ, lead time and sample availability", page)
+        self.assertNotIn(product["use_case"], page)
         self.assertEqual(self.html_get(f"/s/site-b/products/{product['slug']}")[0], 404)
         self.assertEqual(self.html_get("/reference-client/product-page.js")[0], 200)
+        self.assertEqual(self.html_get("/reference-client/product-page.css")[0], 200)
 
     def test_site_scoped_conversation_requires_private_token(self):
         status, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a", "locale": "en"})

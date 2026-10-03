@@ -56,6 +56,16 @@ FIELD_LABELS = {
     "temperature": "介质温度",
     "performance_points": "性能曲线目录点",
 }
+FIELD_LABELS_EN = {
+    "flow_range": "Flow range", "head_range": "Head range", "media": "Suitable medium",
+    "material": "Material", "power": "Power", "temperature": "Liquid temperature",
+    "performance_points": "Performance points",
+}
+PRODUCT_PAGE_GROUPS = (
+    ("Basics and application", "基本与用途", ("media", "temperature")),
+    ("Hydraulic performance", "水力性能", ("flow_range", "head_range", "performance_points")),
+    ("Power and materials", "电气与材料", ("power", "material")),
+)
 
 
 class ConflictError(ValueError):
@@ -1732,7 +1742,7 @@ def answer_from_approved_material(
 
 
 def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh", public: bool = False) -> str:
-    header_html = "<header><strong>Industrial Pump Supplier</strong></header>" if public else f"<header><strong><span class='brand-mark' aria-hidden='true'></span>Growave</strong><nav><a href='/admin'>{'管理概览' if lang == 'zh' else 'Overview'}</a><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/admin/sales'>{'销售工作台' if lang == 'zh' else 'Sales desk'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>"
+    header_html = "<header><strong>Industrial Pump Supplier <small>· DEMO</small></strong><nav><a href='#specifications'>Specifications / 参数</a><a href='#downloads'>Documents / 资料</a><a href='#product-rfq'>RFQ / 询价</a></nav></header>" if public else f"<header><strong><span class='brand-mark' aria-hidden='true'></span>Growave</strong><nav><a href='/admin'>{'管理概览' if lang == 'zh' else 'Overview'}</a><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/admin/sales'>{'销售工作台' if lang == 'zh' else 'Sales desk'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>"
     return f"""<!doctype html>
 <html lang='{ 'en' if lang == 'en' else 'zh-CN' }'>
 <head>
@@ -1975,6 +1985,7 @@ class Handler(BaseHTTPRequestHandler):
             "/reference-client/app.js": ("app.js", "text/javascript; charset=utf-8"),
             "/reference-client/style.css": ("style.css", "text/css; charset=utf-8"),
             "/reference-client/product-page.js": ("product-page.js", "text/javascript; charset=utf-8"),
+            "/reference-client/product-page.css": ("product-page.css", "text/css; charset=utf-8"),
         }
         if path in reference_files:
             self.send_reference_file(*reference_files[path])
@@ -3014,7 +3025,24 @@ class Handler(BaseHTTPRequestHandler):
         allowed_source_ids = self.db.public_source_ids(tenant_id, product["id"])
         cited_source_ids = {field["source_document_id"] for field in snapshot["fields"]}
         lang = query.get("lang", ["en"])[0]
-        field_cards = "".join(f"<div><b>{esc(field['label'])}</b><span>{esc(field['value'])} {esc(field['unit'])}</span></div>" for field in snapshot["fields"])
+        approved_fields = {field["field_key"]: field for field in snapshot["fields"]}
+        def t(en: str, zh: str) -> str:
+            return en if lang == "en" else zh
+        def fact(key: str) -> str:
+            field = approved_fields.get(key)
+            if not field:
+                return f"<span class='page-missing'>{t('Not provided', '资料未提供')}</span>"
+            return f"<strong>{esc(field['value'])} {esc(field['unit'])}</strong><small>{esc(field['source_filename'] or '')} · {esc(field['source_location'])}</small>"
+        hero_keys = ("flow_range", "head_range", "media", "power", "material", "temperature", "performance_points", "dimension")
+        def field_label(key: str) -> str:
+            return FIELD_LABELS_EN.get(key, "Installation dimensions") if lang == "en" else FIELD_LABELS.get(key, "安装尺寸")
+        hero_facts = "".join(f"<div><b>{esc(field_label(key))}</b>{fact(key)}</div>" for key in hero_keys)
+        group_html = "".join(
+            f"<section class='page-group'><h3>{t(en, zh)}</h3><dl>" + "".join(f"<div><dt>{esc(field_label(key))}</dt><dd>{fact(key)}</dd></div>" for key in keys) + "</dl></section>"
+            for en, zh, keys in PRODUCT_PAGE_GROUPS
+        )
+        group_html += f"<section class='page-group'><h3>{t('Installation and dimensions', '安装尺寸')}</h3><p class='page-missing'>{t('No approved dimensions or installation drawing in this product version.', '当前产品版本没有已核准的尺寸或安装图。')}</p></section>"
+        group_html += f"<section class='page-group'><h3>{t('Purchasing and delivery', '采购交付')}</h3><p class='page-missing'>{t('MOQ, lead time and sample availability require seller confirmation.', '起订量、交期和样品状态待卖方确认。')}</p></section>"
         missing_labels = [FIELD_LABELS[key] for key in snapshot.get("missing_fields", []) if key in FIELD_LABELS]
         missing_html = "<p class='muted'>" + ("Pending information: " if lang == "en" else "待补充信息：") + esc("、".join(missing_labels)) + "</p>" if missing_labels else ""
         source_prefix = f"/s/{quote(site['site_key'])}" if site else ""
@@ -3024,6 +3052,14 @@ class Handler(BaseHTTPRequestHandler):
             + "</li>"
             for source in sources if source["id"] in allowed_source_ids and source["id"] in cited_source_ids
         ) or "<li class='muted'>暂无公开资料附件</li>"
+        comparison_keys = ("flow_range", "head_range", "power", "material", "media")
+        comparison_products = [product] + [item for item in self.db.list_products(tenant_id) if item["id"] != product["id"] and item["status"] == "published"][:2]
+        comparison_versions = [(item, self.db.get_published_version(tenant_id, item["id"])) for item in comparison_products]
+        comparison_versions = [(item, item_version) for item, item_version in comparison_versions if item_version]
+        comparison_snapshots = [(item, {field["field_key"]: field for field in json.loads(item_version["snapshot_json"])["fields"]}) for item, item_version in comparison_versions]
+        comparison_header = "".join(f"<th>{esc(item['model'])}</th>" for item, _ in comparison_snapshots)
+        comparison_rows = "".join(f"<tr><th>{esc(field_label(key))}</th>" + "".join(f"<td>{esc(fields[key]['value'])} {esc(fields[key]['unit'])}</td>" if fields.get(key) else f"<td class='page-missing'>{t('Not provided', '资料未提供')}</td>" for _, fields in comparison_snapshots) + "</tr>" for key in comparison_keys)
+        comparison_links = "".join(f"<li><a href='{source_prefix}/products/{esc(item['slug'])}'>{esc(item['model'])}</a></li>" for item, _ in comparison_snapshots)
         title = f"{product['model']} | Industrial Pump"
         inquiry_link = "<a class='button' href='#product-rfq'>Request a quote / 发起询价</a>" if site else "<p class='muted'>Open the seller's website link to request a quote.</p>"
         rfq_html = f"""<section class='card' id='product-rfq' data-site-key='{esc(site['site_key'])}' data-product-id='{esc(product['id'])}' style='margin-top:18px'>
@@ -3031,15 +3067,27 @@ class Handler(BaseHTTPRequestHandler):
 <form id='product-rfq-form'><div class='form-grid'><label>Email <input name='email' type='email'></label><label>Phone <input name='phone' type='tel'></label><label>Quantity <input name='quantity'></label><label>Destination <input name='destination'></label><label class='full'>Requirements <textarea name='notes'></textarea></label></div><label><input name='contact_confirmed' type='checkbox' style='width:auto'> I confirm this reply contact may be used for this request.</label><button type='submit'>Submit RFQ</button></form><p id='product-rfq-result' role='status'></p></section>
 <script src='/reference-client/product-page.js' defer></script>""" if site else ""
         public_path = f"/s/{quote(site['site_key'])}/products/{esc(product['slug'])}" if site else f"/products/{esc(product['slug'])}"
+        mobile_cta_html = f"<a class='page-mobile-cta' href='#product-rfq'>{t('Request a quote', '发起询价')}</a>" if site else ""
         body = f"""
-<div class='product-hero'><div class='eyebrow'>Published product version {version['version']}</div><h1>{esc(product['model'])}</h1><p>{esc(product['name'])}</p><div class='kv'>{field_cards}</div>{missing_html}</div>
-<div class='grid'><section class='card'><h2>{'Application' if lang == 'en' else '适用场景'}</h2><p>{esc(product['use_case'])}</p><p class='muted'>{'The values above come from the approved product record and its cited source. Please confirm final sizing with an engineer.' if lang == 'en' else '以上参数来自已核准产品版本及其引用资料。正式选型前请与工程师确认。'}</p></section><section class='card'><h2>{'Source documents' if lang == 'en' else '来源资料'}</h2><ul>{source_links}</ul></section><section class='card'><h2>{'Next step' if lang == 'en' else '继续沟通'}</h2><p>{'Need help checking flow, head or medium compatibility?' if lang == 'en' else '需要核对流量、扬程或介质适用条件？'}</p>{inquiry_link}</section></div>
+<nav class='page-breadcrumb' aria-label='Breadcrumb'>{t('Home › Products › Pump', '首页 › 产品 › 水泵')} › {esc(product['model'])}</nav>
+<section class='page-hero' id='overview' data-section='hero'><div class='page-visual' role='img' aria-label='{t('Product image pending approval', '产品图片待核准')}'><span>{t('Approved product image pending', '已核准产品图片待补充')}</span></div><div><p class='page-eyebrow'>{t('Published product version', '已发布产品版本')} {version['version']} · {esc(version['published_at'])}</p><h1>{esc(product['model'])}</h1><p class='page-model'>{esc(product['name'])}</p><p class='muted'>{t('Check the sourced flow and head data before asking for a final duty-point review.', '请先核对有出处的流量与扬程，再请工程师确认最终工况。')}</p><div class='page-actions'>{inquiry_link}<a class='button secondary' href='#downloads'>{t('View documents', '查看资料')}</a><a class='button secondary' href='#faq'>{t('Read FAQ', '查看常见问题')}</a></div><div class='page-quick'>{hero_facts}</div>{missing_html}<p class='page-missing'>{t('MOQ, lead time and sample availability: ask the seller.', '起订量、交期、样品状态：请向卖方核实。')}</p></div></section>
+<nav class='page-anchors' aria-label='Product sections'><a href='#overview'>{t('Overview', '概览')}</a><a href='#specifications'>{t('Specifications', '参数')}</a><a href='#applications'>{t('Applications', '应用')}</a><a href='#customization'>{t('Customization', '定制')}</a><a href='#downloads'>{t('Documents', '资料')}</a><a href='#faq'>FAQ</a></nav>
+<section class='page-section' data-section='advantages'><h2>{t('What the approved record supports', '已核准资料能说明什么')}</h2><p>{t('Flow and head values below are shown with their source. Final suitability depends on the buyer’s operating point and conditions.', '下列流量、扬程值附有出处；最终适用性仍取决于买方工况。')}</p><div class='page-fact-pair'><div><b>{esc(field_label('flow_range'))}</b>{fact('flow_range')}</div><div><b>{esc(field_label('head_range'))}</b>{fact('head_range')}</div></div></section>
+<section class='page-section' id='specifications' data-section='specifications'><h2>{t('Technical specifications', '技术参数')}</h2><div class='page-groups'>{group_html}</div></section>
+<section class='page-section' data-section='comparison'><h2>{t('Compare published models', '对比已发布型号')}</h2><p class='muted'>{t('Only approved published models from this seller appear here. Missing data stays visible.', '仅比较本企业已核准发布的型号；缺项如实显示。')}</p><div class='page-table-scroll'><table><thead><tr><th>{t('Parameter', '参数')}</th>{comparison_header}</tr></thead><tbody>{comparison_rows}</tbody></table></div><ul>{comparison_links}</ul></section>
+<section class='page-section' id='applications' data-section='applications'><h2>{t('Applications', '应用场景')}</h2><p class='page-missing'>{t('No application claim has been approved for this product version. Describe your operating conditions in the original website chat or RFQ.', '当前版本没有已核准的应用场景结论。请在原官网聊天窗口或询价中描述工况。')}</p></section>
+<section class='page-section' id='customization' data-section='customization'><h2>{t('Customization', '定制能力')}</h2><p class='page-missing'>{t('Available changes and turnaround times have not been confirmed by the seller.', '可定制项目及周期尚未由卖方确认。')}</p></section>
+<section class='page-section' data-section='manufacturing'><h2>{t('Manufacturing and quality control', '制造与质量控制')}</h2><p class='page-missing'>{t('Factory and inspection evidence has not been provided for publication.', '尚无获准公开的工厂与质检证据。')}</p></section>
+<section class='page-section' data-section='certification'><h2>{t('Certifications and cases', '认证与案例')}</h2><p class='page-missing'>{t('No verified certificates or customer cases are available in this published record.', '当前已发布记录没有可核验的认证或客户案例。')}</p></section>
+<section class='page-section' id='downloads' data-section='downloads'><h2>{t('Approved documents', '已获准公开的资料')}</h2><ul>{source_links}</ul><p class='muted'>{t('Documents without publication permission are not downloadable.', '未获得公开许可的文件不提供下载。')}</p></section>
+<section class='page-section' id='faq' data-section='faq'><h2>{t('Frequently asked questions', '常见问题')}</h2><details><summary>{t('Can this model meet my exact duty point?', '这个型号能满足我的具体工况吗？')}</summary><p>{t('Compare the sourced flow and head information above, then ask an engineer to check your actual conditions.', '先核对上方有出处的流量、扬程数据，再请工程师检查实际工况。')}</p></details><details><summary>{t('What are the MOQ and lead time?', '起订量和交期是多少？')}</summary><p>{t('The published record does not confirm these commercial terms. Include your quantity and destination in an RFQ.', '当前已发布资料没有确认这些商务条件。请在询价中提供数量和目的地。')}</p></details></section>
 {rfq_html}
-<div class='footer-note'>{'This is an initial technical display, not a price, stock, delivery or engineering-fit commitment.' if lang == 'en' else '这是初步技术展示，不代表价格、库存、交期或正式工程适配承诺。'} · <a href='{public_path}?lang={'zh' if lang == 'en' else 'en'}'>{'切换中文' if lang == 'en' else 'Switch to English'}</a></div>
+{mobile_cta_html}
+<footer class='page-footer'>{t('Initial technical display; not a quotation or final engineering approval.', '初步技术展示；并非报价或最终工程适配结论。')} · <a href='{public_path}?lang={'zh' if lang == 'en' else 'en'}'>{'切换中文' if lang == 'en' else 'Switch to English'}</a></footer>
 """
         page = layout(title, body, lang=lang, public=True)
         json_ld = json.dumps({'@context': 'https://schema.org', '@type': 'Product', 'name': product['name'], 'model': product['model']}, ensure_ascii=False).replace("</", "<\\/")
-        page = page.replace("</head>", f"<meta name='description' content='{esc(product['name'])} - approved industrial pump specifications'><script type='application/ld+json'>{json_ld}</script></head>")
+        page = page.replace("</head>", f"<meta name='description' content='{esc(product['name'])} - approved industrial pump specifications'><script type='application/ld+json'>{json_ld}</script><link rel='stylesheet' href='/reference-client/product-page.css'></head>")
         self.send_html(page, 200)
 
     def public_source(self, slug: str, source_id: str, site: sqlite3.Row | None = None) -> None:
