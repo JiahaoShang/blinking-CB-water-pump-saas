@@ -20,7 +20,7 @@ import secrets
 import sqlite3
 import tempfile
 import hmac
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.parser import BytesParser
 from email.policy import default
 from http import HTTPStatus
@@ -524,6 +524,11 @@ class Database:
         self.conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_idempotency ON messages(conversation_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
         )
+        try:
+            # 同一未解问题只允许一个对外人工任务；并发请求由索引兜底，重复由 create_human_task 返回既有任务。
+            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_human_tasks_question ON human_tasks(question_message_id)")
+        except sqlite3.IntegrityError:
+            pass  # 旧库若已有重复任务则保留原样；并发防护不再由索引兜底，需在迁移时人工核查
         conversation_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(conversations)")}
         for column, definition in (
             ("stop_proactive_contact", "INTEGER NOT NULL DEFAULT 0"),
@@ -984,10 +989,20 @@ class Database:
             return existing["id"]
         task_id = secrets.token_hex(12)
         timestamp = now_iso()
-        self.conn.execute(
-            "INSERT INTO human_tasks(id, tenant_id, conversation_id, question_message_id, requirement_revision_id, recommendation_id, product_id, product_version_id, question, context_json, reason, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
-            (task_id, tenant_id, conversation_id, question_message_id, requirement_revision_id, recommendation_id, product_id, product_version_id, question, json.dumps(context, ensure_ascii=False), reason, timestamp, timestamp),
-        )
+        try:
+            self.conn.execute(
+                "INSERT INTO human_tasks(id, tenant_id, conversation_id, question_message_id, requirement_revision_id, recommendation_id, product_id, product_version_id, question, context_json, reason, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                (task_id, tenant_id, conversation_id, question_message_id, requirement_revision_id, recommendation_id, product_id, product_version_id, question, json.dumps(context, ensure_ascii=False), reason, timestamp, timestamp),
+            )
+        except sqlite3.IntegrityError:
+            # 并发重复请求：另一请求已创建同一问题的任务，返回既有任务即可。
+            winner = self.conn.execute(
+                "SELECT id FROM human_tasks WHERE conversation_id=? AND question_message_id=?",
+                (conversation_id, question_message_id),
+            ).fetchone()
+            if winner:
+                return winner["id"]
+            raise
         self._audit(tenant_id, "human_task", task_id, "created", "rule-based-answer", reason)
         self.conn.commit()
         return task_id
@@ -1130,8 +1145,20 @@ class Database:
 
     def list_rfqs(self, tenant_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT r.*, p.model FROM rfqs r LEFT JOIN products p ON p.id=r.product_id WHERE r.tenant_id=? ORDER BY r.created_at DESC",
+            "SELECT r.*, p.model, p.slug FROM rfqs r LEFT JOIN products p ON p.id=r.product_id WHERE r.tenant_id=? ORDER BY r.created_at DESC",
             (tenant_id,),
+        ).fetchall()
+
+    def related_rfqs_in_conversation(self, tenant_id: str, conversation_id: str, product_id: str | None, exclude_rfq_id: str, hours: int = 24) -> list[sqlite3.Row]:
+        """Same-conversation, same-model RFQs within the window. A hint to check for related
+        purchase requests only — records are never merged or split automatically."""
+        if not product_id:
+            return []
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).replace(microsecond=0).isoformat()
+        return self.conn.execute(
+            "SELECT id, current_revision, status, created_at FROM rfqs "
+            "WHERE tenant_id=? AND conversation_id=? AND product_id=? AND id<>? AND created_at>=? ORDER BY created_at",
+            (tenant_id, conversation_id, product_id, exclude_rfq_id, cutoff),
         ).fetchall()
 
     def revise_rfq(self, tenant_id: str, conversation_id: str, rfq_id: str, expected_revision: int, changes: dict[str, object], idempotency_key: str) -> tuple[int, bool]:
@@ -1299,7 +1326,9 @@ class Database:
 
     def list_sales_records(self, tenant_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT r.*, p.model, l.id AS lead_id, l.stage, l.owner, l.next_follow_up, l.note, l.updated_at AS lead_updated_at, c.stop_proactive_contact "
+            "SELECT r.*, p.model, l.id AS lead_id, l.stage, l.owner, l.next_follow_up, l.note, l.updated_at AS lead_updated_at, c.stop_proactive_contact, "
+            "(SELECT COUNT(*) FROM rfq_revisions v WHERE v.rfq_id=r.id AND v.revision>1) AS buyer_revision_count, "
+            "(SELECT MAX(v.created_at) FROM rfq_revisions v WHERE v.rfq_id=r.id) AS last_revision_at "
             "FROM rfqs r LEFT JOIN products p ON p.id=r.product_id LEFT JOIN leads l ON l.rfq_id=r.id AND l.tenant_id=r.tenant_id JOIN conversations c ON c.id=r.conversation_id AND c.tenant_id=r.tenant_id "
             "WHERE r.tenant_id=? ORDER BY CASE l.stage WHEN 'new' THEN 0 WHEN 'needs_info' THEN 1 WHEN 'technical_review' THEN 2 WHEN 'quote_ready' THEN 3 WHEN 'paused' THEN 4 ELSE 5 END, l.next_follow_up, r.created_at DESC",
             (tenant_id,),
@@ -2884,8 +2913,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "idempotency_conflict"}, 409)
                 return
             row = self.db.get_rfq(site["tenant_id"], rfq_id)
+            related = self.db.related_rfqs_in_conversation(site["tenant_id"], conversation["id"], row["product_id"], rfq_id)
             self.send_json(
-                {"rfq_id": rfq_id, "status": row["status"], "missing": json.loads(row["missing_json"])}, 201 if created else 200,
+                {
+                    "rfq_id": rfq_id, "status": row["status"], "missing": json.loads(row["missing_json"]),
+                    "related_rfq_hint": [
+                        {"rfq_id": item["id"], "current_revision": item["current_revision"], "created_at": item["created_at"]}
+                        for item in related
+                    ],
+                }, 201 if created else 200,
                 site["allowed_origin"] if self.headers.get("Origin") else None,
             )
             return
@@ -3616,20 +3652,42 @@ class Handler(BaseHTTPRequestHandler):
         requirement_rows = "".join(f"<tr><td>{esc(item.get('label', key))}</td><td>{esc(item.get('value', ''))} {esc(item.get('unit', ''))}</td><td>{esc(item.get('state', ''))}</td></tr>" for key, item in requirements.items()) or "<tr><td colspan='3' class='muted'>暂无需求快照</td></tr>"
         missing = json.loads(rfq["missing_json"])
         missing_html = f"<div class='error'>待补充：{esc('、'.join(missing))}</div>" if missing else "<div class='notice'>提交字段完整，仍不等于系统自动承诺可报价。</div>"
-        revision_rows = "".join(
-            f"<tr><td>v{item['revision']}</td><td>{esc(item['created_at'])}</td><td>{esc(item['actor'])}</td>"
-            f"<td>{esc(history_product['model'] if history_product else '未指定')}</td><td>{esc(data['contact_email'] or data['contact_phone'] or '未提供')}</td><td>{esc(data['quantity'] or '待补充')}</td>"
-            f"<td>{esc(data['destination'] or '待补充')}</td><td>{esc(data['notes'] or '无')}</td></tr>"
-            for item in self.db.list_rfq_revisions(self.tenant_id, rfq_id)
-            for data in [json.loads(item["content_json"])]
-            for history_product in [self.db.get_product(self.tenant_id, data["product_id"]) if data["product_id"] else None]
-        )
+        revision_rows = []
+        previous_data = None
+        diff_labels = (("product_id", "型号"), ("contact_email", "邮箱"), ("contact_phone", "电话"), ("quantity", "数量"), ("destination", "目的地"), ("requested_delivery", "期望交期"), ("notes", "说明"))
+        for item in self.db.list_rfq_revisions(self.tenant_id, rfq_id):
+            data = json.loads(item["content_json"])
+            history_product = self.db.get_product(self.tenant_id, data["product_id"]) if data["product_id"] else None
+            if previous_data is None:
+                diff_text = "初次提交"
+            else:
+                pieces = []
+                for key, label in diff_labels:
+                    old_value = previous_data.get(key)
+                    new_value = data.get(key)
+                    if key == "product_id":
+                        old_product = self.db.get_product(self.tenant_id, old_value) if old_value else None
+                        new_product = self.db.get_product(self.tenant_id, new_value) if new_value else None
+                        old_value = old_product["model"] if old_product else ""
+                        new_value = new_product["model"] if new_product else ""
+                    old_text = str(old_value or "").strip()
+                    new_text = str(new_value or "").strip()
+                    if old_text != new_text:
+                        pieces.append(f"{label}：{esc(old_text or '未提供')} → {esc(new_text or '未提供')}")
+                diff_text = "；".join(pieces) or "无字段变化"
+            revision_rows.append(
+                f"<tr><td>v{item['revision']}</td><td>{esc(item['created_at'])}</td><td>{esc(item['actor'])}</td><td>{diff_text}</td>"
+                f"<td>{esc(history_product['model'] if history_product else '未指定')}</td><td>{esc(data['contact_email'] or data['contact_phone'] or '未提供')}</td><td>{esc(data['quantity'] or '待补充')}</td>"
+                f"<td>{esc(data['destination'] or '待补充')}</td><td>{esc(data['notes'] or '无')}</td></tr>"
+            )
+            previous_data = data
+        revision_rows = "".join(revision_rows)
         body = f"""
 <div class='toolbar'><div><a href='/admin/rfqs'>← 返回 RFQ 列表</a><h1>RFQ {esc(rfq['id'])}</h1><div class='muted'>状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])}</div></div></div>
 {missing_html}
 <div class='grid'><section class='card'><h2>联系人（后台可见）</h2><p><b>姓名：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p></section><section class='card'><h2>询价信息</h2><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'}</p><p><b>目的地：</b>{esc(rfq['destination']) or '待补充'}</p><p><b>期望交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>补充说明：</b>{esc(rfq['notes']) or '无'}</p></section></div>
 <section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>
-<section class='card' style='margin-top:18px'><h2>RFQ 提交与修改记录（仅卖方可见）</h2><table><thead><tr><th>版本</th><th>时间</th><th>修改者</th><th>型号</th><th>联系</th><th>数量</th><th>目的地</th><th>说明</th></tr></thead><tbody>{revision_rows}</tbody></table></section>
+<section class='card' style='margin-top:18px'><h2>RFQ 提交与修改记录（仅卖方可见）</h2><table><thead><tr><th>版本</th><th>时间</th><th>修改者</th><th>变更内容（相对上一版）</th><th>型号</th><th>联系</th><th>数量</th><th>目的地</th><th>说明</th></tr></thead><tbody>{revision_rows}</tbody></table></section>
 <div class='footer-note'>该 RFQ 保存了提交时的需求、推荐和产品版本快照；后续产品更新不会静默改写这条历史询价。</div>
 """
         self.send_html(layout("RFQ 详情", body), 200)
@@ -3647,7 +3705,10 @@ class Handler(BaseHTTPRequestHandler):
             rows.append(
                 f"<tr><td><a href='/admin/sales/{record['id']}'>{esc(record['id'])}</a><br><span class='muted'>{esc(record['company'] or record['contact_email'] or '未提供联系人')}</span></td>"
                 f"<td>{esc(record['model'] or '未指定型号')}</td><td><span class='badge'>{esc(stage_labels.get(record['stage'], record['stage'] or '未分配'))}</span></td>"
-                f"<td>{esc(record['owner'] or '未分配')}</td><td>{follow_up}</td><td>{esc(record['status'])}</td></tr>"
+                f"<td>{esc(record['owner'] or '未分配')}</td><td>{follow_up}</td>"
+                f"<td>{esc(record['status'])}"
+                + (f" <span class='badge pending_review'>买方已修改 {record['buyer_revision_count']} 次</span><br><span class='field-state'>最近 {esc(record['last_revision_at'] or '')}</span>" if record["buyer_revision_count"] else "")
+                + "</td></tr>"
             )
         table = "".join(rows) or "<tr><td colspan='6' class='muted'>暂无销售线索。买方提交 RFQ 后会进入这里。</td></tr>"
         body = f"""
@@ -3665,6 +3726,12 @@ class Handler(BaseHTTPRequestHandler):
         snapshot = json.loads(rfq["snapshot_json"])
         preference = self.db.get_contact_preference(self.tenant_id, rfq["conversation_id"])
         stop_banner = f"<div class='error'><b>停止主动联系</b> · 买方要求：{esc(preference['stop_reason'])} · {esc(preference['stopped_at'])}<br>不得安排主动跟进；买方主动发问仍可回应。</div>" if preference["stop_proactive_contact"] else ""
+        detail_revisions = self.db.list_rfq_revisions(self.tenant_id, rfq_id)
+        buyer_revision_count = max(len(detail_revisions) - 1, 0)
+        change_banner = (
+            f"<div class='notice'><b>买方已修改此询价 {buyer_revision_count} 次</b>（最近 {esc(detail_revisions[-1]['created_at'])}）。按最新内容处理即可；"
+            f"<a href='/admin/rfqs/{rfq_id}'>查看初次提交与逐次变更对比</a>。</div>"
+        ) if buyer_revision_count else ""
         stop_form = f"<form method='post' action='/admin/sales/{rfq_id}/contact-stop'><label>记录买方在其他渠道提出的停止主动联系原话</label><textarea name='reason' required></textarea><button class='danger'>记录并停止主动跟进</button></form>" if not preference["stop_proactive_contact"] and self.user_role in {"sales", "admin"} else ""
         followup_disabled = "disabled" if preference["stop_proactive_contact"] else ""
         requirements = snapshot.get("requirements", {})
@@ -3689,6 +3756,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class='toolbar'><div><a href='/admin/sales'>← 返回销售工作台</a><h1>销售线索 {esc(rfq['id'])}</h1><div class='muted'>RFQ 状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])}</div></div></div>
 {notice}
 {stop_banner}
+{change_banner}
 <div class='grid'><section class='card'><h2>线索处理</h2><p><b>会话负责人：</b>{esc(lead['owner'] or '未领取')}</p>{claim_action}{assign_action}<form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}' {followup_disabled}><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
 {stop_form}
 <section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>

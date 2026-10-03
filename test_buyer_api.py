@@ -3,6 +3,7 @@ import json
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -538,6 +539,101 @@ class BuyerApiTests(unittest.TestCase):
         self.assertIsNone(swept["requirement_draft"]["next_question"])
         self.assertIn("head", swept["requirement_draft"]["missing"])
         self.assertIn("media", swept["requirement_draft"]["missing"])
+
+    def test_human_requests_concurrent_dedupe_creates_single_task(self):
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        _, _, unresolved = self.request("POST", path + "/questions", {"question": "Can this handle my application?"}, headers)
+        body = {"answer_id": unresolved["answer_id"], "reply_path": "conversation"}
+        barrier = threading.Barrier(2)
+
+        def request_human(_):
+            barrier.wait(timeout=5)
+            return self.request("POST", path + "/human-requests", body, headers)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(request_human, range(2)))
+        statuses = [status for status, _, _ in results]
+        self.assertTrue(all(status in (200, 201) for status in statuses), statuses)
+        task_ids = {payload["task_id"] for _, _, payload in results}
+        self.assertEqual(len(task_ids), 1)
+        self.assertEqual(len(self.db.list_human_tasks("demo-tenant")), 1)
+
+    def test_concurrent_rfq_revisions_keep_single_next_revision(self):
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        auth = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        _, _, first = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "quantity": "2"}, {**auth, "Idempotency-Key": "init-conc"})
+        rfq_id = first["rfq_id"]
+        revision = {"expected_revision": 1, "contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "quantity": "3"}
+        barrier = threading.Barrier(2)
+
+        def revise(key):
+            barrier.wait(timeout=5)
+            return self.request("POST", path + f"/rfqs/{rfq_id}/revisions", revision, {**auth, "Idempotency-Key": key})
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(revise, ("conc-a", "conc-b")))
+        statuses = sorted(status for status, _, _ in results)
+        self.assertEqual(statuses, [201, 409])
+        self.assertEqual(self.db.get_rfq("demo-tenant", rfq_id)["current_revision"], 2)
+        self.assertEqual(len(self.db.list_rfq_revisions("demo-tenant", rfq_id)), 2)
+
+    def test_same_model_rfq_hint_within_24h_same_conversation(self):
+        self.db.seed_demo_products("demo-tenant")
+        product = self.db.list_products("demo-tenant")[0]
+        approve_all_fields(self.db, "demo-tenant", product["id"])
+        self.db.publish_product("demo-tenant", product["id"])
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        payload = {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "product_id": product["id"]}
+        _, _, first = self.request("POST", path + "/rfqs", payload, {**headers, "Idempotency-Key": "hint-1"})
+        self.assertEqual(first["related_rfq_hint"], [])
+        _, _, second = self.request("POST", path + "/rfqs", {**payload, "notes": "second request"}, {**headers, "Idempotency-Key": "hint-2"})
+        self.assertEqual(len(second["related_rfq_hint"]), 1)
+        self.assertEqual(second["related_rfq_hint"][0]["rfq_id"], first["rfq_id"])
+        # 独立采购请求仍建立独立编号，不自动合并
+        self.assertNotEqual(second["rfq_id"], first["rfq_id"])
+        self.assertEqual(len(self.db.list_rfqs("demo-tenant")), 2)
+        # 未选型号的 RFQ 不产生同型号提示
+        _, _, third = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "notes": "no model"}, {**headers, "Idempotency-Key": "hint-3"})
+        self.assertEqual(third["related_rfq_hint"], [])
+        # 跨会话不提示（提示只检查同一会话）
+        _, _, other = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        _, _, cross = self.request(
+            "POST", f"/api/v1/buyer/conversations/{other['conversation_id']}/rfqs", payload,
+            {"X-Site-Key": "site-a", "Authorization": f"Bearer {other['access_token']}", "Idempotency-Key": "hint-4"},
+        )
+        self.assertEqual(cross["related_rfq_hint"], [])
+
+    def test_sales_sees_change_alert_and_revision_diffs(self):
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        _, _, first = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "quantity": "2"}, "notes": "First"}, {**headers, "Idempotency-Key": "alert-1"})
+        rfq_id = first["rfq_id"]
+        _, admin_headers, _ = self.form_request("POST", "/login", {"email": "demo-admin@example.invalid", "password": "demo-admin"})
+        cookie = admin_headers["Set-Cookie"].split(";", 1)[0]
+        _, _, list_before = self.form_request("GET", "/admin/sales", cookie=cookie)
+        self.assertNotIn("买方已修改", list_before)
+        _, _, updated = self.request("POST", path + f"/rfqs/{rfq_id}/revisions", {"expected_revision": 1, "contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "quantity": "3", "notes": "Updated"}, {**headers, "Idempotency-Key": "alert-2"})
+        self.assertEqual(updated["current_revision"], 2)
+        _, _, list_after = self.form_request("GET", "/admin/sales", cookie=cookie)
+        self.assertIn("买方已修改 1 次", list_after)
+        _, _, detail = self.form_request("GET", f"/admin/sales/{rfq_id}", cookie=cookie)
+        self.assertIn("买方已修改此询价 1 次", detail)
+        _, _, rfq_page = self.form_request("GET", f"/admin/rfqs/{rfq_id}", cookie=cookie)
+        self.assertIn("初次提交", rfq_page)
+        self.assertIn("数量：2 → 3", rfq_page)
+        self.assertIn("说明：First → Updated", rfq_page)
+        # 买方只读取当前内容，不暴露卖方历史对比
+        _, _, conv = self.request("GET", path, headers=headers)
+        rfq_view = conv["rfqs"][0]
+        self.assertEqual(rfq_view["quantity"], "3")
+        self.assertEqual(rfq_view["notes"], "Updated")
+        self.assertNotIn("revisions", rfq_view)
 
     def test_buyer_edits_same_rfq_with_seller_history_and_stale_revision_conflict(self):
         self.db.seed_demo_products("demo-tenant")

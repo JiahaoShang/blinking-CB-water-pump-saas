@@ -250,9 +250,14 @@ function showRfqForm(rfq = null) {
     if (!confirmed.checked || (!email.value.trim() && !phone.value.trim())) { showNotice(t('contact')); return; }
     submit.disabled = true;
     try {
-      if (rfq) await api(`/conversations/${conversationId}/rfqs/${rfq.id}/revisions`, 'POST', { expected_revision: rfq.current_revision, contact_confirmed: true, contact: { contact_email: email.value.trim(), contact_phone: phone.value.trim() }, quantity: quantity.value.trim(), destination: destination.value.trim(), notes: notes.value.trim() }, { 'Idempotency-Key': submissionKey });
-      else await api(`/conversations/${conversationId}/rfqs`, 'POST', { entry_surface: 'chat', contact_confirmed: true, contact: { contact_email: email.value.trim(), contact_phone: phone.value.trim(), quantity: quantity.value.trim(), region: destination.value.trim() }, notes: notes.value.trim() }, { 'Idempotency-Key': submissionKey });
+      const saved = rfq
+        ? await api(`/conversations/${conversationId}/rfqs/${rfq.id}/revisions`, 'POST', { expected_revision: rfq.current_revision, contact_confirmed: true, contact: { contact_email: email.value.trim(), contact_phone: phone.value.trim() }, quantity: quantity.value.trim(), destination: destination.value.trim(), notes: notes.value.trim() }, { 'Idempotency-Key': submissionKey })
+        : await api(`/conversations/${conversationId}/rfqs`, 'POST', { entry_surface: 'chat', contact_confirmed: true, contact: { contact_email: email.value.trim(), contact_phone: phone.value.trim(), quantity: quantity.value.trim(), region: destination.value.trim() }, notes: notes.value.trim() }, { 'Idempotency-Key': submissionKey });
       await refresh();
+      if (!rfq && saved?.related_rfq_hint?.length) {
+        showNotice((locale === 'zh' ? '本会话 24 小时内已有同型号询价（不会自动合并，请检查是否相关）：' : 'A same-model RFQ from this conversation exists within 24h (no auto-merge; please check if related): ')
+          + saved.related_rfq_hint.map((item) => `${item.rfq_id.slice(0, 8)} · v${item.current_revision}`).join('；'));
+      }
     } catch (error) { submit.disabled = false; showNotice(error.message || t('error')); }
   });
   card.append(form); log.scrollTop = log.scrollHeight;
