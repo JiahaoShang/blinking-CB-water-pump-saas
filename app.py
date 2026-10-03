@@ -2294,6 +2294,7 @@ CONSOLE_CSS = """
 .console .summary-strip{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}
 .console .summary-strip span{font-size:12px;background:rgba(139,92,246,.08);border:1px solid var(--line);border-radius:999px;padding:5px 11px;color:#cfc7e6}
 .console .muted-block{background:rgba(20,17,33,.6);border:1px solid var(--line);border-radius:10px;padding:13px 15px;font-size:13px;color:var(--muted)}
+.console .quote{border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:0 10px 10px 0;background:rgba(139,92,246,.06);padding:12px 14px;font-size:14px;line-height:1.7;margin:0 0 12px}
 .console .guide{font-size:12px;color:var(--muted);margin-top:8px}
 .console .detail-toggle{border-top:1px solid var(--line);margin-top:14px;padding-top:12px;font-size:13px}
 .console .detail-toggle summary{cursor:pointer;color:#c4b5fd;font-weight:700;list-style:none}
@@ -4098,13 +4099,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def admin_tasks(self, query: dict[str, list[str]]) -> None:
         tasks = self.db.list_human_tasks(self.tenant_id, query.get("status", [""])[0] or None)
-        rows = "".join(
-            f"<tr><td><a href='/admin/tasks/{task['id']}'>{esc(task['question'])}</a></td><td>{esc(task['model'] or '未指定型号')}</td><td><span class='badge'>{esc(task['status'])}</span></td><td>{esc(task['created_at'])}</td></tr>"
+        items = "".join(
+            f"<div class='simple-item'><div><strong>{esc(task['question'])}</strong>"
+            f"<small>{esc(task['model'] or '未指定型号')} · <span class='badge'>{esc(task['status'])}</span> · {esc(task['created_at'])}</small></div>"
+            f"<div class='actions'><a class='button{'' if task['status'] == 'pending' else ' secondary'}' href='/admin/tasks/{task['id']}'>{'处理 →' if task['status'] == 'pending' else '查看 →'}</a></div></div>"
             for task in tasks
-        ) or "<tr><td colspan='4' class='muted'>暂无人工任务。资料外问题或无法确认的问题会出现在这里。</td></tr>"
+        ) or "<div class='muted-block'>暂无人工任务。资料外问题或无法确认的问题会出现在这里。</div>"
         body = f"""
 <div class='toolbar'><div><h1>人工任务</h1><div class='muted'>只处理当前演示企业的会话问题；工程师回复不会自动写入产品通用知识。</div></div><div><a class='button secondary' href='/admin/tasks?status=pending'>待处理</a> <a class='button secondary' href='/admin/tasks'>全部</a></div></div>
-<section class='card'><table><thead><tr><th>问题</th><th>型号</th><th>状态</th><th>创建时间</th></tr></thead><tbody>{rows}</tbody></table></section>
+<section class='card'><div class='panel-title'><h2>任务列表</h2><span class='muted'>先处理"待处理"的任务</span></div><div class='simple-list'>{items}</div></section>
 """
         self.send_html(self.console_page("人工任务", body, "tasks"), 200)
 
@@ -4125,23 +4128,36 @@ class Handler(BaseHTTPRequestHandler):
             response_area = "<p class='muted'>等待买方在原会话补充；收到后可继续答复或再次追问。</p>"
         else:
             response_area = f"<form method='post' action='/admin/tasks/{task_id}/followup'><label>向买方追问工况</label><textarea name='question' required placeholder='仅询问处理此任务所需的条件'></textarea><p><button class='secondary'>发送追问并等待买方</button></p></form><hr><form method='post' action='/admin/tasks/{task_id}/reply'><label>工程师最终答复 *</label><textarea name='response' required placeholder='只回答本次询盘，并说明依据或仍需确认的边界。'></textarea><p><button>提交回复并关闭任务</button></p></form>"
+        if task["status"] == "resolved":
+            focus_label, focus_title, focus_text = "任务已完成", "人工答复已回到买家的原会话", "如该答复需要成为通用资料，必须回到产品资料核准流程；任务无需重复创建。"
+            focus_actions = ""
+        elif task["status"] == "waiting_buyer":
+            focus_label, focus_title, focus_text = "当前等待 · 买家补充", "追问已发送到原会话，等待买家回复", "买家补充后会继续处理同一个任务。"
+            focus_actions = ""
+        else:
+            focus_label, focus_title, focus_text = "当前任务 · 待答复", "回答买家的实际问题", "先阅读原问题与工况，再决定追问或直接答复；答复会回到买家的原会话。"
+            focus_actions = "<a class='button' href='#handle'>去处理 →</a>"
+        focus_html = f"<div class='focus'><div><span class='focus-label'>{esc(focus_label)}</span><strong>{esc(focus_title)}</strong><p>{esc(focus_text)}</p></div><div class='actions'>{focus_actions}</div></div>"
         body = f"""
-<div class='toolbar'><div><a href='/admin/tasks'>← 返回人工任务</a><h1>人工接管任务</h1><div class='muted'>状态：{esc(task['status'])} · 会话：{esc(task['conversation_id'])}</div></div></div>
+<div class='toolbar'><div><a href='/admin/tasks'>← 返回人工任务</a><h1>人工接管任务</h1><div class='muted'>状态：{esc(task['status'])} · 会话：{esc(task['conversation_id'])} · {esc(task['created_at'])}</div></div></div>
 {notice}
-<div class='grid'><section class='card'><h2>问题上下文</h2><p><b>原问题：</b>{esc(task['question'])}</p><p><b>型号：</b>{esc(task['model'] or '未指定')}</p><p><b>转人工原因：</b>{esc(task['reason'])}</p><p><b>已有回答：</b>{esc(context.get('answer_so_far', ''))}</p></section><section class='card'><h2>已确认工况</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section></div>
-<section class='card' style='margin-top:18px'><h2>工程师处理</h2>{followup_rows}{response_area}<p class='muted'>该回复只属于当前会话；如果要成为通用资料，必须回到产品资料核准流程。</p></section>
+{focus_html}
+<div class='grid'><section class='card'><h2>买家要解决的问题</h2><div class='quote'>“{esc(task['question'])}”</div><div class='compact-facts'><div><small>型号</small><strong>{esc(task['model'] or '未指定')}</strong></div><div><small>转人工原因</small><strong>{esc(task['reason'])}</strong></div></div><p class='muted'><b>已有回答：</b>{esc(context.get('answer_so_far', ''))}</p><details class='detail-toggle'><summary>查看已确认工况</summary><div><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></div></details></section>
+<section class='card' id='handle'><h2>工程师处理</h2>{followup_rows}{response_area}<p class='muted'>该回复只属于当前会话；如果要成为通用资料，必须回到产品资料核准流程。</p></section></div>
 """
         self.send_html(self.console_page("人工接管任务", body, "tasks"), 200)
 
     def admin_rfqs(self, query: dict[str, list[str]]) -> None:
         rfqs = self.db.list_rfqs(self.tenant_id)
-        rows = "".join(
-            f"<tr><td><a href='/admin/rfqs/{rfq['id']}'>{esc(rfq['id'])}</a></td><td>{esc(rfq['model'] or '未指定型号')}</td><td>{esc(rfq['contact_email'] or '未提供')}</td><td><span class='badge'>{esc(rfq['status'])}</span></td><td>{esc(rfq['created_at'])}</td></tr>"
+        items = "".join(
+            f"<div class='simple-item'><div><strong>{esc(rfq['id'])} · {esc(rfq['model'] or '未指定型号')}</strong>"
+            f"<small>{esc(rfq['contact_email'] or '未提供联系人')} · <span class='badge'>{esc(rfq['status'])}</span> · {esc(rfq['created_at'])}</small></div>"
+            f"<div class='actions'><a class='button secondary' href='/admin/rfqs/{rfq['id']}'>查看 →</a></div></div>"
             for rfq in rfqs
-        ) or "<tr><td colspan='5' class='muted'>暂无 RFQ。买方提交询价后会出现在这里。</td></tr>"
+        ) or "<div class='muted-block'>暂无 RFQ。买方提交询价后会出现在这里。</div>"
         body = f"""
-<div class='toolbar'><div><h1>RFQ 询价记录</h1><div class='muted'>当前仅展示所属企业记录；完整负责人、阶段和跟进操作将在销售工作台切片中加入。</div></div></div>
-<section class='card'><table><thead><tr><th>记录编号</th><th>型号</th><th>联系人</th><th>状态</th><th>提交时间</th></tr></thead><tbody>{rows}</tbody></table></section>
+<div class='toolbar'><div><h1>RFQ 询价记录</h1><div class='muted'>买方提交的询价原记录；负责人、阶段与跟进操作在销售工作台处理。</div></div></div>
+<section class='card'><div class='panel-title'><h2>询价列表</h2><span class='muted'>按提交时间倒序</span></div><div class='simple-list'>{items}</div></section>
 """
         self.send_html(self.console_page("RFQ 询价记录", body, "rfqs"), 200)
 
@@ -4155,6 +4171,11 @@ class Handler(BaseHTTPRequestHandler):
         requirement_rows = "".join(f"<tr><td>{esc(item.get('label', key))}</td><td>{esc(item.get('value', ''))} {esc(item.get('unit', ''))}</td><td>{esc(item.get('state', ''))}</td></tr>" for key, item in requirements.items()) or "<tr><td colspan='3' class='muted'>暂无需求快照</td></tr>"
         missing = json.loads(rfq["missing_json"])
         missing_html = f"<div class='error'>待补充：{esc('、'.join(missing))}</div>" if missing else "<div class='notice'>提交字段完整，仍不等于系统自动承诺可报价。</div>"
+        if missing:
+            focus_label, focus_title, focus_text = "当前状态 · 待补充", f"这份询价还缺：{'、'.join(missing)}", "买方在原页面补充后会生成新版本；逐次变更见下方记录。"
+        else:
+            focus_label, focus_title, focus_text = "当前状态 · 字段完整", "提交字段完整，仍不等于自动承诺可报价", "如需调整商务信息，由买家在原页面修改同一张询价。"
+        focus_html = f"<div class='focus'><div><span class='focus-label'>{esc(focus_label)}</span><strong>{esc(focus_title)}</strong><p>{esc(focus_text)}</p></div><div class='actions'></div></div>"
         revision_rows = []
         previous_data = None
         diff_labels = (("product_id", "型号"), ("contact_email", "邮箱"), ("contact_phone", "电话"), ("quantity", "数量"), ("destination", "目的地"), ("requested_delivery", "期望交期"), ("notes", "说明"))
@@ -4186,8 +4207,8 @@ class Handler(BaseHTTPRequestHandler):
             previous_data = data
         revision_rows = "".join(revision_rows)
         body = f"""
-<div class='toolbar'><div><a href='/admin/rfqs'>← 返回 RFQ 列表</a><h1>RFQ {esc(rfq['id'])}</h1><div class='muted'>状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])}</div></div></div>
-{missing_html}
+<div class='toolbar'><div><a href='/admin/rfqs'>← 返回 RFQ 列表</a><h1>RFQ {esc(rfq['id'])}</h1><div class='muted'>状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])} · {esc(rfq['created_at'])}</div></div></div>
+{focus_html}
 <div class='grid'><section class='card'><h2>联系人（后台可见）</h2><p><b>姓名：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p></section><section class='card'><h2>询价信息</h2><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'}</p><p><b>目的地：</b>{esc(rfq['destination']) or '待补充'}</p><p><b>期望交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>补充说明：</b>{esc(rfq['notes']) or '无'}</p></section></div>
 <section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>
 <section class='card' style='margin-top:18px'><h2>RFQ 提交与修改记录（仅卖方可见）</h2><table><thead><tr><th>版本</th><th>时间</th><th>修改者</th><th>变更内容（相对上一版）</th><th>型号</th><th>联系</th><th>数量</th><th>目的地</th><th>说明</th></tr></thead><tbody>{revision_rows}</tbody></table></section>
@@ -4199,24 +4220,22 @@ class Handler(BaseHTTPRequestHandler):
         records = self.db.list_sales_records(self.tenant_id)
         today = datetime.now(timezone.utc).date().isoformat()
         stage_labels = {"new": "新线索", "needs_info": "待补充", "technical_review": "技术确认中", "quote_ready": "可进入报价", "paused": "暂缓", "closed": "已关闭"}
-        rows = []
+        items = []
         for record in records:
             overdue = bool(record["next_follow_up"] and record["next_follow_up"] < today and record["stage"] not in ("closed", "paused") and not record["stop_proactive_contact"])
             follow_up = f"<span class='badge withdrawn'>逾期 {esc(record['next_follow_up'])}</span>" if overdue else esc(record["next_follow_up"] or "未安排")
             if record["stop_proactive_contact"]:
                 follow_up = "<span class='badge withdrawn'>停止主动联系</span>"
-            rows.append(
-                f"<tr><td><a href='/admin/sales/{record['id']}'>{esc(record['id'])}</a><br><span class='muted'>{esc(record['company'] or record['contact_email'] or '未提供联系人')}</span></td>"
-                f"<td>{esc(record['model'] or '未指定型号')}</td><td><span class='badge'>{esc(stage_labels.get(record['stage'], record['stage'] or '未分配'))}</span></td>"
-                f"<td>{esc(record['owner'] or '未分配')}</td><td>{follow_up}</td>"
-                f"<td>{esc(record['status'])}"
-                + (f" <span class='badge pending_review'>买方已修改 {record['buyer_revision_count']} 次</span><br><span class='field-state'>最近 {esc(record['last_revision_at'] or '')}</span>" if record["buyer_revision_count"] else "")
-                + "</td></tr>"
+            changed = (f"<span class='badge pending_review'>买方已修改 {record['buyer_revision_count']} 次</span>" if record["buyer_revision_count"] else "")
+            items.append(
+                f"<div class='simple-item'><div><strong>{esc(record['id'])} · {esc(record['model'] or '未指定型号')} <span class='badge'>{esc(stage_labels.get(record['stage'], record['stage'] or '未分配'))}</span></strong>"
+                f"<small>{esc(record['company'] or record['contact_email'] or '未提供联系人')} · 负责人：{esc(record['owner'] or '未分配')} · 跟进：{follow_up} · RFQ：{esc(record['status'])} {changed}</small></div>"
+                f"<div class='actions'><a class='button' href='/admin/sales/{record['id']}'>打开线索 →</a></div></div>"
             )
-        table = "".join(rows) or "<tr><td colspan='6' class='muted'>暂无销售线索。买方提交 RFQ 后会进入这里。</td></tr>"
+        items_html = "".join(items) or "<div class='muted-block'>暂无销售线索。买方提交 RFQ 后会进入这里。</div>"
         body = f"""
 <div class='toolbar'><div><h1>销售工作台</h1><div class='muted'>统一查看 RFQ、需求、推荐、问答和人工任务；当前企业：示例水泵企业（演示）</div></div><a class='button secondary' href='/admin/rfqs'>RFQ 原始记录</a></div>
-<section class='card'><table><thead><tr><th>线索 / 联系人</th><th>型号</th><th>阶段</th><th>负责人</th><th>跟进日期</th><th>RFQ 状态</th></tr></thead><tbody>{table}</tbody></table></section>
+<section class='card'><div class='panel-title'><h2>线索列表</h2><span class='muted'>领取或接手的线索从这里打开处理</span></div><div class='simple-list'>{items_html}</div></section>
 """
         self.send_html(self.console_page("销售工作台", body, "sales"), 200)
 
@@ -4255,16 +4274,33 @@ class Handler(BaseHTTPRequestHandler):
             recommendation_html = f"<p><b>推荐型号：</b>{esc(recommendation.get('model'))}</p><p><b>产品版本：</b>v{esc(recommendation.get('product_version'))}</p><p><b>满足项：</b>{esc('；'.join(recommendation.get('satisfies', [])) or '—')}</p><p><b>冲突项：</b>{esc('；'.join(recommendation.get('conflicts', [])) or '—')}</p><a href='{esc(recommendation.get('detail_url', '#'))}' target='_blank'>打开产品页</a>"
         else:
             recommendation_html = "<p class='muted'>暂无推荐快照。</p>"
+        if preference["stop_proactive_contact"]:
+            focus_label, focus_title, focus_text = "注意 · 已停止主动联系", "买方要求不再被主动联系", f"原话：{preference['stop_reason']}；买方主动发问时仍可回应，不得安排主动跟进。"
+            focus_actions = ""
+        elif not lead["owner"] and self.user_role == "sales":
+            focus_label, focus_title, focus_text = "当前任务 · 领取", "先认领这位买家的线索", "同一段咨询由一位销售负责；关联的询价单各自处理。"
+            focus_actions = claim_action
+        elif not lead["owner"]:
+            focus_label, focus_title, focus_text = "当前任务 · 分配", "把这条线索分配给一位销售", "同一段咨询由一位销售负责；关联的询价单各自处理。"
+            focus_actions = assign_action
+        elif buyer_revision_count:
+            focus_label, focus_title, focus_text = "当前任务 · 处理变更", f"买方已修改此询价 {buyer_revision_count} 次", "按最新内容处理即可；逐次变更对比在 RFQ 详情页。"
+            focus_actions = f"<a class='button secondary' href='/admin/rfqs/{rfq_id}'>查看变更 →</a>"
+        else:
+            focus_label, focus_title, focus_text = "当前任务 · 跟进", "处理这份采购请求", "核对阶段与跟进日期；联系买家前注意其主动联系授权。"
+            focus_actions = ""
+        focus_html = f"<div class='focus'><div><span class='focus-label'>{esc(focus_label)}</span><strong>{esc(focus_title)}</strong><p>{esc(focus_text)}</p></div><div class='actions'>{focus_actions}</div></div>"
         body = f"""
-<div class='toolbar'><div><a href='/admin/sales'>← 返回销售工作台</a><h1>销售线索 {esc(rfq['id'])}</h1><div class='muted'>RFQ 状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])}</div></div></div>
+<div class='toolbar'><div><a href='/admin/sales'>← 返回销售工作台</a><h1>销售线索 {esc(rfq['id'])}</h1><div class='muted'>RFQ 状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])} · 当前 v{esc(rfq['current_revision'])}</div></div></div>
 {notice}
 {stop_banner}
 {change_banner}
-<div class='grid'><section class='card'><h2>线索处理</h2><p><b>会话负责人：</b>{esc(lead['owner'] or '未领取')}</p>{claim_action}{assign_action}<form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}' {followup_disabled}><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
+{focus_html}
+<div class='grid'><section class='card'><h2>线索处理</h2><p><b>会话负责人：</b>{esc(lead['owner'] or '未领取')}</p>{assign_action if lead['owner'] else ''}<form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}' {followup_disabled}><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
 {stop_form}
 <section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>
 <div class='grid' style='margin-top:18px'><section class='card'><h2>推荐快照</h2>{recommendation_html}</section><section class='card'><h2>问答与人工任务</h2>{answer_rows}{task_rows}</section></div>
-<section class='card' style='margin-top:18px'><h2>操作记录</h2>{audit_html}</section>
+<details class='detail-toggle' style='margin-top:18px'><summary>查看操作记录</summary><div>{audit_html}</div></details>
 """
         self.send_html(self.console_page("销售线索详情", body, "sales"), 200)
 
