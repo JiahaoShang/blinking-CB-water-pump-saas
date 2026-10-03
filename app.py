@@ -201,6 +201,10 @@ class Database:
                 source TEXT NOT NULL DEFAULT 'web',
                 locale TEXT NOT NULL DEFAULT 'en',
                 status TEXT NOT NULL DEFAULT 'active',
+                stop_proactive_contact INTEGER NOT NULL DEFAULT 0,
+                stop_reason TEXT NOT NULL DEFAULT '',
+                stop_source TEXT NOT NULL DEFAULT '',
+                stopped_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -331,6 +335,15 @@ class Database:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN request_hash TEXT")
         if "current_revision" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN current_revision INTEGER NOT NULL DEFAULT 1")
+        conversation_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(conversations)")}
+        for column, definition in (
+            ("stop_proactive_contact", "INTEGER NOT NULL DEFAULT 0"),
+            ("stop_reason", "TEXT NOT NULL DEFAULT ''"),
+            ("stop_source", "TEXT NOT NULL DEFAULT ''"),
+            ("stopped_at", "TEXT"),
+        ):
+            if column not in conversation_columns:
+                self.conn.execute(f"ALTER TABLE conversations ADD COLUMN {column} {definition}")
         for rfq in self.conn.execute("SELECT * FROM rfqs WHERE NOT EXISTS (SELECT 1 FROM rfq_revisions WHERE rfq_id=rfqs.id)").fetchall():
             self.conn.execute(
                 "INSERT INTO rfq_revisions(id, tenant_id, rfq_id, revision, content_json, actor, created_at) VALUES (?, ?, ?, 1, ?, 'legacy-import', ?)",
@@ -586,6 +599,27 @@ class Database:
         return self.conn.execute(
             "SELECT * FROM conversations WHERE tenant_id=? AND id=?", (tenant_id, conversation_id)
         ).fetchone()
+
+    def get_contact_preference(self, tenant_id: str, conversation_id: str) -> sqlite3.Row | None:
+        return self.get_conversation(tenant_id, conversation_id)
+
+    def stop_proactive_contact(self, tenant_id: str, conversation_id: str, reason: str, source: str, actor: str) -> bool:
+        conversation = self.get_conversation(tenant_id, conversation_id)
+        if not conversation or not reason.strip() or source not in {"buyer_chat", "seller_record"}:
+            raise ValueError("需要有效会话和买方停止联系的原话")
+        if conversation["stop_proactive_contact"]:
+            return False
+        timestamp = now_iso()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE conversations SET stop_proactive_contact=1, stop_reason=?, stop_source=?, stopped_at=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (reason.strip(), source, timestamp, timestamp, tenant_id, conversation_id),
+            )
+            self.conn.execute("UPDATE leads SET next_follow_up=NULL, updated_at=? WHERE tenant_id=? AND conversation_id=?", (timestamp, tenant_id, conversation_id))
+            if source == "buyer_chat":
+                self.save_message(tenant_id, conversation_id, "buyer", reason, "contact-stop", commit=False)
+            self._audit(tenant_id, "conversation", conversation_id, "stop_proactive_contact", actor, f"source={source};reason={reason.strip()}")
+        return True
 
     def issue_buyer_access(self, tenant_id: str, conversation_id: str) -> str:
         if not self.get_conversation(tenant_id, conversation_id):
@@ -1064,8 +1098,8 @@ class Database:
 
     def list_sales_records(self, tenant_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT r.*, p.model, l.id AS lead_id, l.stage, l.owner, l.next_follow_up, l.note, l.updated_at AS lead_updated_at "
-            "FROM rfqs r LEFT JOIN products p ON p.id=r.product_id LEFT JOIN leads l ON l.rfq_id=r.id AND l.tenant_id=r.tenant_id "
+            "SELECT r.*, p.model, l.id AS lead_id, l.stage, l.owner, l.next_follow_up, l.note, l.updated_at AS lead_updated_at, c.stop_proactive_contact "
+            "FROM rfqs r LEFT JOIN products p ON p.id=r.product_id LEFT JOIN leads l ON l.rfq_id=r.id AND l.tenant_id=r.tenant_id JOIN conversations c ON c.id=r.conversation_id AND c.tenant_id=r.tenant_id "
             "WHERE r.tenant_id=? ORDER BY CASE l.stage WHEN 'new' THEN 0 WHEN 'needs_info' THEN 1 WHEN 'technical_review' THEN 2 WHEN 'quote_ready' THEN 3 WHEN 'paused' THEN 4 ELSE 5 END, l.next_follow_up, r.created_at DESC",
             (tenant_id,),
         ).fetchall()
@@ -1129,6 +1163,9 @@ class Database:
         lead = self.get_lead_for_rfq(tenant_id, rfq_id)
         if not lead:
             raise ValueError("线索不存在")
+        preference = self.get_contact_preference(tenant_id, lead["conversation_id"])
+        if preference and preference["stop_proactive_contact"] and next_follow_up.strip():
+            raise ValueError("买方已要求停止主动联系，不能安排主动跟进日期")
         timestamp = now_iso()
         self.conn.execute(
             "UPDATE leads SET stage=?, next_follow_up=?, note=?, updated_at=? WHERE tenant_id=? AND rfq_id=?",
@@ -1959,7 +1996,7 @@ class Handler(BaseHTTPRequestHandler):
                 "results": json.loads(latest_recommendation["results_json"]), "rule_version": latest_recommendation["rule_version"],
             } if latest_recommendation else None
             self.send_json(
-                {"conversation_id": conversation["id"], "status": conversation["status"], "locale": conversation["locale"], "messages": messages, "requirement": requirement, "recommendation": recommendation, "answers": answers, "human_tasks": human_tasks, "rfqs": rfqs},
+                {"conversation_id": conversation["id"], "status": conversation["status"], "locale": conversation["locale"], "contact_preference": {"stop_proactive_contact": bool(conversation["stop_proactive_contact"]), "reason": conversation["stop_reason"], "source": conversation["stop_source"], "stopped_at": conversation["stopped_at"]}, "messages": messages, "requirement": requirement, "recommendation": recommendation, "answers": answers, "human_tasks": human_tasks, "rfqs": rfqs},
                 allowed_origin=site["allowed_origin"] if self.headers.get("Origin") else None,
             )
             return
@@ -2233,6 +2270,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json({"task_id": api_match.group(2), "status": "pending"}, 201, site["allowed_origin"] if self.headers.get("Origin") else None)
             return
+        api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/contact-preference", path)
+        if api_match:
+            access = self.api_conversation(api_match.group(1))
+            if not access:
+                return
+            payload = self.read_json()
+            if payload is None:
+                return
+            reason = payload.get("reason")
+            if payload.get("stop_proactive_contact") is not True or not isinstance(reason, str) or not reason.strip():
+                self.send_json({"error": "stop_reason_required"}, 422)
+                return
+            site, conversation = access
+            created = self.db.stop_proactive_contact(site["tenant_id"], conversation["id"], reason, "buyer_chat", "buyer")
+            self.send_json({"stop_proactive_contact": True}, 201 if created else 200, site["allowed_origin"] if self.headers.get("Origin") else None)
+            return
         api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)/rfqs", path)
         if api_match:
             access = self.api_conversation(api_match.group(1))
@@ -2467,6 +2520,17 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self.db.assign_conversation_leads(self.tenant_id, match.group(1), str(form.get("owner_email", "")), self.actor)
                 self.redirect(f"/admin/sales/{match.group(1)}?notice=assigned")
+                return
+            match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/contact-stop", path)
+            if match:
+                if self.user_role not in {"admin", "sales"}:
+                    self.send_html(layout("无权操作", "<div class='error'>只有销售或管理员可记录买方联系要求。</div>"), 403)
+                    return
+                rfq = self.db.get_rfq(self.tenant_id, match.group(1))
+                if not rfq:
+                    raise ValueError("询价不存在")
+                self.db.stop_proactive_contact(self.tenant_id, rfq["conversation_id"], str(form.get("reason", "")), "seller_record", self.actor)
+                self.redirect(f"/admin/sales/{match.group(1)}?notice=contact-stop")
                 return
             match = re.fullmatch(r"/admin/users/([a-f0-9]+)/toggle", path)
             if match:
@@ -2861,8 +2925,10 @@ class Handler(BaseHTTPRequestHandler):
         stage_labels = {"new": "新线索", "needs_info": "待补充", "technical_review": "技术确认中", "quote_ready": "可进入报价", "paused": "暂缓", "closed": "已关闭"}
         rows = []
         for record in records:
-            overdue = bool(record["next_follow_up"] and record["next_follow_up"] < today and record["stage"] not in ("closed", "paused"))
+            overdue = bool(record["next_follow_up"] and record["next_follow_up"] < today and record["stage"] not in ("closed", "paused") and not record["stop_proactive_contact"])
             follow_up = f"<span class='badge withdrawn'>逾期 {esc(record['next_follow_up'])}</span>" if overdue else esc(record["next_follow_up"] or "未安排")
+            if record["stop_proactive_contact"]:
+                follow_up = "<span class='badge withdrawn'>停止主动联系</span>"
             rows.append(
                 f"<tr><td><a href='/admin/sales/{record['id']}'>{esc(record['id'])}</a><br><span class='muted'>{esc(record['company'] or record['contact_email'] or '未提供联系人')}</span></td>"
                 f"<td>{esc(record['model'] or '未指定型号')}</td><td><span class='badge'>{esc(stage_labels.get(record['stage'], record['stage'] or '未分配'))}</span></td>"
@@ -2882,6 +2948,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(layout("线索不存在", "<div class='error'>线索不存在或不属于当前企业。</div>"), 404)
             return
         snapshot = json.loads(rfq["snapshot_json"])
+        preference = self.db.get_contact_preference(self.tenant_id, rfq["conversation_id"])
+        stop_banner = f"<div class='error'><b>停止主动联系</b> · 买方要求：{esc(preference['stop_reason'])} · {esc(preference['stopped_at'])}<br>不得安排主动跟进；买方主动发问仍可回应。</div>" if preference["stop_proactive_contact"] else ""
+        stop_form = f"<form method='post' action='/admin/sales/{rfq_id}/contact-stop'><label>记录买方在其他渠道提出的停止主动联系原话</label><textarea name='reason' required></textarea><button class='danger'>记录并停止主动跟进</button></form>" if not preference["stop_proactive_contact"] and self.user_role in {"sales", "admin"} else ""
+        followup_disabled = "disabled" if preference["stop_proactive_contact"] else ""
         requirements = snapshot.get("requirements", {})
         recommendation = snapshot.get("recommendation") or {}
         requirement_rows = "".join(f"<tr><td>{esc(item.get('label', key))}</td><td>{esc(item.get('value', ''))} {esc(item.get('unit', ''))}</td><td>{esc(item.get('state', ''))}</td></tr>" for key, item in requirements.items()) or "<tr><td colspan='3' class='muted'>暂无需求快照</td></tr>"
@@ -2903,7 +2973,9 @@ class Handler(BaseHTTPRequestHandler):
         body = f"""
 <div class='toolbar'><div><a href='/admin/sales'>← 返回销售工作台</a><h1>销售线索 {esc(rfq['id'])}</h1><div class='muted'>RFQ 状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])}</div></div></div>
 {notice}
-<div class='grid'><section class='card'><h2>线索处理</h2><p><b>会话负责人：</b>{esc(lead['owner'] or '未领取')}</p>{claim_action}{assign_action}<form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}'><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
+{stop_banner}
+<div class='grid'><section class='card'><h2>线索处理</h2><p><b>会话负责人：</b>{esc(lead['owner'] or '未领取')}</p>{claim_action}{assign_action}<form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}' {followup_disabled}><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
+{stop_form}
 <section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>
 <div class='grid' style='margin-top:18px'><section class='card'><h2>推荐快照</h2>{recommendation_html}</section><section class='card'><h2>问答与人工任务</h2>{answer_rows}{task_rows}</section></div>
 <section class='card' style='margin-top:18px'><h2>操作记录</h2>{audit_html}</section>

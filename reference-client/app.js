@@ -59,6 +59,11 @@ async function refresh() {
 function render() {
   log.replaceChildren();
   if (!current) return;
+  $('stop-contact').hidden = Boolean(current.contact_preference?.stop_proactive_contact);
+  if (current.contact_preference?.stop_proactive_contact) {
+    const banner = appendCard(locale === 'en' ? 'Proactive contact stopped' : '已停止主动联系');
+    banner.append(node('p', 'muted', current.contact_preference.reason || ''));
+  }
   for (const message of current.messages || []) {
     const bubble = node('div', `bubble ${message.role === 'buyer' ? 'buyer' : 'assistant'}`, message.content);
     if (message.source === 'human-engineer') bubble.prepend(node('small', '', locale === 'en' ? 'Engineer reply' : '工程师回复'));
@@ -211,6 +216,19 @@ $('chat-close').addEventListener('click', () => { $('chat-panel').hidden = true;
 $('connect').addEventListener('click', connect);
 $('refresh').addEventListener('click', () => refresh().catch((error) => showNotice(error.message)));
 $('show-rfq').addEventListener('click', () => showRfqForm());
+$('stop-contact').addEventListener('click', () => {
+  if (!conversationId) { showNotice(t('noSession')); return; }
+  const card = appendCard(locale === 'en' ? 'Stop proactive contact' : '停止主动联系');
+  const form = node('form');
+  const reason = node('textarea'); reason.required = true; reason.rows = 2; reason.value = locale === 'en' ? 'Please do not contact me proactively about this inquiry.' : '请不要再主动联系我讨论本次询价。'; form.append(reason);
+  const submit = node('button', '', locale === 'en' ? 'Confirm stop request' : '确认停止主动联系'); submit.type = 'submit'; form.append(submit);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    try { await api(`/conversations/${conversationId}/contact-preference`, 'POST', { stop_proactive_contact: true, reason: reason.value.trim() }); await refresh(); }
+    catch (error) { showNotice(error.message); }
+  });
+  card.append(form); log.scrollTop = log.scrollHeight;
+});
 $('message-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!conversationId) { showNotice(t('noSession')); return; }

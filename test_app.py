@@ -482,6 +482,18 @@ class SalesWorkspaceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.db.assign_conversation_leads("demo-tenant", self.rfq_id, "demo-engineer@example.invalid", "demo-sales@example.invalid")
 
+    def test_stop_contact_preserves_rfq_and_clears_proactive_followup(self):
+        rfq = self.db.get_rfq("demo-tenant", self.rfq_id)
+        self.db.update_lead("demo-tenant", self.rfq_id, "technical_review", "2026-10-20", "Call buyer", "demo-sales@example.invalid")
+        self.db.stop_proactive_contact("demo-tenant", rfq["conversation_id"], "Please do not contact me again.", "buyer_chat", "buyer")
+        preference = self.db.get_contact_preference("demo-tenant", rfq["conversation_id"])
+        self.assertEqual(preference["stop_proactive_contact"], 1)
+        self.assertEqual(preference["stop_reason"], "Please do not contact me again.")
+        self.assertIsNone(self.db.get_lead_for_rfq("demo-tenant", self.rfq_id)["next_follow_up"])
+        self.assertIsNotNone(self.db.get_rfq("demo-tenant", self.rfq_id))
+        with self.assertRaises(ValueError):
+            self.db.update_lead("demo-tenant", self.rfq_id, "technical_review", "2026-10-21", "Call buyer", "demo-sales@example.invalid")
+
     def test_sales_records_are_tenant_scoped(self):
         self.db.ensure_tenant("other-tenant")
         self.assertEqual(len(self.db.list_sales_records("other-tenant")), 0)

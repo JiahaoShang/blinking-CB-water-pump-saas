@@ -269,6 +269,26 @@ class BuyerApiTests(unittest.TestCase):
         self.assertIn("分配或改派", admin_page)
         self.assertEqual(self.form_request("POST", f"/admin/sales/{rfq_id}/assign", {"owner_email": "demo-sales@example.invalid"}, admin_cookie)[0], 303)
 
+    def test_buyer_stop_contact_is_visible_to_sales_and_blocks_followup_date(self):
+        _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
+        path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
+        _, _, submitted = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.test"}}, {**headers, "Idempotency-Key": "stop-rfq"})
+        rfq_id = submitted["rfq_id"]
+        _, sales_headers, _ = self.form_request("POST", "/login", {"email": "demo-sales@example.invalid", "password": "demo-sales"})
+        cookie = sales_headers["Set-Cookie"].split(";", 1)[0]
+        self.assertEqual(self.form_request("POST", f"/admin/sales/{rfq_id}/update", {"stage": "technical_review", "next_follow_up": "2026-10-20"}, cookie)[0], 303)
+        stop = {"stop_proactive_contact": True, "reason": "Please stop contacting me about this inquiry."}
+        self.assertEqual(self.request("POST", path + "/contact-preference", stop, headers)[0], 201)
+        self.assertEqual(self.request("POST", path + "/contact-preference", stop, headers)[0], 200)
+        _, _, current = self.request("GET", path, headers=headers)
+        self.assertTrue(current["contact_preference"]["stop_proactive_contact"])
+        self.assertEqual(sum(message["source"] == "contact-stop" for message in current["messages"]), 1)
+        self.assertIsNone(self.db.get_lead_for_rfq("demo-tenant", rfq_id)["next_follow_up"])
+        _, _, seller_page = self.form_request("GET", f"/admin/sales/{rfq_id}", cookie=cookie)
+        self.assertIn("停止主动联系", seller_page)
+        self.assertEqual(self.form_request("POST", f"/admin/sales/{rfq_id}/update", {"stage": "technical_review", "next_follow_up": "2026-10-21"}, cookie)[0], 400)
+
     def test_buyer_edits_same_rfq_with_seller_history_and_stale_revision_conflict(self):
         self.db.seed_demo_products("demo-tenant")
         product = self.db.list_products("demo-tenant")[0]

@@ -88,3 +88,5 @@ tenant ─ conversation ─ original_message ─ requirement_revision
 **2026-10-03 追问续办补记**：上段所列追问缺口已在参考客户端补齐。卖家 `POST /admin/tasks/{id}/followup` 保存工程师追问并将任务设为 `waiting_buyer`；买方凭原会话凭据调用 `POST /api/v1/buyer/conversations/{id}/human-tasks/{task_id}/responses` 补充，任务返回 `pending`。追问和回复保存在原会话消息中，来源包含同一任务 ID，双方刷新后仍可追溯；最终答复仍走原任务。状态与消息在同一事务内更新。跨来源正式官网以及旧 `/inquiry` 页面尚未因此自动验收。
 
 **2026-10-03 销售负责人补记**：`POST /admin/sales/{rfq_id}/claim` 仅本企业销售可领取尚未分配的会话，`POST /admin/sales/{rfq_id}/assign` 仅管理员可将会话分配/改派给本企业有效销售成员。同会话的多份 RFQ 各保留状态，但共享负责人；新 RFQ 继承已有负责人。旧数据库中若曾在不同 RFQ 手填不同负责人，迁移核查尚未完成；当前仍用多行同步保持约束，未改为独立会话负责人表。
+
+**2026-10-03 停止联系补记**：买方 `POST /api/v1/buyer/conversations/{id}/contact-preference` 需本会话访问凭据，提交 `stop_proactive_contact=true` 与明确原因；读取会话返回当前联系偏好。销售或管理员也可通过 `POST /admin/sales/{rfq_id}/contact-stop` 记录站外请求。数据库按会话保存状态、原因、来源与时间，清空同会话线索的 `next_follow_up`，并拒绝在停止状态下重新设置主动跟进日期；RFQ、联系人及历史不删除。买方再次主动发问可回应，但不会自动解除停止状态。现阶段站外人工联系仍依赖工作台警示和销售遵守，尚无自动外发通道。
