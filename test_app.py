@@ -16,24 +16,35 @@ class ProductApprovalTests(unittest.TestCase):
         self.db.conn.close()
         self.temp_dir.cleanup()
 
-    def test_product_requires_sources_and_approval_before_publish(self):
+    def test_limited_page_can_publish_only_reviewed_sourced_facts_and_show_gaps(self):
         product_id = self.db.create_product("demo-tenant", "T-1", "测试泵", "清水")
         source_id = self.db.add_source("demo-tenant", product_id, "manual.pdf", "PDF", "第 2 页")
-        self.db.save_field("demo-tenant", product_id, "flow_range", "10-30", "m3/h", source_id, "第 2 页")
         with self.assertRaises(ValueError):
-            self.db.publish_product("demo-tenant", product_id)
-        for key, value, unit in [
-            ("head_range", "20-40", "m"),
-            ("media", "清水", ""),
-            ("material", "铸铁", ""),
-        ]:
-            self.db.save_field("demo-tenant", product_id, key, value, unit, source_id, "第 2 页")
+            self.db.approve_product("demo-tenant", product_id)
+        self.db.save_field("demo-tenant", product_id, "flow_range", "10-30", "m3/h", source_id, "第 2 页")
+        self.db.save_field("demo-tenant", product_id, "material", "未核对材质", "", None, "")
         self.db.approve_product("demo-tenant", product_id)
         version = self.db.publish_product("demo-tenant", product_id)
         self.assertEqual(version, 1)
         product = self.db.get_product("demo-tenant", product_id)
         self.assertEqual(product["status"], "published")
-        self.assertIsNotNone(self.db.get_published_version("demo-tenant", product_id))
+        snapshot = json.loads(self.db.get_published_version("demo-tenant", product_id)["snapshot_json"])
+        self.assertEqual([item["field_key"] for item in snapshot["fields"]], ["flow_range"])
+        self.assertIn("head_range", snapshot["missing_fields"])
+        self.assertIn("material", snapshot["missing_fields"])
+        class FakeHandler:
+            db = self.db
+            tenant_id = "demo-tenant"
+            captured = None
+
+            def send_html(self, content, status=200):
+                self.captured = (content, status)
+
+        fake = FakeHandler()
+        Handler.public_product(fake, product["slug"], {"lang": ["zh"]})
+        self.assertEqual(fake.captured[1], 200)
+        self.assertIn("待补充信息", fake.captured[0])
+        self.assertNotIn("未核对材质", fake.captured[0])
 
     def test_editing_published_field_downgrades_candidate_and_preserves_version(self):
         product_id = self.db.create_product("demo-tenant", "T-2", "版本泵", "循环")
@@ -46,6 +57,19 @@ class ProductApprovalTests(unittest.TestCase):
         self.assertEqual(self.db.get_product("demo-tenant", product_id)["status"], "pending_review")
         old_version = self.db.get_published_version("demo-tenant", product_id)
         self.assertEqual(json.loads(old_version["snapshot_json"])["fields"][0]["value"], "10-30")
+        class FakeHandler:
+            db = self.db
+            tenant_id = "demo-tenant"
+            captured = None
+
+            def send_html(self, content, status=200):
+                self.captured = (content, status)
+
+        fake = FakeHandler()
+        Handler.public_product(fake, "t-2", {})
+        self.assertEqual(fake.captured[1], 200)
+        self.assertIn("10-30", fake.captured[0])
+        self.assertNotIn("12-32", fake.captured[0])
 
     def test_public_page_never_exposes_other_tenant_product(self):
         self.db.ensure_tenant("other-tenant")
@@ -70,6 +94,45 @@ class PublicPageTests(unittest.TestCase):
             self.assertEqual(fake.captured[1], 404)
             self.assertIn("尚未发布", fake.captured[0])
             fake.db.conn.close()
+
+    def test_source_file_is_not_public_without_explicit_file_permission(self):
+        with tempfile.TemporaryDirectory() as temp:
+            db = Database(Path(temp) / "app.db")
+            product_id = db.create_product("demo-tenant", "T-PUBLIC", "测试泵", "清水")
+            source_id = db.add_source("demo-tenant", product_id, "manual.pdf", "PDF", "p. 2")
+            db.save_field("demo-tenant", product_id, "flow_range", "10-30", "m³/h", source_id, "p. 2")
+            db.approve_product("demo-tenant", product_id)
+            db.publish_product("demo-tenant", product_id)
+            db.conn.execute("UPDATE source_documents SET storage_path='README.md' WHERE id=?", (source_id,))
+            db.conn.commit()
+
+            class FakeHandler:
+                tenant_id = "demo-tenant"
+                captured = None
+
+                def __init__(self, database):
+                    self.db = database
+
+                def send_html(self, content, status=200):
+                    self.captured = (content, status)
+
+                def send_bytes(self, *args):
+                    self.captured = ("file served", 200)
+
+            fake = FakeHandler(db)
+            Handler.public_product(fake, "t-public", {})
+            self.assertNotIn("下载资料", fake.captured[0])
+            Handler.public_source(fake, "t-public", source_id)
+            self.assertEqual(fake.captured[1], 404)
+            db.allow_public_source("demo-tenant", product_id, source_id, "demo-admin")
+            Handler.public_product(fake, "t-public", {})
+            self.assertIn("下载资料", fake.captured[0])
+            Handler.public_source(fake, "t-public", source_id)
+            self.assertEqual(fake.captured[1], 200)
+            db.revoke_public_source("demo-tenant", product_id, source_id, "demo-admin")
+            Handler.public_source(fake, "t-public", source_id)
+            self.assertEqual(fake.captured[1], 404)
+            db.conn.close()
 
 
 class RequirementMatchingTests(unittest.TestCase):

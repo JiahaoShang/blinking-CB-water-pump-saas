@@ -139,6 +139,13 @@ class Database:
                 processing_status TEXT NOT NULL DEFAULT 'registered',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS public_source_permissions (
+                source_id TEXT PRIMARY KEY REFERENCES source_documents(id),
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                product_id TEXT NOT NULL REFERENCES products(id),
+                approved_by TEXT NOT NULL,
+                approved_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS product_fields (
                 id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -453,6 +460,38 @@ class Database:
             "SELECT * FROM source_documents WHERE tenant_id=? AND product_id=? ORDER BY created_at DESC",
             (tenant_id, product_id),
         ).fetchall()
+
+    def public_source_ids(self, tenant_id: str, product_id: str) -> set[str]:
+        return {row["source_id"] for row in self.conn.execute(
+            "SELECT source_id FROM public_source_permissions WHERE tenant_id=? AND product_id=?",
+            (tenant_id, product_id),
+        )}
+
+    def allow_public_source(self, tenant_id: str, product_id: str, source_id: str, actor: str) -> None:
+        source = self.conn.execute(
+            "SELECT id, storage_path FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
+            (tenant_id, product_id, source_id),
+        ).fetchone()
+        version = self.get_published_version(tenant_id, product_id)
+        if not source or not source["storage_path"] or not version:
+            raise ValueError("需要已发布产品及已保存的来源文件")
+        snapshot = json.loads(version["snapshot_json"])
+        if source_id not in {field["source_document_id"] for field in snapshot["fields"]}:
+            raise ValueError("文件未关联当前已发布的核准事实")
+        self.conn.execute(
+            "INSERT OR REPLACE INTO public_source_permissions(source_id, tenant_id, product_id, approved_by, approved_at) VALUES (?, ?, ?, ?, ?)",
+            (source_id, tenant_id, product_id, actor, now_iso()),
+        )
+        self._audit(tenant_id, "source_document", source_id, "allowed_public_download", actor)
+        self.conn.commit()
+
+    def revoke_public_source(self, tenant_id: str, product_id: str, source_id: str, actor: str) -> None:
+        self.conn.execute(
+            "DELETE FROM public_source_permissions WHERE tenant_id=? AND product_id=? AND source_id=?",
+            (tenant_id, product_id, source_id),
+        )
+        self._audit(tenant_id, "source_document", source_id, "revoked_public_download", actor)
+        self.conn.commit()
 
     def get_fields(self, tenant_id: str, product_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -949,12 +988,11 @@ class Database:
         product = self.get_product(tenant_id, product_id)
         if not product:
             raise ValueError("产品不存在")
-        fields = {row["field_key"]: row for row in self.get_fields(tenant_id, product_id)}
-        missing = [FIELD_LABELS[key] for key in REQUIRED_FIELDS if key not in fields or not fields[key]["value"].strip() or not fields[key]["source_document_id"]]
-        if missing:
-            raise ValueError("必须先补齐有来源的字段：" + "、".join(missing))
+        fields = self.get_fields(tenant_id, product_id)
+        if not any(row["value"].strip() and row["source_document_id"] and row["source_location"].strip() for row in fields):
+            raise ValueError("至少需要一项有来源位置的产品事实供人工核准")
         self.conn.execute(
-            "UPDATE product_fields SET state='approved', approved_by=?, approved_at=? WHERE tenant_id=? AND product_id=? AND value <> ''",
+            "UPDATE product_fields SET state='approved', approved_by=?, approved_at=? WHERE tenant_id=? AND product_id=? AND value <> '' AND source_document_id IS NOT NULL AND source_location <> ''",
             (actor, now_iso(), tenant_id, product_id),
         )
         self.conn.execute("UPDATE products SET status='approved', updated_at=? WHERE tenant_id=? AND id=?", (now_iso(), tenant_id, product_id))
@@ -968,14 +1006,16 @@ class Database:
         if product["status"] not in ("approved", "published"):
             raise ValueError("只有已核准产品才能发布")
         fields = self.get_fields(tenant_id, product_id)
-        missing = [FIELD_LABELS[key] for key in REQUIRED_FIELDS if not any(f["field_key"] == key and f["state"] == "approved" and f["value"].strip() for f in fields)]
-        if missing:
-            raise ValueError("还有未核准字段：" + "、".join(missing))
+        approved_fields = [field for field in fields if field["state"] == "approved" and field["value"].strip() and field["source_document_id"] and field["source_location"].strip()]
+        if not approved_fields:
+            raise ValueError("没有可公开的已核准产品事实")
+        missing = [key for key in REQUIRED_FIELDS if not any(field["field_key"] == key for field in approved_fields)]
         previous = self.get_published_version(tenant_id, product_id)
         version = (previous["version"] if previous else 0) + 1
         snapshot = {
             "product": {"model": product["model"], "name": product["name"], "use_case": product["use_case"], "slug": product["slug"]},
-            "fields": [dict(field) for field in fields if field["state"] == "approved"],
+            "fields": [dict(field) for field in approved_fields],
+            "missing_fields": missing,
             "published_at": now_iso(),
         }
         if previous:
@@ -1784,6 +1824,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.db.add_source(self.tenant_id, product_id, filename or "未命名资料", str(form.get("file_type", "other")), str(form.get("source_location", "")), content, self.actor)
                 self.redirect(f"/admin/products/{product_id}?notice=source")
                 return
+            match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources/([a-f0-9]+)/(allow-public|revoke-public)", path)
+            if match:
+                product_id, source_id, action = match.groups()
+                if action == "allow-public":
+                    self.db.allow_public_source(self.tenant_id, product_id, source_id, self.actor)
+                else:
+                    self.db.revoke_public_source(self.tenant_id, product_id, source_id, self.actor)
+                self.redirect(f"/admin/products/{product_id}?notice=source-permission")
+                return
             match = re.fullmatch(r"/admin/products/([a-f0-9]+)/fields", path)
             if match:
                 product_id = match.group(1)
@@ -1818,7 +1867,7 @@ class Handler(BaseHTTPRequestHandler):
         for product in products:
             public_link = (
                 f"<a class='button secondary' href='/products/{esc(product['slug'])}' target='_blank'>打开买方页</a>"
-                if product["status"] == "published"
+                if product["status"] != "withdrawn" and self.db.get_published_version(self.tenant_id, product["id"])
                 else "<span class='muted'>未公开</span>"
             )
             row_parts.append(
@@ -1845,22 +1894,29 @@ class Handler(BaseHTTPRequestHandler):
             return
         sources = self.db.get_sources(self.tenant_id, product_id)
         fields = self.db.get_fields(self.tenant_id, product_id)
+        published_version = self.db.get_published_version(self.tenant_id, product_id)
+        published_source_ids = {field["source_document_id"] for field in json.loads(published_version["snapshot_json"])["fields"]} if published_version else set()
         notice = query.get("notice", [""])[0]
-        notice_text = {"source": "来源资料已保存。", "field": "字段已保存为候选值，需重新核准。", "approve": "产品字段已核准。", "publish": "产品版本已发布。", "withdraw": "公开版本已撤回。"}.get(notice, "")
+        notice_text = {"source": "来源资料已保存。", "source-permission": "文件公开权限已更新。", "field": "字段已保存为候选值，需重新核准。", "approve": "产品字段已核准。", "publish": "产品版本已发布。", "withdraw": "公开版本已撤回。"}.get(notice, "")
         field_rows = "".join(
             f"<tr><td><b>{esc(field['label'])}</b><br><span class='field-state'>{esc(field['field_key'])}</span></td><td>{esc(field['value'])} {esc(field['unit'])}</td><td>{status_badge(field['state'])}<br><span class='field-state'>{esc(field['source_filename'] or '未关联来源')} · {esc(field['source_location'])}</span></td></tr>"
             for field in fields
         ) or "<tr><td colspan='3' class='muted'>尚未登记字段。</td></tr>"
         source_options = "<option value=''>请选择来源</option>" + "".join(f"<option value='{esc(source['id'])}'>{esc(source['filename'])} · {esc(source['source_location'])}</option>" for source in sources)
-        source_rows = "".join(f"<div class='source'><span><b>{esc(source['filename'])}</b><br><span class='muted'>{esc(source['file_type'])} · {esc(source['source_location'])}</span></span><span class='field-state'>{esc(source['processing_status'])}</span></div>" for source in sources) or "<p class='muted'>还没有来源资料。</p>"
+        public_source_ids = self.db.public_source_ids(self.tenant_id, product_id)
+        source_rows = "".join(
+            f"<div class='source'><span><b>{esc(source['filename'])}</b><br><span class='muted'>{esc(source['file_type'])} · {esc(source['source_location'])}</span></span><span class='field-state'>{esc(source['processing_status'])} · {'公开下载已授权' if source['id'] in public_source_ids else '未授权公开下载'}</span>"
+            + (f"<form method='post' action='/admin/products/{product_id}/sources/{source['id']}/{'revoke-public' if source['id'] in public_source_ids else 'allow-public'}' class='inline'><button class='secondary'>{'撤销公开下载' if source['id'] in public_source_ids else '确认许可并开放下载'}</button></form>" if source["storage_path"] and source["id"] in published_source_ids else "")
+            + "</div>" for source in sources
+        ) or "<p class='muted'>还没有来源资料。</p>"
         field_options = "".join(f"<option value='{key}'>{esc(label)}</option>" for key, label in FIELD_LABELS.items())
-        action_buttons = f"<form method='post' action='/admin/products/{product_id}/approve' class='inline'><button>核准字段</button></form> <form method='post' action='/admin/products/{product_id}/publish' class='inline'><button class='secondary'>发布新版本</button></form>" + (f" <form method='post' action='/admin/products/{product_id}/withdraw' class='inline'><button class='danger'>撤回公开页</button></form>" if product['status'] == 'published' else "")
+        action_buttons = f"<form method='post' action='/admin/products/{product_id}/approve' class='inline'><button>核准字段</button></form> <form method='post' action='/admin/products/{product_id}/publish' class='inline'><button class='secondary'>发布新版本</button></form>" + (f" <form method='post' action='/admin/products/{product_id}/withdraw' class='inline'><button class='danger'>撤回公开页</button></form>" if published_version else "")
         notice_banner = f"<div class='notice'>{esc(notice_text)}</div>" if notice_text else ""
         body = f"""
 <div class='toolbar'><div><a href='/admin/products'>← 返回产品列表</a><h1>{esc(product['model'])}</h1><div class='muted'>{esc(product['name'])} · {status_badge(product['status'])}</div></div><div>{action_buttons}</div></div>
 {notice_banner}
-<div class='grid'><section class='card'><h2>产品基本信息</h2><p><b>主要用途：</b>{esc(product['use_case']) or '未填写'}</p><p><b>固定买方链接：</b>{('/products/' + esc(product['slug'])) if product['status'] == 'published' else '发布后生成'}</p><p class='muted'>型号是产品通用事实；买方本次工况将在后续会话中单独保存，不写回这里。</p></section><section class='card'><h2>登记来源资料</h2>{source_rows}<hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>IMAGE</option><option>CAD</option><option>OTHER</option></select></div><div><label>原文位置</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section></div>
-<section class='card' style='margin-top:18px'><h2>字段核对</h2><p class='muted'>关键字段必须有来源且核准后，才能进入产品版本和公开页面。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th></tr></thead><tbody>{field_rows}</tbody></table><hr><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></section>
+<div class='grid'><section class='card'><h2>产品基本信息</h2><p><b>主要用途：</b>{esc(product['use_case']) or '未填写'}</p><p><b>固定买方链接：</b>{('/products/' + esc(product['slug'])) if published_version else '发布后生成'}</p><p class='muted'>型号是产品通用事实；买方本次工况将在后续会话中单独保存，不写回这里。</p></section><section class='card'><h2>登记来源资料</h2>{source_rows}<p class='muted'>文件默认不对外下载。确认已有对外展示许可后，才可在此开放已关联核准事实的文件。</p><hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>IMAGE</option><option>CAD</option><option>OTHER</option></select></div><div><label>原文位置</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section></div>
+<section class='card' style='margin-top:18px'><h2>字段核对</h2><p class='muted'>可先核准已核对且有来源位置的字段，再发布有限信息页。未核准字段不会公开；缺少的关键字段会在页面标为待补充。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th></tr></thead><tbody>{field_rows}</tbody></table><hr><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></section>
 """
         self.send_html(layout(f"{product['model']} · 字段核对", body), 200)
 
@@ -2153,7 +2209,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def public_product(self, slug: str, query: dict[str, list[str]]) -> None:
         product = self.db.get_product_by_slug(self.tenant_id, slug)
-        if not product or product["status"] != "published":
+        if not product or product["status"] == "withdrawn":
             self.send_html(layout("产品不可用", "<div class='error'>该产品页尚未发布，或已被撤回。</div><p><a href='/admin/products'>返回企业后台</a></p>"), 404)
             return
         version = self.db.get_published_version(self.tenant_id, product["id"])
@@ -2162,17 +2218,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         snapshot = json.loads(version["snapshot_json"])
         sources = self.db.get_sources(self.tenant_id, product["id"])
+        allowed_source_ids = self.db.public_source_ids(self.tenant_id, product["id"])
+        cited_source_ids = {field["source_document_id"] for field in snapshot["fields"]}
         lang = query.get("lang", ["en"])[0]
         field_cards = "".join(f"<div><b>{esc(field['label'])}</b><span>{esc(field['value'])} {esc(field['unit'])}</span></div>" for field in snapshot["fields"])
+        missing_labels = [FIELD_LABELS[key] for key in snapshot.get("missing_fields", []) if key in FIELD_LABELS]
+        missing_html = "<p class='muted'>" + ("Pending information: " if lang == "en" else "待补充信息：") + esc("、".join(missing_labels)) + "</p>" if missing_labels else ""
         source_links = "".join(
             f"<li>{esc(source['filename'])} · {esc(source['source_location'])} "
             + (f"<a href='/products/{esc(product['slug'])}/sources/{esc(source['id'])}'>下载资料</a>" if source["storage_path"] else "<span class='muted'>仅登记元数据</span>")
             + "</li>"
-            for source in sources
+            for source in sources if source["id"] in allowed_source_ids and source["id"] in cited_source_ids
         ) or "<li class='muted'>暂无公开资料附件</li>"
         title = f"{product['model']} | Industrial Pump"
         body = f"""
-<div class='product-hero'><div class='eyebrow'>Published product version {version['version']}</div><h1>{esc(product['model'])}</h1><p>{esc(product['name'])}</p><div class='kv'>{field_cards}</div></div>
+<div class='product-hero'><div class='eyebrow'>Published product version {version['version']}</div><h1>{esc(product['model'])}</h1><p>{esc(product['name'])}</p><div class='kv'>{field_cards}</div>{missing_html}</div>
 <div class='grid'><section class='card'><h2>{'Application' if lang == 'en' else '适用场景'}</h2><p>{esc(product['use_case'])}</p><p class='muted'>{'The values above come from the approved product record and its cited source. Please confirm final sizing with an engineer.' if lang == 'en' else '以上参数来自已核准产品版本及其引用资料。正式选型前请与工程师确认。'}</p></section><section class='card'><h2>{'Source documents' if lang == 'en' else '来源资料'}</h2><ul>{source_links}</ul></section><section class='card'><h2>{'Next step' if lang == 'en' else '继续沟通'}</h2><p>{'Need help checking flow, head or medium compatibility?' if lang == 'en' else '需要核对流量、扬程或介质适用条件？'}</p><a class='button' href='mailto:sales@example.invalid?subject={quote(product['model'])}'>Ask sales / 询价</a></section></div>
 <div class='footer-note'>{'This is an initial technical display, not a price, stock, delivery or engineering-fit commitment.' if lang == 'en' else '这是初步技术展示，不代表价格、库存、交期或正式工程适配承诺。'} · <a href='/products/{esc(product['slug'])}?lang={'zh' if lang == 'en' else 'en'}'>{'切换中文' if lang == 'en' else 'Switch to English'}</a></div>
 """
@@ -2183,15 +2243,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def public_source(self, slug: str, source_id: str) -> None:
         product = self.db.get_product_by_slug(self.tenant_id, slug)
-        if not product or product["status"] != "published":
+        if not product or product["status"] == "withdrawn" or not self.db.get_published_version(self.tenant_id, product["id"]):
             self.send_html(layout("资料不可用", "<div class='error'>产品未公开。</div>"), 404)
             return
         source = self.db.conn.execute(
             "SELECT * FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
             (self.tenant_id, product["id"], source_id),
         ).fetchone()
-        if not source or not source["storage_path"]:
+        if not source or not source["storage_path"] or source_id not in self.db.public_source_ids(self.tenant_id, product["id"]):
             self.send_html(layout("资料不可用", "<div class='error'>该来源资料没有可下载文件。</div>"), 404)
+            return
+        version = self.db.get_published_version(self.tenant_id, product["id"])
+        if source_id not in {field["source_document_id"] for field in json.loads(version["snapshot_json"])["fields"]}:
+            self.send_html(layout("资料不可用", "<div class='error'>该来源资料未纳入当前公开版本。</div>"), 404)
             return
         target = ROOT / source["storage_path"]
         if not target.is_file():
