@@ -1,4 +1,5 @@
 import http.client
+from urllib.parse import urlencode
 import tempfile
 import threading
 import unittest
@@ -49,6 +50,18 @@ class BuyerConversationAccessTests(unittest.TestCase):
         self.assertEqual(other_status, 303)
         other_cookie = other_headers["Set-Cookie"].split(";", 1)[0]
         self.assertEqual(self.request("GET", path, cookie=other_cookie)[0], 404)
+
+    def test_early_rfq_requires_reply_contact_and_is_saved_once(self):
+        _, headers, _ = self.request("GET", "/inquiry")
+        path = headers["Location"].split("?", 1)[0]
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        no_contact = urlencode({"submission_key": "same-early", "notes": "Need a quote"})
+        self.assertEqual(self.request("POST", path + "/rfq", no_contact, cookie)[0], 400)
+        self.assertEqual(len(self.server.RequestHandlerClass.db.list_rfqs("demo-tenant")), 0)
+        with_contact = urlencode({"submission_key": "same-early", "notes": "Need a quote", "contact_email": "buyer@example.com"})
+        self.assertEqual(self.request("POST", path + "/rfq", with_contact, cookie)[0], 303)
+        self.assertEqual(self.request("POST", path + "/rfq", with_contact, cookie)[0], 303)
+        self.assertEqual(len(self.server.RequestHandlerClass.db.list_rfqs("demo-tenant")), 1)
 
 
 if __name__ == "__main__":

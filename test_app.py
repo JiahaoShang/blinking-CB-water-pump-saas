@@ -225,6 +225,23 @@ class RfqTests(unittest.TestCase):
         self.assertIn("数量", json.loads(rfq["missing_json"]))
         self.assertIn("目的地", json.loads(rfq["missing_json"]))
 
+    def test_buyer_can_submit_before_requirement_confirmation_with_contact(self):
+        conversation_id = self.db.create_conversation("demo-tenant")
+        rfq_id, created = self.db.create_rfq(
+            "demo-tenant", conversation_id, "early-rfq",
+            {"contact_email": "buyer@example.com"}, "Please quote for my project",
+        )
+        self.assertTrue(created)
+        rfq = self.db.get_rfq("demo-tenant", rfq_id)
+        self.assertIsNone(rfq["requirement_revision_id"])
+        self.assertEqual(rfq["status"], "needs_info")
+
+    def test_rfq_without_reply_contact_creates_no_record(self):
+        conversation_id = self.db.create_conversation("demo-tenant")
+        with self.assertRaisesRegex(ValueError, "联系方式"):
+            self.db.create_rfq("demo-tenant", conversation_id, "no-contact", {}, "Please quote")
+        self.assertEqual(len(self.db.list_rfqs("demo-tenant")), 0)
+
 
 class DemoFixtureTests(unittest.TestCase):
     def setUp(self):
@@ -312,7 +329,7 @@ class LowaraFixtureTests(unittest.TestCase):
         self.db.save_recommendation("demo-tenant", conversation_id, revision_id, status, results)
         rfq_id, created = self.db.create_rfq(
             "demo-tenant", conversation_id, "lowara-rfq-token",
-            {"quantity": "1", "region": "上海", "delivery": "6 周", "contact_email": ""}, "演示询价"
+            {"quantity": "1", "region": "上海", "delivery": "6 周", "contact_email": "buyer@example.com"}, "演示询价"
         )
         self.assertTrue(created)
         rfq = self.db.get_rfq("demo-tenant", rfq_id)

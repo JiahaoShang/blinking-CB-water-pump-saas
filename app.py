@@ -718,27 +718,36 @@ class Database:
         conversation = self.get_conversation(tenant_id, conversation_id)
         if not conversation:
             raise ValueError("会话不存在")
+        if not (contact.get("contact_email", "").strip() or contact.get("contact_phone", "").strip()):
+            raise ValueError("请填写可回复的邮箱或电话等联系方式")
         revision = self.latest_confirmed_revision(tenant_id, conversation_id)
         recommendation = self.latest_active_recommendation(tenant_id, conversation_id)
-        if not revision:
-            raise ValueError("请先确认需求摘要，再提交询价")
-        revision_values = json.loads(revision["values_json"])
+        revision_values = json.loads(revision["values_json"]) if revision else {}
         recommendation_results = json.loads(recommendation["results_json"]) if recommendation else []
         selected_result = None
         if selected_product_id:
             selected_result = next((result for result in recommendation_results if result.get("product_id") == selected_product_id), None)
         if not selected_result:
             selected_result = next((result for result in recommendation_results if result.get("status") in {"candidate", "needs_confirmation"}), None)
+        if not selected_result and selected_product_id:
+            product = self.get_product(tenant_id, selected_product_id)
+            version = self.get_published_version(tenant_id, selected_product_id) if product else None
+            if version:
+                selected_result = {"product_id": selected_product_id, "product_version_id": version["id"], "model": product["model"], "status": "direct_view"}
         product_id = selected_result.get("product_id") if selected_result else None
         product_version_id = selected_result.get("product_version_id") if selected_result else None
         missing = []
-        for key, label in (("quantity", "数量"), ("region", "目的地"), ("delivery", "期望交期"), ("contact_email", "联系人邮箱")):
+        if not revision:
+            missing.append("工况待确认")
+        if selected_result and selected_result.get("status") == "needs_confirmation":
+            missing.append("产品适用性待工程师核实")
+        for key, label in (("quantity", "数量"), ("region", "目的地"), ("delivery", "期望交期")):
             value = contact.get(key, "")
             if not value.strip():
                 missing.append(label)
         status = "submitted" if not missing else "needs_info"
         snapshot = {
-            "requirement_revision_id": revision["id"],
+            "requirement_revision_id": revision["id"] if revision else None,
             "requirements": revision_values,
             "recommendation_id": recommendation["id"] if recommendation else None,
             "recommendation": selected_result,
@@ -749,7 +758,7 @@ class Database:
         timestamp = now_iso()
         self.conn.execute(
             "INSERT INTO rfqs(id, tenant_id, conversation_id, requirement_revision_id, recommendation_id, product_id, product_version_id, submission_key, contact_name, company, contact_email, contact_phone, quantity, destination, requested_delivery, notes, missing_json, status, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (rfq_id, tenant_id, conversation_id, revision["id"], recommendation["id"] if recommendation else None, product_id, product_version_id, submission_key, contact.get("contact_name", "").strip(), contact.get("company", "").strip(), contact.get("contact_email", "").strip(), contact.get("contact_phone", "").strip(), contact.get("quantity", "").strip(), contact.get("region", "").strip(), contact.get("delivery", "").strip(), notes.strip(), json.dumps(missing, ensure_ascii=False), status, json.dumps(snapshot, ensure_ascii=False), timestamp),
+            (rfq_id, tenant_id, conversation_id, revision["id"] if revision else None, recommendation["id"] if recommendation else None, product_id, product_version_id, submission_key, contact.get("contact_name", "").strip(), contact.get("company", "").strip(), contact.get("contact_email", "").strip(), contact.get("contact_phone", "").strip(), contact.get("quantity", "").strip(), contact.get("region", "").strip(), contact.get("delivery", "").strip(), notes.strip(), json.dumps(missing, ensure_ascii=False), status, json.dumps(snapshot, ensure_ascii=False), timestamp),
         )
         lead_id = secrets.token_hex(12)
         self.conn.execute(
@@ -1793,7 +1802,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.redirect(f"/admin/products/{product_id}?notice={action}")
                 return
         except (ValueError, sqlite3.Error) as exc:
-            self.send_html(layout("操作未完成", f"<div class='error'>{esc(exc)}</div><p><a href='/admin/products'>返回产品列表</a></p>"), 400)
+            return_path = path.rsplit("/", 1)[0] if path.startswith("/inquiry/") else "/admin/products"
+            self.send_html(layout("操作未完成", f"<div class='error'>{esc(exc)}</div><p><a href='{esc(return_path)}'>返回并修改</a></p>"), 400)
             return
         self.send_html(layout("未找到", "<div class='error'>操作不存在</div>"), 404)
 
@@ -1944,7 +1954,7 @@ class Handler(BaseHTTPRequestHandler):
 <section class='card'><h2>Requirement summary</h2>{missing_html}<form method='post' action='/inquiry/{conversation_id}/confirm'><div class='form-grid'>{input_fields}</div><p><button>Confirm summary and match</button></p></form><table><thead><tr><th>Field</th><th>Value</th><th>State</th></tr></thead><tbody>{summary_rows}</tbody></table></section></div>
 <section class='card' style='margin-top:18px'><h2>Recommendations</h2>{recommendation_html}</section>
 <section class='card' style='margin-top:18px'><h2>Ask about the recommended product</h2><p class='muted'>资料内问题会显示引用；价格、交期、认证或资料外问题不会被猜测，会生成后台人工任务。</p><form method='post' action='/inquiry/{conversation_id}/ask'><label>Product context</label><select name='product_id'>{candidate_options}</select><label>Your question / 技术问题 *</label><textarea name='question' required placeholder='Example: What is the flow range? Or ask about price, stock, certification to test handoff.'></textarea><p><button>Ask and save answer</button></p></form><h3>Answers and handoff</h3>{answer_html}{task_html}</section>
-<section class='card' style='margin-top:18px'><h2>Request for quotation (RFQ)</h2><p class='muted'>已确认工况和推荐产品会保存为本次询价快照；联系方式只供企业后台使用。缺少数量、目的地、期望交期或邮箱时，记录会标记为“待补充”，不会标记为可报价。</p><form method='post' action='/inquiry/{conversation_id}/rfq'><input type='hidden' name='submission_key' value='{esc(submission_key)}'><div class='form-grid'><div><label>Product / 产品</label><select name='product_id'>{candidate_options}</select></div><div><label>Contact name / 联系人</label><input name='contact_name' placeholder='Your name'></div><div><label>Company / 公司</label><input name='company' placeholder='Company name'></div><div><label>Email / 邮箱</label><input name='contact_email' type='email' placeholder='you@example.com'></div><div><label>Phone / 电话</label><input name='contact_phone' placeholder='+49 ...'></div><div><label>Quantity / 数量</label><input name='quantity' value='{esc(prefill['quantity'])}' placeholder='e.g. 2'></div><div><label>Destination / 目的地</label><input name='region' value='{esc(prefill['region'])}' placeholder='e.g. Germany'></div><div><label>Expected delivery / 期望交期</label><input name='delivery' value='{esc(prefill['delivery'])}' placeholder='e.g. 8 weeks'></div><div class='full'><label>Notes / 补充说明</label><textarea name='notes' placeholder='Additional operating conditions or questions'></textarea></div></div><p><button>Save RFQ / 提交询价</button></p></form></section>
+<section class='card' style='margin-top:18px'><h2>Request for quotation (RFQ)</h2><p class='muted'>您可以随时提交询价，无须先完成选型。请至少提供邮箱或电话，方便销售回复；已确认的工况会随询价保存，缺少的技术或商务信息会标为待补充。</p><form method='post' action='/inquiry/{conversation_id}/rfq'><input type='hidden' name='submission_key' value='{esc(submission_key)}'><div class='form-grid'><div><label>Product / 产品</label><select name='product_id'>{candidate_options}</select></div><div><label>Contact name / 联系人</label><input name='contact_name' placeholder='Your name'></div><div><label>Company / 公司</label><input name='company' placeholder='Company name'></div><div><label>Email / 邮箱</label><input name='contact_email' type='email' placeholder='you@example.com'></div><div><label>Phone / 电话</label><input name='contact_phone' placeholder='+49 ...'></div><div><label>Quantity / 数量</label><input name='quantity' value='{esc(prefill['quantity'])}' placeholder='e.g. 2'></div><div><label>Destination / 目的地</label><input name='region' value='{esc(prefill['region'])}' placeholder='e.g. Germany'></div><div><label>Expected delivery / 期望交期</label><input name='delivery' value='{esc(prefill['delivery'])}' placeholder='e.g. 8 weeks'></div><div class='full'><label>Notes / 补充说明</label><textarea name='notes' placeholder='Additional operating conditions or questions'></textarea></div></div><p><button>Save RFQ / 提交询价</button></p></form></section>
 <div class='footer-note'>产品页面、推荐和后续 chatbot 都只读取已核准并已发布的产品版本。当前规则是透明的水泵演示规则，正式阈值需由企业工程师确认。</div>
 """
         self.send_html(layout("Buyer inquiry", body, lang=lang), 200)
