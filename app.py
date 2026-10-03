@@ -1745,6 +1745,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_reference_file(self, filename: str, content_type: str) -> None:
+        data = (ROOT / "reference-client" / filename).read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def read_json(self) -> dict[str, object] | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -1837,6 +1846,14 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         query = parse_qs(parsed.query)
+        reference_files = {
+            "/reference-client": ("index.html", "text/html; charset=utf-8"),
+            "/reference-client/app.js": ("app.js", "text/javascript; charset=utf-8"),
+            "/reference-client/style.css": ("style.css", "text/css; charset=utf-8"),
+        }
+        if path in reference_files:
+            self.send_reference_file(*reference_files[path])
+            return
         api_match = re.fullmatch(r"/api/v1/buyer/conversations/([a-f0-9]+)", path)
         if api_match:
             access = self.api_conversation(api_match.group(1))
@@ -1848,11 +1865,11 @@ class Handler(BaseHTTPRequestHandler):
                 for row in self.db.list_messages(site["tenant_id"], conversation["id"])
             ]
             answers = [
-                {"id": row["id"], "status": row["answer_status"], "text": row["answer_text"], "citations": json.loads(row["citations_json"])}
+                {"id": row["id"], "question_message_id": row["question_message_id"], "status": row["answer_status"], "text": row["answer_text"], "citations": json.loads(row["citations_json"])}
                 for row in self.db.list_answers(site["tenant_id"], conversation["id"])
             ]
             human_tasks = [
-                {"id": row["id"], "status": row["status"], "question": row["question"]}
+                {"id": row["id"], "question_message_id": row["question_message_id"], "status": row["status"], "question": row["question"]}
                 for row in self.db.list_human_tasks(site["tenant_id"]) if row["conversation_id"] == conversation["id"]
             ]
             rfqs = [
@@ -2633,7 +2650,7 @@ class Handler(BaseHTTPRequestHandler):
         body = f"""
 <div class='toolbar'><div><a href='/admin'>← 返回管理概览</a><h1>网站 API 接入</h1><p class='muted'>为企业自有官网聊天窗口登记允许的浏览器来源。会话私有数据仍需要单独的买方访问凭据。</p></div></div>
 {notice}
-<section class='grid'><div class='card'><h2>登记官网</h2><form method='post' action='/admin/sites'><label>官网来源 *</label><input name='allowed_origin' type='url' required placeholder='https://www.example.com'><p class='muted'>只填写协议、域名和可选端口；正式网站使用 HTTPS。本地测试可用 localhost。</p><button>生成网站标识</button></form></div><div class='card'><h2>接入说明</h2><p>把网站标识放在创建会话请求的 <code>site_key</code> 字段。后续请求使用 <code>X-Site-Key</code> 和该会话的 <code>Authorization: Bearer</code> 凭据。</p><p class='muted'>这里是基础登记界面；完整接入文档、密钥轮换和自助安装尚未验收。</p></div></section>
+<section class='grid'><div class='card'><h2>登记官网</h2><form method='post' action='/admin/sites'><label>官网来源 *</label><input name='allowed_origin' type='url' required placeholder='https://www.example.com'><p class='muted'>只填写协议、域名和可选端口；正式网站使用 HTTPS。本地测试可用 localhost。</p><button>生成网站标识</button></form></div><div class='card'><h2>接入说明</h2><p>把网站标识放在创建会话请求的 <code>site_key</code> 字段。后续请求使用 <code>X-Site-Key</code> 和该会话的 <code>Authorization: Bearer</code> 凭据。</p><p><a href='/reference-client' target='_blank'>打开参考网页聊天窗口</a>。本地演示时，先把此网页的来源登记为允许来源。</p><p class='muted'>这里是基础登记界面；完整接入文档、密钥轮换和自助安装尚未验收。</p></div></section>
 <section class='card' style='margin-top:18px'><h2>已登记网站</h2><table><thead><tr><th>网站标识</th><th>允许来源</th><th>状态</th><th>创建时间</th></tr></thead><tbody>{rows}</tbody></table></section>
 """
         self.send_html(layout("网站 API 接入", body), 200)
