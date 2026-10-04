@@ -407,7 +407,11 @@ class BuyerApiTests(unittest.TestCase):
         self.assertIsNone(self.db.get_lead_for_rfq("demo-tenant", rfq_id)["next_follow_up"])
         _, _, seller_page = self.form_request("GET", f"/admin/sales/{rfq_id}", cookie=cookie)
         self.assertIn("停止主动联系", seller_page)
-        self.assertEqual(self.form_request("POST", f"/admin/sales/{rfq_id}/update", {"stage": "technical_review", "next_follow_up": "2026-10-21"}, cookie)[0], 400)
+        # V1-09：冲突改为友好提示（303 + notice=stop_conflict），跟进日期照旧不被写入
+        stop_status, stop_headers, _ = self.form_request("POST", f"/admin/sales/{rfq_id}/update", {"stage": "technical_review", "next_follow_up": "2026-10-21"}, cookie)
+        self.assertEqual(stop_status, 303)
+        self.assertIn("notice=stop_conflict", stop_headers["Location"])
+        self.assertIsNone(self.db.get_lead_for_rfq("demo-tenant", rfq_id)["next_follow_up"])
 
     def test_recommendation_withholds_tentative_until_requested(self):
         self.db.seed_demo_products("demo-tenant")

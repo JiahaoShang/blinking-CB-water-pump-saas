@@ -419,6 +419,29 @@ class Database:
                 completed_by TEXT NOT NULL DEFAULT '',
                 completed_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS lead_milestones (
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                lead_id TEXT NOT NULL REFERENCES leads(id),
+                key TEXT NOT NULL,
+                done_by TEXT NOT NULL DEFAULT '',
+                done_at TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (tenant_id, lead_id, key)
+            );
+            CREATE TABLE IF NOT EXISTS lead_replies (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                lead_id TEXT NOT NULL REFERENCES leads(id),
+                body TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                channel TEXT NOT NULL DEFAULT '',
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_by TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                sent_by TEXT NOT NULL DEFAULT '',
+                sent_at TEXT
+            );
             CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -605,6 +628,10 @@ class Database:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN current_revision INTEGER NOT NULL DEFAULT 1")
         if "requested_model" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN requested_model TEXT NOT NULL DEFAULT ''")
+        lead_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(leads)")}
+        for column, definition in (("close_reason", "TEXT NOT NULL DEFAULT ''"), ("closed_at", "TEXT")):
+            if column not in lead_columns:
+                self.conn.execute(f"ALTER TABLE leads ADD COLUMN {column} {definition}")
         source_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(source_documents)")}
         for column, definition in (
             ("scope", "TEXT NOT NULL DEFAULT 'unknown'"),
@@ -1817,6 +1844,7 @@ class Database:
         next_follow_up: str,
         note: str,
         actor: str = "demo-sales",
+        close_reason: str = "",
     ) -> None:
         allowed = {stage["key"] for stage in self.get_lead_stages(tenant_id)}
         if stage not in allowed:
@@ -1824,17 +1852,152 @@ class Database:
         lead = self.get_lead_for_rfq(tenant_id, rfq_id)
         if not lead:
             raise ValueError("线索不存在")
+        # V1-09：关闭线索必须填写原因；重新选择其他阶段 = 重新激活（审计留痕）。
+        closing = stage == "closed"
+        reopening = bool(lead["stage"] == "closed" and not closing)
+        close_reason = close_reason.strip()
+        if closing and not close_reason:
+            raise ValueError("关闭线索需要填写原因")
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
             preference = self.get_contact_preference(tenant_id, lead["conversation_id"])
             if preference and preference["stop_proactive_contact"] and next_follow_up.strip():
                 raise ValueError("买方已要求停止主动联系，不能安排主动跟进日期")
             timestamp = now_iso()
+            if closing:
+                self.conn.execute(
+                    "UPDATE leads SET stage=?, next_follow_up=?, note=?, close_reason=?, closed_at=?, updated_at=? WHERE tenant_id=? AND rfq_id=?",
+                    (stage, next_follow_up.strip() or None, note.strip(), close_reason, timestamp, timestamp, tenant_id, rfq_id),
+                )
+            elif reopening:
+                self.conn.execute(
+                    "UPDATE leads SET stage=?, next_follow_up=?, note=?, close_reason='', closed_at=NULL, updated_at=? WHERE tenant_id=? AND rfq_id=?",
+                    (stage, next_follow_up.strip() or None, note.strip(), timestamp, tenant_id, rfq_id),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE leads SET stage=?, next_follow_up=?, note=?, updated_at=? WHERE tenant_id=? AND rfq_id=?",
+                    (stage, next_follow_up.strip() or None, note.strip(), timestamp, tenant_id, rfq_id),
+                )
+            details = f"rfq={rfq_id};stage={stage};next_follow_up={next_follow_up}"
+            if closing:
+                details += f";close_reason={close_reason};transition=closed"
+            if reopening:
+                details += ";transition=reopened"
+            self._audit(tenant_id, "lead", lead["id"], "updated", actor, details)
+
+    # ── V1-09：跟进节点（技术确认/样品/报价准备）──────────────────────────────
+    def list_lead_milestones(self, tenant_id: str, lead_id: str) -> dict[str, sqlite3.Row]:
+        rows = self.conn.execute(
+            "SELECT * FROM lead_milestones WHERE tenant_id=? AND lead_id=?", (tenant_id, lead_id)
+        ).fetchall()
+        return {row["key"]: row for row in rows}
+
+    def toggle_lead_milestone(self, tenant_id: str, rfq_id: str, key: str, actor: str) -> bool:
+        if key not in LEAD_MILESTONE_KEYS:
+            raise ValueError("不支持的跟进节点")
+        lead = self.get_lead_for_rfq(tenant_id, rfq_id)
+        if not lead:
+            raise ValueError("线索不存在")
+        existing = self.conn.execute(
+            "SELECT * FROM lead_milestones WHERE tenant_id=? AND lead_id=? AND key=?", (tenant_id, lead["id"], key)
+        ).fetchone()
+        with self.conn:
+            if existing:
+                self.conn.execute(
+                    "DELETE FROM lead_milestones WHERE tenant_id=? AND lead_id=? AND key=?", (tenant_id, lead["id"], key)
+                )
+                self._audit(tenant_id, "lead", lead["id"], "milestone_reopened", actor, f"key={key}")
+                return False
             self.conn.execute(
-                "UPDATE leads SET stage=?, next_follow_up=?, note=?, updated_at=? WHERE tenant_id=? AND rfq_id=?",
-                (stage, next_follow_up.strip() or None, note.strip(), timestamp, tenant_id, rfq_id),
+                "INSERT INTO lead_milestones(tenant_id, lead_id, key, done_by, done_at) VALUES (?, ?, ?, ?, ?)",
+                (tenant_id, lead["id"], key, actor, now_iso()),
             )
-            self._audit(tenant_id, "lead", lead["id"], "updated", actor, f"rfq={rfq_id};stage={stage};next_follow_up={next_follow_up}")
+            label = dict(LEAD_MILESTONE_DEFS)[key]
+            self._audit(tenant_id, "lead", lead["id"], "milestone_completed", actor, f"key={key};label={label}")
+            return True
+
+    # ── V1-09：回复草稿（平台不自动外发；线下发送后记录；发送前检查停止主动联系）──
+    def list_lead_replies(self, tenant_id: str, lead_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM lead_replies WHERE tenant_id=? AND lead_id=? "
+            "ORDER BY CASE status WHEN 'draft' THEN 0 WHEN 'sent' THEN 1 ELSE 2 END, created_at DESC",
+            (tenant_id, lead_id),
+        ).fetchall()
+
+    def _get_lead_reply(self, tenant_id: str, reply_id: str) -> sqlite3.Row:
+        row = self.conn.execute(
+            "SELECT * FROM lead_replies WHERE tenant_id=? AND id=?", (tenant_id, reply_id)
+        ).fetchone()
+        if not row:
+            raise ValueError("回复不存在")
+        return row
+
+    def create_reply_draft(self, tenant_id: str, rfq_id: str, body: str, actor: str) -> str:
+        lead = self.get_lead_for_rfq(tenant_id, rfq_id)
+        if not lead:
+            raise ValueError("线索不存在")
+        body = body.strip()
+        if not body:
+            raise ValueError("回复内容不能为空")
+        reply_id = secrets.token_hex(12)
+        timestamp = now_iso()
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO lead_replies(id, tenant_id, lead_id, body, status, created_by, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'draft', ?, ?, ?)",
+                (reply_id, tenant_id, lead["id"], body, actor, timestamp, timestamp),
+            )
+            self._audit(tenant_id, "reply", reply_id, "created", actor, f"lead={lead['id']};len={len(body)}")
+        return reply_id
+
+    def update_reply_draft(self, tenant_id: str, reply_id: str, body: str, actor: str) -> None:
+        reply = self._get_lead_reply(tenant_id, reply_id)
+        if reply["status"] != "draft":
+            raise ValueError("只有未发送草稿可以修改")
+        body = body.strip()
+        if not body:
+            raise ValueError("回复内容不能为空")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE lead_replies SET body=?, updated_by=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (body, actor, now_iso(), tenant_id, reply_id),
+            )
+            self._audit(tenant_id, "reply", reply_id, "updated", actor, f"len={len(body)}")
+
+    def discard_reply_draft(self, tenant_id: str, reply_id: str, actor: str) -> None:
+        reply = self._get_lead_reply(tenant_id, reply_id)
+        if reply["status"] != "draft":
+            raise ValueError("只有未发送草稿可以废弃")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE lead_replies SET status='discarded', updated_by=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (actor, now_iso(), tenant_id, reply_id),
+            )
+            self._audit(tenant_id, "reply", reply_id, "discarded", actor, "")
+
+    def record_reply_sent(self, tenant_id: str, reply_id: str, channel: str, body: str, actor: str) -> None:
+        reply = self._get_lead_reply(tenant_id, reply_id)
+        if reply["status"] != "draft":
+            raise ValueError("该回复不是未发送草稿")
+        if channel not in REPLY_CHANNEL_LABELS:
+            raise ValueError("不支持的发送渠道")
+        lead = self.conn.execute(
+            "SELECT * FROM leads WHERE tenant_id=? AND id=?", (tenant_id, reply["lead_id"])
+        ).fetchone()
+        if not lead:
+            raise ValueError("线索不存在")
+        preference = self.get_contact_preference(tenant_id, lead["conversation_id"])
+        if preference and preference["stop_proactive_contact"]:
+            raise ValueError("买方已要求停止主动联系，发送被阻止")
+        body = body.strip() or reply["body"]
+        timestamp = now_iso()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE lead_replies SET body=?, status='sent', channel=?, sent_by=?, sent_at=?, updated_by=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (body, channel, actor, timestamp, actor, timestamp, tenant_id, reply_id),
+            )
+            self._audit(tenant_id, "reply", reply_id, "sent", actor, f"lead={reply['lead_id']};channel={channel}")
 
     def list_entity_audit(self, tenant_id: str, entity_ids: list[str]) -> list[sqlite3.Row]:
         if not entity_ids:
@@ -4004,6 +4167,13 @@ RFQ_FIELD_STATES = ("required", "optional", "hidden")
 RFQ_FIELD_INPUT_KEYS = {"email": "contact_email", "phone": "contact_phone", "quantity": "quantity", "destination": "region", "notes": "notes"}
 RFQ_FIELD_CONTENT_KEYS = {"email": "contact_email", "phone": "contact_phone", "quantity": "quantity", "destination": "destination", "notes": "notes"}
 
+# ── V1-09 销售工作台增量：跟进节点（首版固定三项；企业自定义暂缓）与回复渠道 ──
+LEAD_MILESTONE_DEFS = (("tech_confirmed", "技术确认"), ("sample", "样品准备"), ("quote", "报价准备"))
+LEAD_MILESTONE_KEYS = tuple(key for key, _label in LEAD_MILESTONE_DEFS)
+# 平台尚未接入外发渠道：回复先以草稿存在，线下实际发送后回来记录（渠道仅作说明）。
+REPLY_CHANNELS = (("email", "邮件"), ("phone", "电话"), ("whatsapp", "WhatsApp"), ("other", "其他"))
+REPLY_CHANNEL_LABELS = dict(REPLY_CHANNELS)
+
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 # 操作记录页的中文标签（未知值回退原值显示）。
@@ -4011,7 +4181,7 @@ AUDIT_ENTITY_LABELS = {
     "conversation": "会话", "requirement_revision": "工况修订", "recommendation": "推荐",
     "human_task": "人工任务", "rfq": "询价单", "lead": "线索", "product": "产品",
     "product_field": "产品字段", "source_document": "来源资料", "user": "成员账号", "settings": "企业设置",
-    "material_task": "资料补充任务", "export": "数据导出",
+    "material_task": "资料补充任务", "export": "数据导出", "reply": "回复草稿",
 }
 AUDIT_ACTION_LABELS = {
     "created": "创建", "updated": "更新", "activated": "启用", "deactivated": "停用",
@@ -4024,7 +4194,8 @@ AUDIT_ACTION_LABELS = {
     "review_finalized": "完成核对", "published": "发布版本", "withdrawn": "下架",
     "allowed_public_download": "开放下载", "revoked_public_download": "撤销下载",
     "public_download_blocked_hash_mismatch": "拦截下载（哈希不符）", "modules_updated": "模块授权",
-    "exported": "导出数据", "completed": "完成",
+    "exported": "导出数据", "completed": "完成", "sent": "记录发送", "discarded": "废弃",
+    "milestone_completed": "节点完成", "milestone_reopened": "节点重开",
 }
 
 
@@ -5377,8 +5548,57 @@ class Handler(BaseHTTPRequestHandler):
                 return
             match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/update", path)
             if match:
-                self.db.update_lead(self.tenant_id, match.group(1), str(form.get("stage", "new")), str(form.get("next_follow_up", "")), str(form.get("note", "")), self.actor)
-                self.redirect(f"/admin/sales/{match.group(1)}?notice=updated")
+                rfq_id = match.group(1)
+                try:
+                    self.db.update_lead(
+                        self.tenant_id, rfq_id,
+                        str(form.get("stage", "new")), str(form.get("next_follow_up", "")), str(form.get("note", "")),
+                        self.actor, close_reason=str(form.get("close_reason", "")),
+                    )
+                except ValueError as error:
+                    message = str(error)
+                    notice = "close_reason" if "关闭线索需要填写原因" in message else "stop_conflict" if "停止主动联系" in message else "update_invalid"
+                    self.redirect(f"/admin/sales/{rfq_id}?notice={notice}#lead-update")
+                    return
+                self.redirect(f"/admin/sales/{rfq_id}?notice=updated")
+                return
+            match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/milestones/([a-z_]+)", path)
+            if match:
+                rfq_id, milestone_key = match.groups()
+                try:
+                    activated = self.db.toggle_lead_milestone(self.tenant_id, rfq_id, milestone_key, self.actor)
+                except ValueError:
+                    self.redirect(f"/admin/sales/{rfq_id}?notice=milestone_invalid#milestones")
+                    return
+                self.redirect(f"/admin/sales/{rfq_id}?notice={'milestone_on' if activated else 'milestone_off'}#milestones")
+                return
+            match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/replies", path)
+            if match:
+                try:
+                    self.db.create_reply_draft(self.tenant_id, match.group(1), str(form.get("body", "")), self.actor)
+                except ValueError:
+                    self.redirect(f"/admin/sales/{match.group(1)}?notice=reply_invalid#replies")
+                    return
+                self.redirect(f"/admin/sales/{match.group(1)}?notice=reply_saved#replies")
+                return
+            match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/replies/([a-f0-9]+)", path)
+            if match:
+                rfq_id, reply_id = match.groups()
+                action = str(form.get("action", "save"))
+                try:
+                    if action == "sent":
+                        self.db.record_reply_sent(self.tenant_id, reply_id, str(form.get("channel", "")), str(form.get("body", "")), self.actor)
+                    elif action == "discard":
+                        self.db.discard_reply_draft(self.tenant_id, reply_id, self.actor)
+                    else:
+                        self.db.update_reply_draft(self.tenant_id, reply_id, str(form.get("body", "")), self.actor)
+                except ValueError as error:
+                    message = str(error)
+                    notice = "reply_stop_blocked" if "停止主动联系" in message else "reply_invalid"
+                    self.redirect(f"/admin/sales/{rfq_id}?notice={notice}#replies")
+                    return
+                notice_code = "reply_sent" if action == "sent" else "reply_discarded" if action == "discard" else "reply_saved"
+                self.redirect(f"/admin/sales/{rfq_id}?notice={notice_code}#replies")
                 return
             match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/(claim|assign)", path)
             if match:
@@ -6635,13 +6855,64 @@ class Handler(BaseHTTPRequestHandler):
     def admin_sales(self, query: dict[str, list[str]]) -> None:
         records = self.db.list_sales_records(self.tenant_id)
         today = datetime.now(timezone.utc).date().isoformat()
+        soon_cutoff = (datetime.now(timezone.utc).date() + timedelta(days=3)).isoformat()
         stages = self.db.get_lead_stages(self.tenant_id)
         stage_labels = {stage["key"]: stage["label"] for stage in stages}
         terminal_keys = {stage["key"] for stage in stages if stage["terminal"]}
+
+        def follow_up_state(record) -> str:
+            if record["stop_proactive_contact"] or record["stage"] in terminal_keys:
+                return "inactive"
+            value = record["next_follow_up"] or ""
+            if not value:
+                return "unset"
+            if value < today:
+                return "overdue"
+            if value == today:
+                return "today"
+            if value <= soon_cutoff:
+                return "soon"
+            return "later"
+
+        enriched = [(record, follow_up_state(record)) for record in records]
+        counts = {
+            "overdue": sum(1 for _record, state in enriched if state == "overdue"),
+            "today": sum(1 for _record, state in enriched if state == "today"),
+            "soon": sum(1 for _record, state in enriched if state == "soon"),
+            "unassigned": sum(1 for record, _state in enriched if not record["owner"]),
+        }
+        stage_filter = query.get("stage", [""])[0].strip()
+        owner_filter = query.get("owner", [""])[0].strip()
+        timing_filter = query.get("timing", [""])[0].strip()
+        keyword_raw = query.get("q", [""])[0].strip()
+        keyword = keyword_raw.lower()
+
+        def matches(record, state: str) -> bool:
+            if stage_filter and record["stage"] != stage_filter:
+                return False
+            if owner_filter == "unassigned" and record["owner"]:
+                return False
+            if owner_filter and owner_filter != "unassigned" and record["owner"] != owner_filter:
+                return False
+            if timing_filter and state != timing_filter:
+                return False
+            if keyword:
+                haystack = " ".join(str(record[key] or "") for key in ("id", "model", "company", "contact_email", "owner")).lower()
+                if keyword not in haystack:
+                    return False
+            return True
+
+        visible = [(record, state) for record, state in enriched if matches(record, state)]
         items = []
-        for record in records:
-            overdue = bool(record["next_follow_up"] and record["next_follow_up"] < today and record["stage"] not in terminal_keys and not record["stop_proactive_contact"])
-            follow_up = f"<span class='badge withdrawn'>逾期 {esc(record['next_follow_up'])}</span>" if overdue else esc(record["next_follow_up"] or "未安排")
+        for record, state in visible:
+            if state == "overdue":
+                follow_up = f"<span class='badge withdrawn'>逾期 {esc(record['next_follow_up'])}</span>"
+            elif state == "today":
+                follow_up = "<span class='badge pending_review'>今日到期</span>"
+            elif state == "soon":
+                follow_up = f"<span class='badge pending_review'>{esc(record['next_follow_up'])} · 3 天内</span>"
+            else:
+                follow_up = esc(record["next_follow_up"] or "未安排")
             if record["stop_proactive_contact"]:
                 follow_up = "<span class='badge withdrawn'>停止主动联系</span>"
             changed = (f"<span class='badge pending_review'>买方已修改 {record['buyer_revision_count']} 次</span>" if record["buyer_revision_count"] else "")
@@ -6650,10 +6921,34 @@ class Handler(BaseHTTPRequestHandler):
                 f"<small>{esc(record['company'] or record['contact_email'] or '未提供联系人')} · 负责人：{esc(record['owner'] or '未分配')} · 跟进：{follow_up} · RFQ：{esc(record['status'])} {changed}</small></div>"
                 f"<div class='actions'><a class='button' href='/admin/sales/{record['id']}'>打开线索 →</a></div></div>"
             )
-        items_html = "".join(items) or "<div class='muted-block'>暂无销售线索。买方提交 RFQ 后会进入这里。</div>"
+        filtered_note = "" if len(visible) == len(records) else f" · 已筛选 {len(visible)} / {len(records)} 条"
+        items_html = "".join(items) or "<div class='muted-block'>没有符合筛选条件的线索。</div>"
+
+        stage_options_html = "<option value=''>全部阶段</option>" + "".join(
+            f"<option value='{esc(stage['key'])}'{' selected' if stage_filter == stage['key'] else ''}>{esc(stage['label'])}</option>"
+            for stage in stages
+        )
+        owners = sorted({record["owner"] for record in records if record["owner"]})
+        owner_options_html = "<option value=''>全部负责人</option>" + f"<option value='unassigned'{' selected' if owner_filter == 'unassigned' else ''}>未分配</option>" + "".join(
+            f"<option value='{esc(owner)}'{' selected' if owner_filter == owner else ''}>{esc(owner)}</option>" for owner in owners
+        )
+        timing_labels = (("overdue", "逾期"), ("today", "今日到期"), ("soon", "3 天内到期"), ("unset", "未安排"), ("later", "稍后跟进"), ("inactive", "终态/已停止"))
+        timing_options_html = "<option value=''>全部时效</option>" + "".join(
+            f"<option value='{key}'{' selected' if timing_filter == key else ''}>{label}</option>" for key, label in timing_labels
+        )
+        reminder_strip = (
+            "<div class='summary-strip'><span class='muted'>跟进提醒：</span>"
+            f"<a href='/admin/sales?timing=overdue'>逾期 {counts['overdue']}</a>"
+            f"<a href='/admin/sales?timing=today'>今日到期 {counts['today']}</a>"
+            f"<a href='/admin/sales?timing=soon'>3 天内到期 {counts['soon']}</a>"
+            f"<a href='/admin/sales?owner=unassigned'>未分配 {counts['unassigned']}</a></div>"
+        )
         body = f"""
 <div class='toolbar'><div><h1>销售工作台</h1><div class='muted'>统一查看 RFQ、需求、推荐、问答和人工任务；当前企业：{esc(self.tenant_display_name())}</div></div><a class='button secondary' href='/admin/rfqs'>RFQ 原始记录</a></div>
-<section class='card'><div class='panel-title'><h2>线索列表</h2><span class='muted'>领取或接手的线索从这里打开处理</span></div><div class='simple-list'>{items_html}</div></section>
+<section class='card'><div class='panel-title'><h2>线索列表</h2><span class='muted'>领取或接手的线索从这里打开处理{filtered_note}</span></div>
+{reminder_strip}
+<form method='get' action='/admin/sales' class='filter-bar'><label>阶段</label><select name='stage'>{stage_options_html}</select><label>负责人</label><select name='owner'>{owner_options_html}</select><label>时效</label><select name='timing'>{timing_options_html}</select><label>关键词</label><input name='q' value='{esc(keyword_raw)}' placeholder='公司 / 型号 / 邮箱 / 编号'><button class='secondary'>筛选</button></form>
+<div class='simple-list'>{items_html}</div></section>
 """
         self.send_html(self.console_page("销售工作台", body, "sales"), 200)
 
@@ -6674,6 +6969,60 @@ class Handler(BaseHTTPRequestHandler):
         ) if buyer_revision_count else ""
         stop_form = f"<form method='post' action='/admin/sales/{rfq_id}/contact-stop'><label>记录买方在其他渠道提出的停止主动联系原话</label><textarea name='reason' required></textarea><button class='danger'>记录并停止主动跟进</button></form>" if not preference["stop_proactive_contact"] and self.has_module("sales") else ""
         followup_disabled = "disabled" if preference["stop_proactive_contact"] else ""
+        closed_info = (
+            f"<p class='field-state'>已于 {esc(lead['closed_at'])} 关闭（原因：{esc(lead['close_reason'])}）；重新选择其他阶段即可重新激活。</p>"
+            if lead["stage"] == "closed" and lead["closed_at"] else ""
+        )
+        milestones = self.db.list_lead_milestones(self.tenant_id, lead["id"])
+        replies = self.db.list_lead_replies(self.tenant_id, lead["id"])
+
+        def milestone_row(key: str, label: str) -> str:
+            done = milestones.get(key)
+            state = f"已完成 · {esc(done['done_by'])} · {esc(done['done_at'])}" if done else "未完成"
+            action_label = "重新打开" if done else "标记完成"
+            return (
+                f"<div class='simple-item'><div><strong>{esc(label)}</strong><small>{state}</small></div>"
+                f"<div class='actions'><form method='post' action='/admin/sales/{rfq_id}/milestones/{key}' class='inline'><button class='secondary'>{action_label}</button></form></div></div>"
+            )
+
+        milestone_rows = "".join(milestone_row(key, label) for key, label in LEAD_MILESTONE_DEFS)
+        channel_options = "".join(f"<option value='{key}'>{label}</option>" for key, label in REPLY_CHANNELS)
+        reply_parts = []
+        for reply in replies:
+            if reply["status"] == "draft":
+                reply_parts.append(
+                    f"<div class='source' style='flex-direction:column;align-items:stretch;gap:8px'>"
+                    f"<span><span class='badge pending_review'>未发送草稿</span> <span class='field-state'>最近更新 {esc(reply['updated_at'])} · {esc(reply['updated_by'] or reply['created_by'])}</span></span>"
+                    f"<form method='post' action='/admin/sales/{rfq_id}/replies/{reply['id']}'>"
+                    f"<textarea name='body' rows='3' required>{esc(reply['body'])}</textarea>"
+                    f"<div class='actions' style='margin-top:8px'><label class='check-inline' style='margin:0'>发送渠道 <select name='channel'>{channel_options}</select></label>"
+                    f"<button name='action' value='save' class='secondary'>保存修改</button>"
+                    f"<button name='action' value='sent'>记录为已发送（线下）</button></div></form>"
+                    f"<div class='actions'><form method='post' action='/admin/sales/{rfq_id}/replies/{reply['id']}' class='inline'><button name='action' value='discard' class='secondary'>废弃草稿</button></form></div>"
+                    f"</div>"
+                )
+            elif reply["status"] == "sent":
+                channel_label = REPLY_CHANNEL_LABELS.get(reply["channel"], reply["channel"])
+                reply_parts.append(
+                    f"<div class='source'><span><span class='badge published'>已记录发送（{esc(channel_label)}）</span><br>{esc(reply['body'])}</span>"
+                    f"<span class='field-state'>{esc(reply['sent_at'])} · {esc(reply['sent_by'])}</span></div>"
+                )
+            else:
+                reply_parts.append(
+                    f"<div class='source'><span><span class='badge withdrawn'>已废弃</span> <span class='field-state'>{esc(reply['body'][:60])}</span></span>"
+                    f"<span class='field-state'>{esc(reply['updated_at'])}</span></div>"
+                )
+        replies_new_form = (
+            f"<form method='post' action='/admin/sales/{rfq_id}/replies'><label>起草回复（保存为未发送草稿）</label>"
+            f"<textarea name='body' rows='3' required placeholder='写给买方的回复内容'></textarea>"
+            f"<p><button>保存草稿</button></p></form>"
+            f"<p class='field-state'>平台尚未接入外发渠道：不会自动发送任何消息。线下实际发送后，回来点「记录为已发送」并选择渠道；发送前会检查买方「停止主动联系」状态（已停止则阻止记录发送）。</p>"
+        )
+        replies_html = replies_new_form + ("".join(reply_parts) or "<p class='muted'>还没有回复记录。</p>")
+        followup_cards = (
+            f"<section class='card' style='margin-top:18px' id='milestones'><h2>跟进节点</h2>{milestone_rows}</section>"
+            f"<section class='card' style='margin-top:18px' id='replies'><h2>回复草稿（跟进记录）</h2>{replies_html}</section>"
+        )
         requirements = snapshot.get("requirements", {})
         recommendation = snapshot.get("recommendation") or {}
         requirement_rows = "".join(f"<tr><td>{esc(item.get('label', key))}</td><td>{esc(item.get('value', ''))} {esc(item.get('unit', ''))}</td><td>{esc(item.get('state', ''))}</td></tr>" for key, item in requirements.items()) or "<tr><td colspan='3' class='muted'>暂无需求快照</td></tr>"
@@ -6681,10 +7030,25 @@ class Handler(BaseHTTPRequestHandler):
         answer_rows = "".join(f"<div class='source'><span><b>{'有据回答' if answer['answer_status'] == 'grounded' else '人工接管'}</b><br>{esc(answer['answer_text'])}</span><span class='field-state'>{esc(answer['created_at'])}</span></div>" for answer in answers) or "<p class='muted'>暂无问答记录。</p>"
         tasks = [task for task in self.db.list_human_tasks(self.tenant_id) if task["conversation_id"] == rfq["conversation_id"]]
         task_rows = "".join(f"<div class='source'><span><b>{esc(task['status'])}</b><br>{esc(task['question'])}<br><span class='field-state'>{esc(task['reason'])}</span></span><a href='/admin/tasks/{task['id']}'>处理</a></div>" for task in tasks) or "<p class='muted'>暂无人工任务。</p>"
-        audit_rows = self.db.list_entity_audit(self.tenant_id, [rfq["id"], lead["id"]])
+        audit_rows = self.db.list_entity_audit(self.tenant_id, [rfq["id"], lead["id"], *[reply["id"] for reply in replies]])
         audit_html = "".join(f"<div class='field-state'>{esc(item['created_at'])} · {esc(item['action'])} · {esc(item['actor'])} · {esc(item['details'])}</div>" for item in audit_rows) or "<p class='muted'>暂无操作记录。</p>"
         stage_options = "".join(f"<option value='{esc(stage['key'])}' {'selected' if lead['stage'] == stage['key'] else ''}>{esc(stage['label'])}</option>" for stage in self.db.get_lead_stages(self.tenant_id))
-        notice = "<div class='notice'>销售状态已保存，刷新后仍会保留。</div>" if query.get("notice", [""])[0] == "updated" else "<div class='notice'>负责人已更新，同会话的 RFQ 使用同一负责人。</div>" if query.get("notice", [""])[0] == "assigned" else ""
+        notice_code = query.get("notice", [""])[0]
+        notice = {
+            "updated": "<div class='notice'>销售状态已保存，刷新后仍会保留。</div>",
+            "assigned": "<div class='notice'>负责人已更新，同会话的 RFQ 使用同一负责人。</div>",
+            "close_reason": "<div class='error'>未保存：将线索设为「已关闭」时必须填写关闭原因。</div>",
+            "stop_conflict": "<div class='error'>未保存：买方已要求停止主动联系，不能安排主动跟进日期。</div>",
+            "update_invalid": "<div class='error'>未保存：请检查阶段与跟进信息。</div>",
+            "milestone_on": "<div class='notice'>跟进节点已标记完成。</div>",
+            "milestone_off": "<div class='notice'>跟进节点已重新打开。</div>",
+            "milestone_invalid": "<div class='error'>节点操作未完成：不支持的节点。</div>",
+            "reply_saved": "<div class='notice'>回复草稿已保存（未发送）。</div>",
+            "reply_sent": "<div class='notice'>已记录为「线下发送」——平台不会自动外发；发送状态见下方草稿卡片。</div>",
+            "reply_discarded": "<div class='notice'>草稿已废弃。</div>",
+            "reply_stop_blocked": "<div class='error'>发送被阻止：买方已要求停止主动联系；请仅在买方主动发起沟通后回应。</div>",
+            "reply_invalid": "<div class='error'>回复操作未完成：请检查内容与操作。</div>",
+        }.get(notice_code, "")
         claim_action = f"<form method='post' action='/admin/sales/{rfq_id}/claim'><button>领取这条会话</button></form>" if not lead["owner"] and self.user_role != "admin" and self.has_module("sales") else ""
         sales_options = "".join(f"<option value='{esc(user['email'])}' {'selected' if lead['owner'] == user['email'] else ''}>{esc(user['display_name'])} · {esc(user['email'])}</option>" for user in self.db.list_users(self.tenant_id) if user["role"] == "employee" and user["active"] and "sales" in self.db.get_user_modules(user["id"]))
         assign_action = f"<form method='post' action='/admin/sales/{rfq_id}/assign'><label>分配给销售</label><select name='owner_email'>{sales_options}</select><button>分配或改派</button></form>" if self.user_role == "admin" and sales_options else ""
@@ -6714,8 +7078,9 @@ class Handler(BaseHTTPRequestHandler):
 {stop_banner}
 {change_banner}
 {focus_html}
-<div class='grid'><section class='card'><h2>线索处理</h2><p><b>会话负责人：</b>{esc(lead['owner'] or '未领取')}</p>{assign_action if lead['owner'] else ''}<form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}' {followup_disabled}><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
+<div class='grid'><section class='card' id='lead-update'><h2>线索处理</h2><p><b>会话负责人：</b>{esc(lead['owner'] or '未领取')}</p>{closed_info}{assign_action if lead['owner'] else ''}<form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}' {followup_disabled}><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><label>关闭原因（阶段设为「已关闭」时必填）</label><input name='close_reason' value='{esc(lead['close_reason'] or '')}' placeholder='例如：客户取消项目 / 已转向其他方案'><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
 {stop_form}
+{followup_cards}
 <section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>
 <div class='grid' style='margin-top:18px'><section class='card'><h2>推荐快照</h2>{recommendation_html}</section><section class='card'><h2>问答与人工任务</h2>{answer_rows}{task_rows}</section></div>
 <details class='detail-toggle' style='margin-top:18px'><summary>查看操作记录</summary><div>{audit_html}</div></details>
