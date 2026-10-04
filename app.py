@@ -96,6 +96,8 @@ SOURCE_USAGE_LEVELS = {"internal": "仅内部", "restricted": "禁止使用"}
 CATEGORY_SOURCE_OPTIONS = (("doc", "资料建议"), ("model", "模型建议"), ("manual", "人工录入"))
 CATEGORY_SOURCE_LABELS = dict(CATEGORY_SOURCE_OPTIONS)
 CATEGORY_MAX_LENGTH = 40
+# V1-02 批量上传：一次请求最多登记的文件数（防止误选整个目录）。
+MAX_BATCH_SOURCE_FILES = 20
 # 跨站会话交接（一次性交接码）：官网聊天（来源 A）与平台产品页（来源 B）不同来源时，
 # 由持有会话凭据的聊天方出具短时、一次性、绑定站点与型号的交接码；产品页在平台自身
 # 来源上用它换取同一会话的新凭据。码与凭据都只存摘要（SHA-256）；长期会话凭据绝不
@@ -4329,6 +4331,7 @@ def parse_multipart(handler: BaseHTTPRequestHandler) -> dict[str, str | bytes]:
         return {key: vals[-1] for key, vals in values.items()}
     message = BytesParser(policy=default).parsebytes(b"Content-Type: " + content_type.encode() + b"\r\nMIME-Version: 1.0\r\n\r\n" + payload)
     result: dict[str, str | bytes] = {}
+    all_files: list[tuple[str, str, bytes]] = []
     for part in message.iter_parts():
         name = part.get_param("name", header="content-disposition")
         if not name:
@@ -4338,6 +4341,9 @@ def parse_multipart(handler: BaseHTTPRequestHandler) -> dict[str, str | bytes]:
         result[name] = content if filename else content.decode(part.get_content_charset() or "utf-8", errors="replace")
         if filename:
             result[f"{name}__filename"] = filename
+            all_files.append((name, filename, content))
+    # 批量上传：保留全部同名文件部件（单文件读取路径按既有语义取最后一个）。
+    result["__files__"] = all_files
     return result
 
 
@@ -5878,13 +5884,32 @@ class Handler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources", path)
             if match:
                 product_id = match.group(1)
+                scope = str(form.get("scope", "unknown") or "unknown")
+                source_location = str(form.get("source_location", ""))
+                file_type = str(form.get("file_type", "other"))
+                all_files = form.get("__files__")
+                batch_files = [
+                    entry
+                    for entry in (all_files if isinstance(all_files, list) else [])
+                    if entry[0] == "source_file" and entry[2]
+                ]
+                if len(batch_files) > MAX_BATCH_SOURCE_FILES:
+                    raise ValueError(f"一次最多上传 {MAX_BATCH_SOURCE_FILES} 个文件，请分批上传")
+                if batch_files:
+                    # 批量（或单文件）上传：每个文件独立登记为来源并分别按内容提取。
+                    for _field_name, file_name, file_content in batch_files:
+                        self.db.add_source(
+                            self.tenant_id, product_id, file_name or "未命名资料",
+                            file_type, source_location, file_content, self.actor, scope=scope,
+                        )
+                    self.redirect(f"/admin/products/{product_id}?notice=source&count={len(batch_files)}")
+                    return
                 raw_file = form.get("source_file")
                 content = raw_file if isinstance(raw_file, bytes) else None
                 filename = str(form.get("source_file__filename", "")) or str(form.get("filename", ""))
                 self.db.add_source(
                     self.tenant_id, product_id, filename or "未命名资料",
-                    str(form.get("file_type", "other")), str(form.get("source_location", "")),
-                    content, self.actor, scope=str(form.get("scope", "unknown") or "unknown"),
+                    file_type, source_location, content, self.actor, scope=scope,
                 )
                 self.redirect(f"/admin/products/{product_id}?notice=source")
                 return
@@ -6044,6 +6069,8 @@ class Handler(BaseHTTPRequestHandler):
             "publish": "产品版本已发布。",
             "withdraw": "公开版本已撤回。",
         }.get(notice, "")
+        if notice == "source" and query.get("count"):
+            notice_text = f"已保存 {esc(query.get('count', [''])[0])} 份来源文件。上传的文件已按内容尝试抽取；请核对下方提取结果后逐项处理。"
         processing_labels = {
             "registered": "仅登记元数据（无文件内容）",
             "stored": "已保存文件",
@@ -6185,7 +6212,7 @@ class Handler(BaseHTTPRequestHandler):
                 restrict_hint = ""
             source_blocks.append(
                 "<div class='source' style='display:block'><div style='display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap'>"
-                f"<span><b>{esc(source['filename'])}</b> {usage_badge}<br><span class='muted'>{esc(source['file_type'])} · {esc(source['source_location'])}</span></span>"
+                f"<span><b>{esc(source['filename'])}</b> {usage_badge}<br><span class='muted'>{esc(source['file_type'])} · {esc(source['source_location'] or '位置待补充')}</span></span>"
                 f"<span class='field-state'>{esc(processing_labels.get(source['processing_status'], source['processing_status']))} · 归属：{esc(SOURCE_SCOPES.get(source['scope'], source['scope']))}"
                 + (f" · 归属修订 r{source['scope_revision']}" if source["scope_revision"] else "")
                 + (f" · 引用字段 {ref_total}" if ref_total else "")
@@ -6330,7 +6357,7 @@ class Handler(BaseHTTPRequestHandler):
 <section class='card' id='fields'><div class='panel-title'><h2>字段核对（逐项）</h2><span class='muted'>待处理 {pending_count} 项</span></div>{pending_html}<p class='muted'>候选字段需逐项核准或驳回；驳回保留原值并记录原因。已核准关键字段被修改后会回到待核对，需重新核准并发布新版本；缺项不会被推测值填充。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th><th>操作</th></tr></thead><tbody>{field_table}</tbody></table><details class='detail-toggle'><summary>手动补充 / 修改字段值</summary><div><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置 *</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></div></details></section>
 <section class='card' style='margin-top:18px'><div class='panel-title'><h2>发布与版本</h2><span class='muted'>{version_line}</span></div><div class='actions' style='display:flex;gap:8px;flex-wrap:wrap'>{action_buttons}</div><p class='muted'>发布将冻结当前已核准事实与已开放公开文件清单；撤回后买方页不可访问，已提交的询价保留原版本快照。</p></section>
 {version_section}
-<section class='card' style='margin-top:18px' id='sources'><h2>登记来源资料</h2>{source_rows}<p class='muted'>文件默认仅内部使用、不对外下载；可见性分「仅内部 / 禁止使用」，禁止使用的文件不进入买方页、不参与新回答引用。上传后的文本/CSV 会按内容识别已知字段标签；PDF、图片、CAD 等不支持的格式会明确失败，请人工录入。开放公开下载前必须确认文件归属。</p><hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>MARKDOWN</option><option>TXT</option><option>IMAGE</option><option>DXF</option><option>STEP</option><option>OTHER</option></select></div><div><label>文件归属 *</label><select name='scope' required><option value=''>请选择文件归属</option><option value='exact_model'>本型号专属文件</option><option value='series'>系列级资料（非本型号专属）</option><option value='unknown'>归属待核对（不上公开页）</option></select></div><div class='full'><label>原文位置 *</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section>
+<section class='card' style='margin-top:18px' id='sources'><h2>登记来源资料</h2>{source_rows}<p class='muted'>文件默认仅内部使用、不对外下载；可见性分「仅内部 / 禁止使用」，禁止使用的文件不进入买方页、不参与新回答引用。上传后的文本/CSV 会按内容识别已知字段标签；PDF、图片、CAD 等不支持的格式会明确失败，请人工录入。开放公开下载前必须确认文件归属。支持多选批量上传：同批共用所选归属与原文位置，每个文件独立登记并分别提取（一次最多 20 个）。</p><hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选，可多选批量上传）</label><input type='file' name='source_file' multiple><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>MARKDOWN</option><option>TXT</option><option>IMAGE</option><option>DXF</option><option>STEP</option><option>OTHER</option></select></div><div><label>文件归属 *</label><select name='scope' required><option value=''>请选择文件归属</option><option value='exact_model'>本型号专属文件</option><option value='series'>系列级资料（非本型号专属）</option><option value='unknown'>归属待核对（不上公开页）</option></select></div><div class='full'><label>原文位置（可选，批量时同批共用）</label><input name='source_location' placeholder='第 1 页：规格参数表；留空显示「位置待补充」'></div></div><p><button class='secondary'>保存来源</button></p></form></section>
 <details class='detail-toggle' style='margin-top:18px'><summary>查看产品基本信息</summary><div class='muted-block'><p><b>主要用途：</b>{esc(product['use_case']) or '未填写'}</p><p><b>固定买方链接：</b>{('/products/' + esc(product['slug'])) if published_version else '发布后生成'}</p><p>型号是产品通用事实；买方本次工况将在后续会话中单独保存，不写回这里。</p><p>核准动作按字段逐项执行；未被逐项核准或已被驳回的内容不会进入匹配、问答和公开页。</p></div></details>
 """
         self.send_html(self.console_page(f"{product['model']} · 字段核对", body, "products"), 200)

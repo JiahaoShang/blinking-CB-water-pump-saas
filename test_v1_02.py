@@ -513,5 +513,121 @@ class VersionHistoryTests(unittest.TestCase):
         self.assertEqual(self.db.list_product_versions("other-tenant", pid), [])
 
 
+def batch_multipart_post(server, path, cookie, files, fields):
+    """构造 multipart 请求：files＝[(filename, bytes)]，全部挂在 source_file 名下。"""
+    boundary = "----growave-test-batch"
+    chunks = []
+    for key, value in fields.items():
+        chunks.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode("utf-8"))
+    for filename, content in files:
+        chunks.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="source_file"; filename="{filename}"\r\n'
+            f"Content-Type: text/plain\r\n\r\n".encode("utf-8") + content + b"\r\n"
+        )
+    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+    body = b"".join(chunks)
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
+    conn.request(
+        "POST", path, body,
+        {"Content-Type": f"multipart/form-data; boundary={boundary}", "Cookie": cookie, "Content-Length": str(len(body))},
+    )
+    response = conn.getresponse()
+    raw = response.read().decode("utf-8")
+    headers = dict(response.getheaders())
+    status = response.status
+    conn.close()
+    return status, headers, raw
+
+
+class BatchUploadTests(unittest.TestCase):
+    """批量上传：同批多文件各自登记与提取；同批共用归属与位置；上限与可选位置。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin_cookie = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.db.conn.close()
+        cls.thread.join()
+        cls.temp_dir.cleanup()
+
+    def _product(self, model):
+        self.db.create_product("demo-tenant", model, f"{model} 批量泵", "测试", "demo-admin")
+        return next(p["id"] for p in self.db.list_products("demo-tenant") if p["model"] == model)
+
+    def test_batch_two_files_registered_extracted_and_count_notice(self):
+        pid = self._product("BATCH-T1")
+        status, headers, _ = batch_multipart_post(
+            self.server, f"/admin/products/{pid}/sources", self.admin_cookie,
+            [("批A.txt", "流量范围: 20-80 m³/h\n".encode()), ("批B.txt", "扬程范围: 18-42 m\n".encode())],
+            {"scope": "exact_model", "source_location": "", "file_type": "TXT"},
+        )
+        self.assertEqual(status, 303)
+        self.assertIn("notice=source&count=2", headers["Location"])
+        sources = {row["filename"]: row for row in self.db.get_sources("demo-tenant", pid)}
+        self.assertEqual(set(sources), {"批A.txt", "批B.txt"})
+        self.assertTrue(all(row["storage_path"] for row in sources.values()))
+        self.assertEqual(sources["批A.txt"]["processing_status"], "extracted")
+        self.assertEqual(sources["批B.txt"]["processing_status"], "extracted")
+        fields = {field["field_key"]: field["value"] for field in self.db.get_fields("demo-tenant", pid)}
+        self.assertEqual(fields, {"flow_range": "20-80", "head_range": "18-42"})
+        # 份数 notice 渲染
+        _s, _, page = form_request(
+            self.server, "GET", f"/admin/products/{pid}?notice=source&count=2", cookie=self.admin_cookie
+        )
+        self.assertIn("已保存 2 份来源文件", page)
+
+    def test_batch_cap_and_optional_location(self):
+        pid = self._product("BATCH-T2")
+        # 单文件、不填位置：登记成功，页面显示「位置待补充」
+        status, headers, _ = batch_multipart_post(
+            self.server, f"/admin/products/{pid}/sources", self.admin_cookie,
+            [("单件.txt", "文件备注：待补充参数\n".encode())],
+            {"scope": "exact_model", "source_location": "", "file_type": "TXT"},
+        )
+        self.assertEqual(status, 303)
+        self.assertIn("notice=source&count=1", headers["Location"])
+        _s, _, page = form_request(self.server, "GET", f"/admin/products/{pid}", cookie=self.admin_cookie)
+        self.assertIn("位置待补充", page)
+        self.assertIn("name='source_file' multiple", page)
+        # 超过上限 → 400 且不落任何数据
+        before = len(self.db.get_sources("demo-tenant", pid))
+        status, _, body = batch_multipart_post(
+            self.server, f"/admin/products/{pid}/sources", self.admin_cookie,
+            [(f"超量{i}.txt", b"x\n") for i in range(21)],
+            {"scope": "exact_model", "source_location": ""},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("一次最多上传 20 个文件", body)
+        self.assertEqual(len(self.db.get_sources("demo-tenant", pid)), before)
+
+    def test_metadata_only_single_registration_unchanged(self):
+        pid = self._product("BATCH-T3")
+        status, headers, _ = form_request(
+            self.server, "POST", f"/admin/products/{pid}/sources",
+            {"filename": "仅登记资料.pdf", "file_type": "PDF", "scope": "unknown", "source_location": "第 3 章"},
+            self.admin_cookie,
+        )
+        self.assertEqual(status, 303)
+        self.assertIn("notice=source", headers["Location"])
+        self.assertNotIn("count=", headers["Location"])
+        rows = self.db.get_sources("demo-tenant", pid)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["filename"], "仅登记资料.pdf")
+        self.assertIsNone(rows[0]["storage_path"])
+
+
 if __name__ == "__main__":
     unittest.main()
