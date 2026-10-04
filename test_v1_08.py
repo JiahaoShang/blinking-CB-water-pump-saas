@@ -271,5 +271,127 @@ class NurtureLeadTests(unittest.TestCase):
         self.assertNotIn(lead_id, [row["id"] for row in self.db.list_nurture_leads("demo-tenant")])
 
 
+class DuplicateMergeTests(unittest.TestCase):
+    """重复线索提示与人工合并：只提示不自动合并；合并保留全部记录与历史。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
+        cls.db.seed_demo_workspace("demo-tenant")
+        cls.sales_id = cls.db.create_user(
+            "demo-tenant", "m-sales@example.invalid", "合并销售", "employee", "strong-pass", "demo-admin"
+        )
+        cls.db.set_user_modules("demo-tenant", cls.sales_id, ["sales"], "demo-admin@example.invalid")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin_cookie = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        cls.sales_cookie = login(cls.server, "m-sales@example.invalid", "strong-pass")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.db.conn.close()
+        cls.thread.join()
+        cls.temp_dir.cleanup()
+
+    def _rfq_lead(self):
+        return self.db.conn.execute("SELECT * FROM leads WHERE kind='rfq' LIMIT 1").fetchone()
+
+    def test_hints_detection_exclusions_and_render(self):
+        from app import duplicate_leads_section
+
+        rfq_lead = self._rfq_lead()
+        rfq = self.db.conn.execute("SELECT * FROM rfqs WHERE id=?", (rfq_lead["rfq_id"],)).fetchone()
+        # 同邮箱的待培育线索 → 双向提示
+        nurture_id = self.db.create_nurture_lead(
+            "demo-tenant", "m-sales@example.invalid", "疑似同一买家", "新公司", rfq["contact_email"], "", "expo", ""
+        )
+        hints = self.db.find_duplicate_lead_hints("demo-tenant", nurture_id)
+        self.assertEqual([(h["kind"], h["matched_by"]) for h in hints], [("rfq", ["同邮箱"])])
+        reverse = self.db.find_duplicate_lead_hints("demo-tenant", rfq_lead["id"])
+        self.assertTrue(any(h["id"] == nurture_id and h["matched_by"] == ["同邮箱"] for h in reverse))
+        # 无重合 → 无提示；自身不出现
+        solo_id = self.db.create_nurture_lead("demo-tenant", "m-sales@example.invalid", "路人", "无关公司", "solo@x.example", "", "other", "")
+        self.assertEqual(self.db.find_duplicate_lead_hints("demo-tenant", solo_id), [])
+        self.assertTrue(all(h["id"] != nurture_id for h in self.db.find_duplicate_lead_hints("demo-tenant", nurture_id)))
+        # 区块渲染：管理员有合并表单；员工没有
+        section_admin = duplicate_leads_section(self.db, "demo-tenant", self.db.get_lead("demo-tenant", nurture_id), True)
+        self.assertIn("确认合并", section_admin)
+        self.assertIn("同邮箱", section_admin)
+        section_sales = duplicate_leads_section(self.db, "demo-tenant", self.db.get_lead("demo-tenant", nurture_id), False)
+        self.assertNotIn("确认合并", section_sales)
+
+    def test_merge_flow_validation_and_audit(self):
+        primary = self.db.create_nurture_lead("demo-tenant", "m-sales@example.invalid", "主线索", "甲公司", "p@x.example", "", "expo", "")
+        secondary = self.db.create_nurture_lead("demo-tenant", "owner-2@example.invalid", "次级线索", "甲公司", "s@x.example", "", "expo", "")
+        # 归属转移分支：主线索清空负责人 → 合并后继承次级的负责人
+        self.db.conn.execute("UPDATE leads SET owner='' WHERE id=?", (primary,))
+        self.db.conn.commit()
+        self.db.merge_leads("demo-tenant", primary, secondary, "demo-admin@example.invalid")
+        sec = self.db.get_lead("demo-tenant", secondary)
+        self.assertEqual(sec["merged_into"], primary)
+        self.assertTrue(sec["merged_at"])
+        self.assertEqual(self.db.get_lead("demo-tenant", primary)["owner"], "owner-2@example.invalid")
+        # 审计双向
+        audits = self.db.conn.execute(
+            "SELECT entity_id, action, details FROM audit_log WHERE action IN ('merged','merged_in') AND entity_id IN (?,?) ORDER BY id",
+            (primary, secondary),
+        ).fetchall()
+        by_action = {row["action"]: row for row in audits}
+        self.assertEqual(by_action["merged"]["entity_id"], secondary)
+        self.assertIn(f"into={primary}", by_action["merged"]["details"])
+        self.assertIn(f"from={secondary}", by_action["merged_in"]["details"])
+        self.assertIn("owner_transferred=owner-2@example.invalid", by_action["merged_in"]["details"])
+        # 列表剔除、关联清单、提示剔除
+        self.assertNotIn(secondary, [row["id"] for row in self.db.list_nurture_leads("demo-tenant")])
+        self.assertEqual([row["id"] for row in self.db.merged_related_leads("demo-tenant", primary)], [secondary])
+        # 边界：重复合并 / 自合并 / 同询价 / 跨租户
+        with self.assertRaises(ValueError):
+            self.db.merge_leads("demo-tenant", primary, secondary, "demo-admin@example.invalid")
+        third = self.db.create_nurture_lead("demo-tenant", "m-sales@example.invalid", "第三条", "乙公司", "t@x.example", "", "other", "")
+        with self.assertRaises(ValueError):
+            self.db.merge_leads("demo-tenant", third, third, "demo-admin@example.invalid")
+        rfq_lead = self._rfq_lead()
+        with self.assertRaises(ValueError):
+            self.db.merge_leads("demo-tenant", rfq_lead["id"], rfq_lead["id"], "demo-admin@example.invalid")
+        self.db.ensure_tenant("other-tenant", "另一家企业")
+        with self.assertRaises(ValueError):
+            self.db.merge_leads("other-tenant", primary, third, "setup")
+
+    def test_http_merge_admin_only_and_page_rendering(self):
+        rfq_lead = self._rfq_lead()
+        rfq = self.db.conn.execute("SELECT * FROM rfqs WHERE id=?", (rfq_lead["rfq_id"],)).fetchone()
+        nurture_id = self.db.create_nurture_lead(
+            "demo-tenant", "m-sales@example.invalid", "网页合并演示", "演示公司", rfq["contact_email"], "", "visit", ""
+        )
+        # 员工不能合并
+        status, _, _ = form_request(
+            self.server, "POST", f"/admin/leads/{rfq_lead['id']}/merge", {"secondary_lead_id": nurture_id}, self.sales_cookie
+        )
+        self.assertEqual(status, 403)
+        # 管理员合并（RFQ 线索为主 → 跳回销售详情并显示合并过程）
+        status, headers, _ = form_request(
+            self.server, "POST", f"/admin/leads/{rfq_lead['id']}/merge", {"secondary_lead_id": nurture_id}, self.admin_cookie
+        )
+        self.assertEqual(status, 303)
+        self.assertIn(f"/admin/sales/{rfq_lead['rfq_id']}?notice=merged", headers["Location"])
+        _s, _, page = form_request(self.server, "GET", f"/admin/sales/{rfq_lead['rfq_id']}?notice=merged", cookie=self.admin_cookie)
+        self.assertIn("已合并该线索", page)
+        self.assertIn("重复线索提示", page)
+        self.assertIn("已并入本线索", page)
+        self.assertIn(f"/admin/leads/{nurture_id}", page)
+        # 次级线索详情：显示并入横幅并可跳转主线索
+        _s, _, page = form_request(self.server, "GET", f"/admin/leads/{nurture_id}", cookie=self.admin_cookie)
+        self.assertIn("该线索已并入", page)
+        self.assertIn(f"/admin/sales/{rfq_lead['rfq_id']}", page)
+
+
 if __name__ == "__main__":
     unittest.main()

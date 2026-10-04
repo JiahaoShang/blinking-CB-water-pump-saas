@@ -2101,6 +2101,93 @@ class Database:
             )
             self._audit(tenant_id, "lead", lead_id, "assigned", actor_email, f"owner={owner_email}")
 
+    # ── V1-08：重复线索提示与人工合并（只提示、绝不自动合并）──────────────────────
+    def lead_contact_index(self, tenant_id: str) -> list[dict]:
+        """未合并线索的联系方式索引（RFQ 线索取询价联系人；待培育线索取登记联系人）。"""
+        rows = self.conn.execute(
+            "SELECT l.id, l.kind, l.owner, l.stage, l.created_at, l.rfq_id, "
+            "l.contact_email AS n_email, l.contact_phone AS n_phone, l.company AS n_company, l.contact_name AS n_name, "
+            "r.contact_email AS r_email, r.contact_phone AS r_phone, r.company AS r_company, r.contact_name AS r_name "
+            "FROM leads l LEFT JOIN rfqs r ON r.id = l.rfq_id AND r.tenant_id = l.tenant_id "
+            "WHERE l.tenant_id=? AND COALESCE(l.merged_into, '') = ''",
+            (tenant_id,),
+        ).fetchall()
+        index = []
+        for row in rows:
+            nurture = row["kind"] == "nurture"
+            index.append(
+                {
+                    "id": row["id"], "kind": row["kind"], "owner": row["owner"], "stage": row["stage"],
+                    "rfq_id": row["rfq_id"], "created_at": row["created_at"],
+                    "email": (row["n_email"] if nurture else row["r_email"]) or "",
+                    "phone": (row["n_phone"] if nurture else row["r_phone"]) or "",
+                    "company": (row["n_company"] if nurture else row["r_company"]) or "",
+                    "name": (row["n_name"] if nurture else row["r_name"]) or "",
+                }
+            )
+        return index
+
+    def find_duplicate_lead_hints(self, tenant_id: str, lead_id: str) -> list[dict]:
+        """同邮箱或同公司名的其他未合并线索（仅提示，不自动合并；上限 5 条）。"""
+        index = self.lead_contact_index(tenant_id)
+        target = next((item for item in index if item["id"] == lead_id), None)
+        if not target:
+            return []
+        email = target["email"].strip().lower()
+        company = re.sub(r"\s+", "", target["company"].strip().lower())
+        hints = []
+        for item in index:
+            if item["id"] == lead_id:
+                continue
+            matched = []
+            if email and item["email"].strip().lower() == email:
+                matched.append("同邮箱")
+            item_company = re.sub(r"\s+", "", item["company"].strip().lower())
+            if company and item_company == company:
+                matched.append("同公司")
+            if matched:
+                entry = dict(item)
+                entry["matched_by"] = matched
+                hints.append(entry)
+        return hints[:5]
+
+    def merged_related_leads(self, tenant_id: str, lead_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM leads WHERE tenant_id=? AND merged_into=? ORDER BY merged_at",
+            (tenant_id, lead_id),
+        ).fetchall()
+
+    def merge_leads(self, tenant_id: str, primary_id: str, secondary_id: str, actor: str) -> None:
+        """人工合并（管理员）：次级线索标记并入并移出列表；全部记录与历史保留。"""
+        if primary_id == secondary_id:
+            raise ValueError("不能把线索合并到自身")
+        primary = self.get_lead(tenant_id, primary_id)
+        secondary = self.get_lead(tenant_id, secondary_id)
+        if not primary or not secondary:
+            raise ValueError("线索不存在")
+        if (secondary["merged_into"] or "") or (primary["merged_into"] or ""):
+            raise ValueError("线索已合并，不能重复操作")
+        if secondary["rfq_id"] and secondary["rfq_id"] == primary["rfq_id"]:
+            raise ValueError("两条线索属于同一询价记录")
+        timestamp = now_iso()
+        owner_transferred = ""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE leads SET merged_into=?, merged_at=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (primary_id, timestamp, timestamp, tenant_id, secondary_id),
+            )
+            if not (primary["owner"] or "").strip() and (secondary["owner"] or "").strip():
+                self.conn.execute(
+                    "UPDATE leads SET owner=?, updated_at=? WHERE tenant_id=? AND id=?",
+                    (secondary["owner"], timestamp, tenant_id, primary_id),
+                )
+                owner_transferred = secondary["owner"]
+            self._audit(tenant_id, "lead", secondary_id, "merged", actor, f"into={primary_id}")
+            details = f"from={secondary_id}"
+            if owner_transferred:
+                details += f";owner_transferred={owner_transferred}"
+            self._audit(tenant_id, "lead", primary_id, "merged_in", actor, details)
+
     # ── V1-09：跟进节点（技术确认/样品/报价准备）──────────────────────────────
     def list_lead_milestones(self, tenant_id: str, lead_id: str) -> dict[str, sqlite3.Row]:
         rows = self.conn.execute(
@@ -4387,6 +4474,72 @@ def admin_permission_area(path: str) -> tuple[str, str, str]:
     return "访问管理功能", "管理员", "该功能只对管理员开放。"
 
 
+def duplicate_leads_section(db: Database, tenant_id: str, lead: sqlite3.Row, is_admin: bool) -> str:
+    """重复线索提示区块（V1-08）：提示同邮箱/同公司线索；管理员可人工合并；列出已并入记录。"""
+    hints = db.find_duplicate_lead_hints(tenant_id, lead["id"])
+    related = db.merged_related_leads(tenant_id, lead["id"])
+    if not hints and not related:
+        return ""
+
+    def link(item_id: str, kind: str, rfq_id: str | None, label: str) -> str:
+        href = f"/admin/sales/{rfq_id}" if kind == "rfq" and rfq_id else f"/admin/leads/{item_id}"
+        return f"<a href='{href}'>{esc(label)}</a>"
+
+    parts = [
+        "<section class='card' style='margin-top:18px' id='duplicates'><div class='panel-title'><h2>重复线索提示</h2>"
+        "<span class='muted'>仅提示，系统不会自动合并</span></div>"
+    ]
+    if hints:
+        parts.append("<div class='simple-list'>")
+        for hint in hints:
+            kind_label = "待培育" if hint["kind"] == "nurture" else "RFQ"
+            parts.append(
+                "<div class='source'><span>"
+                + link(hint["id"], hint["kind"], hint["rfq_id"], f"{hint['name'] or hint['company'] or hint['id'][:8]}（{kind_label}）")
+                + f"<br><span class='field-state'>匹配：{'、'.join(hint['matched_by'])} · 邮箱：{esc(hint['email'] or '—')} · 公司：{esc(hint['company'] or '—')}</span></span></div>"
+            )
+        parts.append("</div>")
+        if is_admin:
+            options = "".join(
+                f"<option value='{hint['id']}'>{esc(hint['name'] or hint['company'] or hint['id'][:8])}（{'待培育' if hint['kind'] == 'nurture' else 'RFQ'} · {'、'.join(hint['matched_by'])}）</option>"
+                for hint in hints
+            )
+            parts.append(
+                f"<form method='post' action='/admin/leads/{lead['id']}/merge'><label>合并一条重复线索到本线索（管理员；原消息、RFQ、人工任务与操作历史全部保留）</label>"
+                f"<select name='secondary_lead_id'>{options}</select><button class='danger'>确认合并</button></form>"
+            )
+    else:
+        parts.append("<p class='muted'>未发现同邮箱或同公司名的其他线索。</p>")
+    if related:
+        parts.append("<p class='field-state' style='margin-top:10px'>已并入本线索：</p><div class='simple-list'>")
+        for row in related:
+            kind_label = "待培育" if row["kind"] == "nurture" else "RFQ"
+            parts.append(
+                "<div class='source'><span>"
+                + link(row["id"], row["kind"], row["rfq_id"], row["contact_name"] or row["company"] or row["id"][:8])
+                + f"<br><span class='field-state'>类型：{kind_label} · 并入时间：{esc(row['merged_at'] or '')}</span></span></div>"
+            )
+        parts.append("</div>")
+    parts.append("</section>")
+    return "".join(parts)
+
+
+def merged_into_banner(db: Database, tenant_id: str, lead: sqlite3.Row) -> str:
+    """线索已并入其他线索时的说明横幅（保留全部记录，仅展示层归并）。"""
+    target_id = (lead["merged_into"] or "").strip()
+    if not target_id:
+        return ""
+    target = db.get_lead(tenant_id, target_id)
+    if not target:
+        return "<div class='notice'>该线索已并入其他线索；全部记录与历史保留。</div>"
+    href = f"/admin/sales/{target['rfq_id']}" if target["kind"] == "rfq" and target["rfq_id"] else f"/admin/leads/{target['id']}"
+    label = target["contact_name"] or target["company"] or target["id"][:8]
+    return (
+        f"<div class='notice'>该线索已并入 <a href='{href}'>{esc(label)}</a>"
+        f"（{'待培育' if target['kind'] == 'nurture' else 'RFQ'} 线索 · {esc(lead['merged_at'] or '')}）；全部记录与历史保留。</div>"
+    )
+
+
 def permission_notice(area: str, role_label: str, required: str, why: str) -> str:
     """权限错误卡：复刻朋友设计稿的权限弹窗（模态样式），说明"为什么被拦下"。"""
     return f"""<div class='perm-wrap'><section class='dlg' role='alertdialog' aria-labelledby='perm-title'>
@@ -4590,7 +4743,7 @@ AUDIT_ACTION_LABELS = {
     "allowed_public_download": "开放下载", "revoked_public_download": "撤销下载",
     "usage_changed": "更新文件可见性", "public_permission_revoked_on_usage_change": "可见性变更撤销公开",
     "category_candidate_set": "登记品类候选", "category_approved": "核准品类", "category_candidate_cleared": "清除品类候选",
-    "nurture_created": "登记待培育线索",
+    "nurture_created": "登记待培育线索", "merged": "线索被并入", "merged_in": "并入重复线索",
     "public_download_blocked_hash_mismatch": "拦截下载（哈希不符）", "modules_updated": "模块授权",
     "exported": "导出数据", "completed": "完成", "sent": "记录发送", "discarded": "废弃",
     "milestone_completed": "节点完成", "milestone_reopened": "节点重开",
@@ -6074,6 +6227,19 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     notice = "milestone_invalid"
                 self.redirect(f"/admin/leads/{match.group(1)}?notice={notice}#milestones")
+                return
+            match = re.fullmatch(r"/admin/leads/([a-f0-9]+)/merge", path)
+            if match:
+                if self.user_role != "admin":
+                    self.send_html(self.console_page("无权操作", permission_notice("合并重复线索", "员工", "管理员", "合并线索会改变展示与归属，只对管理员开放。"), "sales"), 403)
+                    return
+                primary_id = match.group(1)
+                self.db.merge_leads(self.tenant_id, primary_id, str(form.get("secondary_lead_id", "")), self.actor)
+                primary = self.db.get_lead(self.tenant_id, primary_id)
+                if primary and primary["kind"] != "nurture" and primary["rfq_id"]:
+                    self.redirect(f"/admin/sales/{primary['rfq_id']}?notice=merged")
+                else:
+                    self.redirect(f"/admin/leads/{primary_id}?notice=merged")
                 return
             match = re.fullmatch(r"/admin/users/([a-f0-9]+)/toggle", path)
             if match:
@@ -7607,6 +7773,7 @@ class Handler(BaseHTTPRequestHandler):
             "milestone_on": "跟进节点已标记完成。",
             "milestone_off": "跟进节点已重新打开。",
             "milestone_invalid": "该跟进节点不可用。",
+            "merged": "已合并该线索；原记录与历史全部保留。",
         }.get(notice, "")
         notice_banner = f"<div class='notice'>{esc(notice_text)}</div>" if notice_text else ""
         stages = self.db.get_lead_stages(self.tenant_id)
@@ -7662,12 +7829,16 @@ class Handler(BaseHTTPRequestHandler):
             for row in timeline_rows
         ) or "<p class='muted'>暂无操作记录。</p>"
         source_label = NURTURE_SOURCE_LABELS.get(lead["source"], lead["source"] or "未填")
+        merged_banner = merged_into_banner(self.db, self.tenant_id, lead)
+        duplicates_section = duplicate_leads_section(self.db, self.tenant_id, lead, self.user_role == "admin")
         body = f"""
 <div class='toolbar'><div><a href='/admin/sales'>← 返回销售工作台</a><h1>{esc(lead['contact_name'] or lead['company'] or '待培育线索')}</h1>
 <div class='muted'>{esc(lead['company'])} <span class='badge pending_review'>待培育</span> <span class='badge'>{esc(stage_labels.get(lead['stage'], lead['stage'] or '新线索'))}</span></div></div></div>
 {notice_banner}
+{merged_banner}
 {focus_html}
 <div class='summary-strip'><span>来源：{esc(source_label)}</span><span>负责人：{esc(lead['owner'] or '未分配')}</span><span>跟进：{esc(lead['next_follow_up'] or '未安排')}</span><span>登记：{esc(lead['created_at'])}</span></div>
+{duplicates_section}
 <div class='grid'><section class='card' id='lead-update'><h2>线索处理</h2>{closed_info}{assign_action}<form method='post' action='/admin/leads/{lead_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}'><label>销售备注</label><textarea name='note'>{esc(lead['note'])}</textarea><label>关闭原因（阶段设为「已关闭」时必填）</label><input name='close_reason' value='{esc(lead['close_reason'] or '')}' placeholder='例如：客户取消项目 / 已转向其他方案'><p><button>保存跟进状态</button></p></form></section>
 <section class='card'><h2>联系人与来源</h2><p><b>联系人：</b>{esc(lead['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(lead['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(lead['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(lead['contact_phone']) or '未提供'}</p><p><b>来源渠道：</b>{esc(source_label)}</p><p><b>需求摘要：</b>{esc(lead['note']) or '无'}</p><p class='field-state'>待培育线索尚未形成 RFQ；客户在官网提交询价后，销售可核对是否为同一采购需求（人工合并，系统不会自动合并）。</p></section></div>
 <section class='card' style='margin-top:18px' id='milestones'><div class='panel-title'><h2>跟进节点</h2><span class='muted'>技术确认 / 样品准备 / 报价准备</span></div><div class='simple-list'>{"".join(milestone_rows)}</div></section>
@@ -7771,6 +7942,7 @@ class Handler(BaseHTTPRequestHandler):
             "reply_discarded": "<div class='notice'>草稿已废弃。</div>",
             "reply_stop_blocked": "<div class='error'>发送被阻止：买方已要求停止主动联系；请仅在买方主动发起沟通后回应。</div>",
             "reply_invalid": "<div class='error'>回复操作未完成：请检查内容与操作。</div>",
+            "merged": "<div class='notice'>已合并该线索；原记录与历史全部保留。</div>",
         }.get(notice_code, "")
         claim_action = f"<form method='post' action='/admin/sales/{rfq_id}/claim'><button>领取这条会话</button></form>" if not lead["owner"] and self.user_role != "admin" and self.has_module("sales") else ""
         sales_options = "".join(f"<option value='{esc(user['email'])}' {'selected' if lead['owner'] == user['email'] else ''}>{esc(user['display_name'])} · {esc(user['email'])}</option>" for user in self.db.list_users(self.tenant_id) if user["role"] == "employee" and user["active"] and "sales" in self.db.get_user_modules(user["id"]))
@@ -7795,11 +7967,15 @@ class Handler(BaseHTTPRequestHandler):
             focus_label, focus_title, focus_text = "当前任务 · 跟进", "处理这份采购请求", "核对阶段与跟进日期；联系买家前注意其主动联系授权。"
             focus_actions = ""
         focus_html = f"<div class='focus'><div><span class='focus-label'>{esc(focus_label)}</span><strong>{esc(focus_title)}</strong><p>{esc(focus_text)}</p></div><div class='actions'>{focus_actions}</div></div>"
+        merged_banner = merged_into_banner(self.db, self.tenant_id, lead)
+        duplicates_section = duplicate_leads_section(self.db, self.tenant_id, lead, self.user_role == "admin")
         body = f"""
 <div class='toolbar'><div><a href='/admin/sales'>← 返回销售工作台</a><h1>销售线索 {esc(rfq['id'])}</h1><div class='muted'>RFQ 状态：{esc(rfq['status'])} · 会话：{esc(rfq['conversation_id'])} · 当前 v{esc(rfq['current_revision'])}</div></div></div>
 {notice}
 {stop_banner}
+{merged_banner}
 {change_banner}
+{duplicates_section}
 {focus_html}
 <div class='grid'><section class='card' id='lead-update'><h2>线索处理</h2><p><b>会话负责人：</b>{esc(lead['owner'] or '未领取')}</p>{closed_info}{assign_action if lead['owner'] else ''}<form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}' {followup_disabled}><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><label>关闭原因（阶段设为「已关闭」时必填）</label><input name='close_reason' value='{esc(lead['close_reason'] or '')}' placeholder='例如：客户取消项目 / 已转向其他方案'><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
 {stop_form}
