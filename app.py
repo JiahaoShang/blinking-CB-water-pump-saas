@@ -1069,6 +1069,13 @@ class Database:
             (tenant_id, product_id),
         ).fetchall()
 
+    def list_product_versions(self, tenant_id: str, product_id: str) -> list[sqlite3.Row]:
+        """版本历史（倒序：最新在前）；含已撤回/被替换版本，供版本对比与审计。"""
+        return self.conn.execute(
+            "SELECT * FROM product_versions WHERE tenant_id=? AND product_id=? ORDER BY version DESC",
+            (tenant_id, product_id),
+        ).fetchall()
+
     def get_published_version(self, tenant_id: str, product_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT * FROM product_versions WHERE tenant_id=? AND product_id=? AND status='published' "
@@ -3381,6 +3388,55 @@ def guard_answer_field_selection(question: str, selected: str | None, available_
 
 
 RESTRICTED_SOURCE_ANSWER_REASON = "来源文件已被标记禁止使用；按现有规则不对外引用"
+
+
+def diff_product_snapshots(old_snapshot: dict, new_snapshot: dict) -> dict:
+    """逐项对比两份发布快照（V1-02 版本对比）。
+
+    返回字段值/单位变化、公开文件增删、缺项增补/消除、品类变化；供版本历史展示，
+    不改变任何数据。旧快照允许缺新字段（历史版本），缺失一律按空值参与比较。
+    """
+    old_fields = {field["field_key"]: field for field in (old_snapshot or {}).get("fields", [])}
+    new_fields = {field["field_key"]: field for field in (new_snapshot or {}).get("fields", [])}
+    changes = []
+    for key in sorted(set(old_fields) | set(new_fields)):
+        old_field = old_fields.get(key)
+        new_field = new_fields.get(key)
+        old_text = f"{old_field['value']} {old_field['unit']}".strip() if old_field else ""
+        new_text = f"{new_field['value']} {new_field['unit']}".strip() if new_field else ""
+        if old_text == new_text:
+            continue
+        if old_field is None:
+            status = "added"
+        elif new_field is None:
+            status = "removed"
+        else:
+            status = "changed"
+        changes.append(
+            {
+                "field_key": key,
+                "label": (new_field or old_field).get("label", key),
+                "status": status,
+                "old": old_text,
+                "new": new_text,
+            }
+        )
+    old_files = {entry["filename"] for entry in (old_snapshot or {}).get("public_sources", [])}
+    new_files = {entry["filename"] for entry in (new_snapshot or {}).get("public_sources", [])}
+    old_missing = set((old_snapshot or {}).get("missing_fields", []))
+    new_missing = set((new_snapshot or {}).get("missing_fields", []))
+    old_category = ((old_snapshot or {}).get("product", {}) or {}).get("category", "")
+    new_category = ((new_snapshot or {}).get("product", {}) or {}).get("category", "")
+    return {
+        "changes": changes,
+        "files_added": sorted(new_files - old_files),
+        "files_removed": sorted(old_files - new_files),
+        "missing_added": sorted(new_missing - old_missing),
+        "missing_resolved": sorted(old_missing - new_missing),
+        "category_old": old_category,
+        "category_new": new_category,
+        "category_changed": old_category != new_category,
+    }
 
 
 def source_is_restricted(db: Database, tenant_id: str, field: dict) -> bool:
@@ -6185,6 +6241,53 @@ class Handler(BaseHTTPRequestHandler):
             f"<a class='button secondary' href='/products/{esc(product['slug'])}' target='_blank'>查看买方页 ↗</a>"
             if published_version and product["status"] != "withdrawn" else ""
         )
+        version_rows = self.db.list_product_versions(self.tenant_id, product_id)
+        version_blocks = []
+        for index, version_row in enumerate(version_rows):
+            snapshot = json.loads(version_row["snapshot_json"])
+            version_status_label = "当前公开" if version_row["status"] == "published" else "已下线（被替换或撤回，旧询价仍引用该版）"
+            header = f"v{version_row['version']} · {version_status_label} · {esc(version_row['created_by'] or '')} · {esc(version_row['created_at'] or '')}"
+            if index + 1 < len(version_rows):
+                previous_snapshot = json.loads(version_rows[index + 1]["snapshot_json"])
+                diff = diff_product_snapshots(previous_snapshot, snapshot)
+                summary_bits = []
+                if diff["changes"]:
+                    summary_bits.append(f"字段变化 {len(diff['changes'])} 项")
+                if diff["files_added"] or diff["files_removed"]:
+                    summary_bits.append(f"公开文件 +{len(diff['files_added'])} / -{len(diff['files_removed'])}")
+                if diff["missing_added"] or diff["missing_resolved"]:
+                    summary_bits.append(f"缺项 +{len(diff['missing_added'])} / -{len(diff['missing_resolved'])}")
+                if diff["category_changed"]:
+                    summary_bits.append("品类变化")
+                summary = "；".join(summary_bits) or "与上一版无可见变化"
+                detail_items = "".join(
+                    f"<li>{esc(change['label'])}：{esc(change['old'] or '（无）')} → {esc(change['new'] or '（移除）')}</li>"
+                    for change in diff["changes"]
+                )
+                if diff["category_changed"]:
+                    detail_items += f"<li>品类：{esc(diff['category_old'] or '（无）')} → {esc(diff['category_new'] or '（无）')}</li>"
+                for filename in diff["files_added"]:
+                    detail_items += f"<li>公开文件新增：{esc(filename)}</li>"
+                for filename in diff["files_removed"]:
+                    detail_items += f"<li>公开文件移除：{esc(filename)}</li>"
+                for label in diff["missing_added"]:
+                    detail_items += f"<li>缺项新增：{esc(label)}</li>"
+                for label in diff["missing_resolved"]:
+                    detail_items += f"<li>缺项补齐：{esc(label)}</li>"
+                detail = f"<details><summary>查看逐项变化</summary><ul style='margin:6px 0 0 18px;padding:0'>{detail_items}</ul></details>" if detail_items else ""
+                version_blocks.append(
+                    f"<div class='source' style='display:block'><b>{header}</b><br><span class='field-state'>与上一版对比：{summary}</span>{detail}</div>"
+                )
+            else:
+                version_blocks.append(
+                    f"<div class='source' style='display:block'><b>{header}</b><br>"
+                    f"<span class='field-state'>首个公开版本 · 字段 {len(snapshot.get('fields', []))} 项 · 公开文件 {len(snapshot.get('public_sources', []))} 份</span></div>"
+                )
+        version_history_html = "".join(version_blocks) or "<p class='muted'>尚无发布记录。</p>"
+        version_section = (
+            "<details class='detail-toggle' style='margin-top:18px'><summary>版本历史与对比（每次发布相对上一版的字段、文件、缺项与品类变化）</summary>"
+            f"<div class='muted-block'>{version_history_html}</div></details>"
+        )
         category = (product["category"] or "").strip()
         category_candidate = (product["category_candidate"] or "").strip()
         category_source_label = CATEGORY_SOURCE_LABELS.get(product["category_candidate_source"], "")
@@ -6226,6 +6329,7 @@ class Handler(BaseHTTPRequestHandler):
 {category_section}
 <section class='card' id='fields'><div class='panel-title'><h2>字段核对（逐项）</h2><span class='muted'>待处理 {pending_count} 项</span></div>{pending_html}<p class='muted'>候选字段需逐项核准或驳回；驳回保留原值并记录原因。已核准关键字段被修改后会回到待核对，需重新核准并发布新版本；缺项不会被推测值填充。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th><th>操作</th></tr></thead><tbody>{field_table}</tbody></table><details class='detail-toggle'><summary>手动补充 / 修改字段值</summary><div><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置 *</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></div></details></section>
 <section class='card' style='margin-top:18px'><div class='panel-title'><h2>发布与版本</h2><span class='muted'>{version_line}</span></div><div class='actions' style='display:flex;gap:8px;flex-wrap:wrap'>{action_buttons}</div><p class='muted'>发布将冻结当前已核准事实与已开放公开文件清单；撤回后买方页不可访问，已提交的询价保留原版本快照。</p></section>
+{version_section}
 <section class='card' style='margin-top:18px' id='sources'><h2>登记来源资料</h2>{source_rows}<p class='muted'>文件默认仅内部使用、不对外下载；可见性分「仅内部 / 禁止使用」，禁止使用的文件不进入买方页、不参与新回答引用。上传后的文本/CSV 会按内容识别已知字段标签；PDF、图片、CAD 等不支持的格式会明确失败，请人工录入。开放公开下载前必须确认文件归属。</p><hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>MARKDOWN</option><option>TXT</option><option>IMAGE</option><option>DXF</option><option>STEP</option><option>OTHER</option></select></div><div><label>文件归属 *</label><select name='scope' required><option value=''>请选择文件归属</option><option value='exact_model'>本型号专属文件</option><option value='series'>系列级资料（非本型号专属）</option><option value='unknown'>归属待核对（不上公开页）</option></select></div><div class='full'><label>原文位置 *</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section>
 <details class='detail-toggle' style='margin-top:18px'><summary>查看产品基本信息</summary><div class='muted-block'><p><b>主要用途：</b>{esc(product['use_case']) or '未填写'}</p><p><b>固定买方链接：</b>{('/products/' + esc(product['slug'])) if published_version else '发布后生成'}</p><p>型号是产品通用事实；买方本次工况将在后续会话中单独保存，不写回这里。</p><p>核准动作按字段逐项执行；未被逐项核准或已被驳回的内容不会进入匹配、问答和公开页。</p></div></details>
 """

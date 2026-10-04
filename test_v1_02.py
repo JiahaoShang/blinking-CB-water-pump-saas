@@ -396,5 +396,122 @@ class CategoryApprovalTests(unittest.TestCase):
         self.assertEqual(status, 400)
 
 
+class VersionHistoryTests(unittest.TestCase):
+    """版本历史与对比：修订/撤回可见，逐版本差异（字段/文件/缺项/品类），旧快照保留。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin_cookie = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.db.conn.close()
+        cls.thread.join()
+        cls.temp_dir.cleanup()
+
+    def test_diff_function_unit(self):
+        from app import diff_product_snapshots
+
+        old = {
+            "product": {"category": "离心泵"},
+            "fields": [
+                {"field_key": "flow_range", "label": "流量范围", "value": "20-80", "unit": "m³/h"},
+                {"field_key": "head_range", "label": "扬程范围", "value": "18-42", "unit": "m"},
+            ],
+            "public_sources": [{"filename": "a.pdf"}],
+            "missing_fields": ["期望交期"],
+        }
+        new = {
+            "product": {"category": ""},
+            "fields": [
+                {"field_key": "flow_range", "label": "流量范围", "value": "25-85", "unit": "m³/h"},
+                {"field_key": "power", "label": "功率", "value": "5.5", "unit": "kW"},
+            ],
+            "public_sources": [{"filename": "a.pdf"}, {"filename": "b.pdf"}],
+            "missing_fields": [],
+        }
+        diff = diff_product_snapshots(old, new)
+        self.assertEqual(
+            [(c["field_key"], c["status"], c["old"], c["new"]) for c in diff["changes"]],
+            [
+                ("flow_range", "changed", "20-80 m³/h", "25-85 m³/h"),
+                ("head_range", "removed", "18-42 m", ""),
+                ("power", "added", "", "5.5 kW"),
+            ],
+        )
+        self.assertEqual(diff["files_added"], ["b.pdf"])
+        self.assertEqual(diff["files_removed"], [])
+        self.assertEqual(diff["missing_resolved"], ["期望交期"])
+        self.assertEqual(diff["missing_added"], [])
+        self.assertTrue(diff["category_changed"])
+        # 空快照容错
+        empty = diff_product_snapshots({}, {})
+        self.assertEqual(empty["changes"], [])
+        self.assertFalse(empty["category_changed"])
+
+    def test_detail_page_version_history_renders_diffs(self):
+        pid = self.db.create_product("demo-tenant", "SLICE-V2", "版本泵", "测试", "demo-admin")
+        sid_a = self.db.add_source(
+            "demo-tenant", pid, "SLICE-V2-手册A.txt", "TXT", "第1页：参数表",
+            "流量范围: 20-80 m³/h\n".encode(), "demo-admin", scope="exact_model",
+        )
+        self.db.approve_field("demo-tenant", pid, "flow_range")
+        self.db.finalize_product_review("demo-tenant", pid)
+        self.db.allow_public_source("demo-tenant", pid, sid_a, "demo-admin")
+        self.db.publish_product("demo-tenant", pid)
+        # v2：改流量值 + 核准品类 + 新增公开文件 B
+        self.db.save_field("demo-tenant", pid, "flow_range", "25-85", "m³/h", sid_a, "第1页：参数表", "demo-admin")
+        self.db.approve_field("demo-tenant", pid, "flow_range")
+        self.db.finalize_product_review("demo-tenant", pid)
+        self.db.set_category_candidate("demo-tenant", pid, "离心泵", "manual", "demo-admin")
+        self.db.approve_category("demo-tenant", pid, "demo-admin")
+        sid_b = self.db.add_source(
+            "demo-tenant", pid, "SLICE-V2-手册B.txt", "TXT", "第2页：曲线",
+            "扬程范围: 18-42 m\n".encode(), "demo-admin", scope="exact_model",
+        )
+        # B 的提取候选本轮不纳入：驳回后重新完成核对，再开放下载并发布 v2
+        self.db.reject_field("demo-tenant", pid, "head_range", "本轮先不纳入演示", "demo-admin")
+        self.db.finalize_product_review("demo-tenant", pid)
+        self.db.allow_public_source("demo-tenant", pid, sid_b, "demo-admin")
+        self.db.publish_product("demo-tenant", pid)
+        _s, _, page = form_request(self.server, "GET", f"/admin/products/{pid}", cookie=self.admin_cookie)
+        self.assertIn("版本历史与对比", page)
+        self.assertIn("v2 · 当前公开", page)
+        self.assertIn("v1 · 已下线", page)
+        self.assertIn("字段变化 1 项；公开文件 +1 / -0；品类变化", page)
+        self.assertIn("流量范围：20-80 m³/h → 25-85 m³/h", page)
+        self.assertIn("品类：（无） → 离心泵", page)
+        self.assertIn("公开文件新增：SLICE-V2-手册B.txt", page)
+        self.assertIn("首个公开版本 · 字段 1 项 · 公开文件 1 份", page)
+        # 撤回：当前版本 … 页面不再有「当前公开」，出现撤回标记
+        self.db.withdraw_product("demo-tenant", pid, "demo-admin")
+        _s, _, page = form_request(self.server, "GET", f"/admin/products/{pid}", cookie=self.admin_cookie)
+        self.assertNotIn("v2 · 当前公开", page)
+        self.assertIn("v2 · 已下线（被替换或撤回，旧询价仍引用该版）", page)
+
+    def test_versions_list_tenant_isolation(self):
+        pid = self.db.create_product("demo-tenant", "SLICE-V3", "隔离泵", "测试", "demo-admin")
+        self.db.add_source(
+            "demo-tenant", pid, "v3.txt", "TXT", "第1页", "流量范围: 20-80 m³/h\n".encode(), "demo-admin", scope="exact_model"
+        )
+        self.db.approve_field("demo-tenant", pid, "flow_range")
+        self.db.finalize_product_review("demo-tenant", pid)
+        self.db.publish_product("demo-tenant", pid)
+        self.assertEqual([row["version"] for row in self.db.list_product_versions("demo-tenant", pid)], [1])
+        self.db.ensure_tenant("other-tenant", "另一家企业")
+        self.assertEqual(self.db.list_product_versions("other-tenant", pid), [])
+
+
 if __name__ == "__main__":
     unittest.main()
