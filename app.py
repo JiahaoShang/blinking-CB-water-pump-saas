@@ -10,8 +10,10 @@ data, not production authentication or file storage.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import html
+import io
 import json
 import mimetypes
 import os
@@ -391,6 +393,31 @@ class Database:
                 value_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (tenant_id, key)
+            );
+            CREATE TABLE IF NOT EXISTS product_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                product_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                site_key TEXT NOT NULL DEFAULT '',
+                conversation_id TEXT,
+                detail TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_product_events_tenant ON product_events(tenant_id, created_at);
+            CREATE TABLE IF NOT EXISTS material_tasks (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                product_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                source_question TEXT NOT NULL DEFAULT '',
+                source_ref TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                assignee TEXT NOT NULL DEFAULT '',
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                completed_by TEXT NOT NULL DEFAULT '',
+                completed_at TEXT
             );
             CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY,
@@ -1914,6 +1941,308 @@ class Database:
             "SELECT DISTINCT actor FROM audit_log WHERE tenant_id=? ORDER BY actor", (tenant_id,)
         )]
         return entity_types, actors
+
+    # ── V1-10 分析导出：产品页事件埋点 ────────────────────────────────────────
+    def log_product_event(self, tenant_id: str, product_id: str, event: str, site_key: str = "", conversation_id: str | None = None, detail: str = "") -> None:
+        """记录产品页事件（page_view / download）。匿名事件无会话身份；有上下文时带会话键。"""
+        self.conn.execute(
+            "INSERT INTO product_events(tenant_id, product_id, event, site_key, conversation_id, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (tenant_id, product_id, event, site_key, conversation_id, detail, now_iso()),
+        )
+        self.conn.commit()
+
+    # ── V1-10 分析导出：资料补充任务（资料缺口 → 可分派的修订任务）───────────
+    def create_material_task(self, tenant_id: str, product_id: str, source_ref: str, assignee: str, actor: str) -> str:
+        product = self.get_product(tenant_id, product_id)
+        if not product:
+            raise ValueError("产品不存在或不属于当前企业")
+        if source_ref:
+            existing = self.conn.execute(
+                "SELECT id FROM material_tasks WHERE tenant_id=? AND source_ref=? AND status='open'",
+                (tenant_id, source_ref),
+            ).fetchone()
+            if existing:
+                raise ValueError("该问题已登记资料补充任务")
+        assignee = assignee.strip()
+        if assignee:
+            user = self.conn.execute(
+                "SELECT id FROM users WHERE tenant_id=? AND email=? AND active=1", (tenant_id, assignee)
+            ).fetchone()
+            if not user:
+                raise ValueError("接收人无效")
+        question = ""
+        if source_ref:
+            row = self.conn.execute(
+                "SELECT m.content FROM answers a JOIN messages m ON m.id=a.question_message_id WHERE a.tenant_id=? AND a.id=?",
+                (tenant_id, source_ref),
+            ).fetchone()
+            question = (row["content"] if row else "")[:200]
+        task_id = secrets.token_hex(12)
+        timestamp = now_iso()
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO material_tasks(id, tenant_id, product_id, title, source_question, source_ref, status, assignee, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
+                (task_id, tenant_id, product_id, f"资料补充 · {product['model']}", question, source_ref, assignee, actor, timestamp),
+            )
+            self._audit(tenant_id, "material_task", task_id, "created", actor, f"product={product['model']};assignee={assignee or '待分派'};ref={source_ref}")
+        return task_id
+
+    def complete_material_task(self, tenant_id: str, task_id: str, actor: str) -> None:
+        task = self.conn.execute(
+            "SELECT * FROM material_tasks WHERE tenant_id=? AND id=?", (tenant_id, task_id)
+        ).fetchone()
+        if not task:
+            raise ValueError("任务不存在")
+        if task["status"] == "done":
+            return
+        with self.conn:
+            self.conn.execute(
+                "UPDATE material_tasks SET status='done', completed_by=?, completed_at=? WHERE tenant_id=? AND id=?",
+                (actor, now_iso(), tenant_id, task_id),
+            )
+            self._audit(tenant_id, "material_task", task_id, "completed", actor, task["title"])
+
+    def list_material_tasks(self, tenant_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT t.*, p.model FROM material_tasks t LEFT JOIN products p ON p.id=t.product_id "
+            "WHERE t.tenant_id=? ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END, t.created_at DESC",
+            (tenant_id,),
+        ).fetchall()
+
+    # ── V1-10 分析导出：报表聚合（只统计实际事件；明细可追溯）────────────────
+    def analytics_snapshot(self, tenant_id: str, days: int = 0, exclude_demo: bool = False) -> dict[str, object]:
+        """分析报表数据快照。定义：days=0 全部时间；exclude_demo=排除会话来源为演示夹具（demo-fixture）的记录。"""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat() if days else None
+        demo_clause = " AND c.source <> 'demo-fixture'" if exclude_demo else ""
+
+        def time_and(alias: str) -> str:
+            return f" AND {alias}.created_at >= ?" if cutoff else ""
+
+        def time_params() -> list[object]:
+            return [cutoff] if cutoff else []
+
+        stages = self.get_lead_stages(tenant_id)
+        stage_labels = {stage["key"]: stage["label"] for stage in stages}
+        terminal_keys = {stage["key"] for stage in stages if stage["terminal"]}
+        today = datetime.now(timezone.utc).date().isoformat()
+
+        # 会话与来源
+        conv_rows = self.conn.execute(
+            f"SELECT c.id, c.source, c.locale, c.created_at FROM conversations c WHERE c.tenant_id=?{time_and('c')}{demo_clause} ORDER BY c.created_at DESC",
+            [tenant_id, *time_params()],
+        ).fetchall()
+        by_source: dict[str, int] = {}
+        for row in conv_rows:
+            by_source[row["source"]] = by_source.get(row["source"], 0) + 1
+
+        # RFQ
+        rfq_rows_raw = self.conn.execute(
+            f"SELECT r.id, r.status, r.created_at, r.current_revision, r.quantity, r.destination, r.requested_model, r.missing_json, r.snapshot_json, p.model, c.source AS conv_source, l.stage AS lead_stage "
+            f"FROM rfqs r LEFT JOIN products p ON p.id=r.product_id LEFT JOIN conversations c ON c.id=r.conversation_id LEFT JOIN leads l ON l.rfq_id=r.id AND l.tenant_id=r.tenant_id "
+            f"WHERE r.tenant_id=?{time_and('r')}{demo_clause} ORDER BY r.created_at DESC",
+            [tenant_id, *time_params()],
+        ).fetchall()
+        rfq_rows: list[dict[str, object]] = []
+        rfq_by_entry: dict[str, int] = {}
+        rfq_missing_counter: dict[str, int] = {}
+        rfq_submitted = 0
+        rfq_needs_info = 0
+        for row in rfq_rows_raw:
+            try:
+                entry = str(json.loads(row["snapshot_json"]).get("entry_surface") or "chat")
+            except (json.JSONDecodeError, TypeError):
+                entry = "chat"
+            rfq_by_entry[entry] = rfq_by_entry.get(entry, 0) + 1
+            if row["status"] == "needs_info":
+                rfq_needs_info += 1
+            else:
+                rfq_submitted += 1
+            try:
+                missing = json.loads(row["missing_json"])
+            except (json.JSONDecodeError, TypeError):
+                missing = []
+            for label in missing:
+                rfq_missing_counter[label] = rfq_missing_counter.get(label, 0) + 1
+            rfq_rows.append({
+                "id": row["id"], "status": row["status"], "created_at": row["created_at"],
+                "model": row["model"], "requested_model": row["requested_model"],
+                "quantity": row["quantity"], "destination": row["destination"],
+                "entry_surface": entry, "stage_label": stage_labels.get(row["lead_stage"], "—"),
+                "missing": missing,
+            })
+
+        # 需求确认与推荐
+        def status_counts(table: str, column: str = "status") -> dict[str, int]:
+            rows = self.conn.execute(
+                f"SELECT x.{column} AS status_key, COUNT(*) AS n FROM {table} x JOIN conversations c ON c.id=x.conversation_id "
+                f"WHERE x.tenant_id=?{time_and('x')}{demo_clause} GROUP BY x.{column}",
+                [tenant_id, *time_params()],
+            ).fetchall()
+            return {row["status_key"]: row["n"] for row in rows}
+
+        requirement_counts = status_counts("requirement_revisions")
+        recommendation_counts = status_counts("recommendations")
+        answer_counts = status_counts("answers", "answer_status")
+        task_counts = status_counts("human_tasks")
+
+        # 线索与跟进时效
+        lead_rows_raw = self.conn.execute(
+            f"SELECT l.id, l.rfq_id, l.stage, l.owner, l.next_follow_up, l.created_at, c.stop_proactive_contact "
+            f"FROM leads l LEFT JOIN conversations c ON c.id=l.conversation_id "
+            f"WHERE l.tenant_id=?{time_and('l')}{demo_clause} ORDER BY l.created_at DESC",
+            [tenant_id, *time_params()],
+        ).fetchall()
+        lead_rows: list[dict[str, object]] = []
+        leads_active = 0
+        leads_overdue = 0
+        leads_due_today = 0
+        quote_ready = 0
+        stage_counter: dict[str, int] = {}
+        for row in lead_rows_raw:
+            stage_counter[row["stage"]] = stage_counter.get(row["stage"], 0) + 1
+            if row["stage"] == "quote_ready":
+                quote_ready += 1
+            follow_up = row["next_follow_up"] or ""
+            stop = bool(row["stop_proactive_contact"])
+            overdue = bool(follow_up and follow_up < today and row["stage"] not in terminal_keys and not stop)
+            if row["stage"] not in terminal_keys:
+                leads_active += 1
+            if not stop and follow_up == today and row["stage"] not in terminal_keys:
+                leads_due_today += 1
+            if overdue:
+                leads_overdue += 1
+            lead_rows.append({
+                "id": row["id"], "rfq_id": row["rfq_id"], "stage_label": stage_labels.get(row["stage"], row["stage"]),
+                "owner": row["owner"], "next_follow_up": follow_up, "stop": stop, "overdue": overdue,
+                "created_at": row["created_at"],
+            })
+
+        # 资料缺口（needs_human 回答）与任务登记情况
+        material_open_refs = {
+            row["source_ref"]: row["id"] for row in self.conn.execute(
+                "SELECT id, source_ref FROM material_tasks WHERE tenant_id=? AND status='open' AND source_ref <> ''",
+                (tenant_id,),
+            )
+        }
+        gap_rows_raw = self.conn.execute(
+            f"SELECT a.id AS answer_id, a.product_id, a.created_at, m.content AS question, p.model, t.id AS task_id, t.status AS task_status "
+            f"FROM answers a JOIN messages m ON m.id=a.question_message_id JOIN conversations c ON c.id=a.conversation_id "
+            f"LEFT JOIN products p ON p.id=a.product_id LEFT JOIN human_tasks t ON t.question_message_id=a.question_message_id AND t.tenant_id=a.tenant_id "
+            f"WHERE a.tenant_id=? AND a.answer_status='needs_human'{time_and('a')}{demo_clause} ORDER BY a.created_at DESC",
+            [tenant_id, *time_params()],
+        ).fetchall()
+        gap_rows: list[dict[str, object]] = []
+        gap_by_product: dict[str, int] = {}
+        for row in gap_rows_raw:
+            model = row["model"] or "未关联产品"
+            gap_by_product[model] = gap_by_product.get(model, 0) + 1
+            gap_rows.append({
+                "answer_id": row["answer_id"], "product_id": row["product_id"] or "",
+                "question": row["question"] or "", "model": row["model"] or "",
+                "created_at": row["created_at"], "task_id": row["task_id"], "task_status": row["task_status"],
+                "material_task_id": material_open_refs.get(row["answer_id"], ""),
+            })
+        top_question_rows = self.conn.execute(
+            f"SELECT p.model, COUNT(*) AS n FROM answers a JOIN conversations c ON c.id=a.conversation_id "
+            f"LEFT JOIN products p ON p.id=a.product_id WHERE a.tenant_id=?{time_and('a')}{demo_clause} GROUP BY a.product_id ORDER BY n DESC LIMIT 5",
+            [tenant_id, *time_params()],
+        ).fetchall()
+
+        # 产品页事件（匿名事件不受演示排除开关影响；口径见页面说明）
+        event_rows_raw = self.conn.execute(
+            f"SELECT e.product_id, e.event, e.detail, e.created_at, p.model FROM product_events e "
+            f"LEFT JOIN products p ON p.id=e.product_id WHERE e.tenant_id=?{time_and('e')} ORDER BY e.created_at DESC",
+            [tenant_id, *time_params()],
+        ).fetchall()
+        event_counter: dict[str, int] = {}
+        event_by_product: dict[str, dict[str, int]] = {}
+        event_rows: list[dict[str, object]] = []
+        for row in event_rows_raw:
+            event_counter[row["event"]] = event_counter.get(row["event"], 0) + 1
+            bucket = event_by_product.setdefault(row["model"] or row["product_id"], {"page_view": 0, "download": 0})
+            if row["event"] in bucket:
+                bucket[row["event"]] += 1
+            event_rows.append({
+                "product_id": row["product_id"], "model": row["model"], "event": row["event"],
+                "detail": row["detail"], "created_at": row["created_at"],
+            })
+        event_products = sorted(
+            ((model, counts["page_view"], counts["download"]) for model, counts in event_by_product.items()),
+            key=lambda item: (item[1] + item[2]), reverse=True,
+        )
+
+        material_tasks = self.list_material_tasks(tenant_id)
+        return {
+            "conversations": {"total": len(conv_rows), "by_source": sorted(by_source.items(), key=lambda item: item[1], reverse=True),
+                              "rows": [dict(row) for row in conv_rows]},
+            "rfqs": {"total": len(rfq_rows), "submitted": rfq_submitted, "needs_info": rfq_needs_info,
+                     "by_entry": sorted(rfq_by_entry.items(), key=lambda item: item[1], reverse=True),
+                     "missing_top": sorted(rfq_missing_counter.items(), key=lambda item: item[1], reverse=True)[:6],
+                     "rows": rfq_rows},
+            "requirements": {"confirmed": requirement_counts.get("confirmed", 0), "candidate": requirement_counts.get("candidate", 0)},
+            "recommendations": {"total": sum(recommendation_counts.values()),
+                                "by_status": sorted(recommendation_counts.items(), key=lambda item: item[1], reverse=True)},
+            "answers": {"grounded": answer_counts.get("grounded", 0), "needs_human": answer_counts.get("needs_human", 0)},
+            "tasks": {"total": sum(task_counts.values()),
+                      "by_status": sorted(task_counts.items(), key=lambda item: item[1], reverse=True)},
+            "leads": {"total": len(lead_rows), "active": leads_active, "overdue": leads_overdue, "due_today": leads_due_today,
+                      "by_stage": [(stage["key"], stage["label"], stage_counter.get(stage["key"], 0)) for stage in stages],
+                      "rows": lead_rows},
+            "quote_ready": quote_ready,
+            "quote_ready_label": stage_labels.get("quote_ready", "可进入报价"),
+            "gaps": {"rows": gap_rows, "by_product": sorted(gap_by_product.items(), key=lambda item: item[1], reverse=True)},
+            "top_questions": [(row["model"] or "未关联产品", row["n"]) for row in top_question_rows],
+            "events": {"page_view": event_counter.get("page_view", 0), "download": event_counter.get("download", 0),
+                       "total": len(event_rows), "by_product": event_products, "rows": event_rows},
+            "material_tasks": {"open": [dict(row) for row in material_tasks if row["status"] == "open"],
+                               "done": [dict(row) for row in material_tasks if row["status"] == "done"]},
+        }
+
+    # ── V1-10 分析导出：CSV 导出数据行 ────────────────────────────────────────
+    def export_rows(self, tenant_id: str, dataset: str) -> tuple[list[str], list[list[str]]]:
+        if dataset == "products":
+            headers = ["model", "name", "status", "latest_version", "created_at", "updated_at"]
+            rows = [
+                [str(row["model"]), str(row["name"]), str(row["status"]), str(row["latest_version"] or ""), str(row["created_at"]), str(row["updated_at"])]
+                for row in self.conn.execute(
+                    "SELECT p.model, p.name, p.status, p.created_at, p.updated_at, (SELECT MAX(version) FROM product_versions v WHERE v.product_id=p.id) AS latest_version FROM products p WHERE p.tenant_id=? ORDER BY p.created_at",
+                    (tenant_id,),
+                )
+            ]
+            return headers, rows
+        if dataset == "rfqs":
+            headers = ["rfq_id", "created_at", "status", "revision", "model", "requested_model", "quantity", "destination", "requested_delivery", "contact_name", "company", "contact_email", "contact_phone", "notes", "lead_stage", "lead_owner", "next_follow_up", "conversation_source"]
+            rows = [
+                [str(row["id"]), str(row["created_at"]), str(row["status"]), str(row["current_revision"]), str(row["model"] or ""), str(row["requested_model"] or ""),
+                 str(row["quantity"] or ""), str(row["destination"] or ""), str(row["requested_delivery"] or ""), str(row["contact_name"] or ""), str(row["company"] or ""),
+                 str(row["contact_email"] or ""), str(row["contact_phone"] or ""), str(row["notes"] or ""), str(row["stage"] or ""), str(row["owner"] or ""),
+                 str(row["next_follow_up"] or ""), str(row["conv_source"] or "")]
+                for row in self.conn.execute(
+                    "SELECT r.*, p.model, l.stage, l.owner, l.next_follow_up, c.source AS conv_source FROM rfqs r "
+                    "LEFT JOIN products p ON p.id=r.product_id LEFT JOIN leads l ON l.rfq_id=r.id AND l.tenant_id=r.tenant_id "
+                    "LEFT JOIN conversations c ON c.id=r.conversation_id WHERE r.tenant_id=? ORDER BY r.created_at",
+                    (tenant_id,),
+                )
+            ]
+            return headers, rows
+        if dataset == "leads":
+            headers = ["lead_id", "rfq_id", "created_at", "stage", "owner", "next_follow_up", "business_note", "overdue", "stop_proactive_contact", "conversation_source", "company", "contact_email"]
+            stages = self.get_lead_stages(tenant_id)
+            terminal_keys = {stage["key"] for stage in stages if stage["terminal"]}
+            today = datetime.now(timezone.utc).date().isoformat()
+            rows = []
+            for row in self.conn.execute(
+                "SELECT l.id, l.rfq_id, l.stage, l.owner, l.next_follow_up, l.note, l.created_at, c.source AS conv_source, c.stop_proactive_contact, r.company, r.contact_email "
+                "FROM leads l LEFT JOIN conversations c ON c.id=l.conversation_id LEFT JOIN rfqs r ON r.id=l.rfq_id AND r.tenant_id=l.tenant_id "
+                "WHERE l.tenant_id=? ORDER BY l.created_at",
+                (tenant_id,),
+            ):
+                overdue = bool(row["next_follow_up"] and row["next_follow_up"] < today and row["stage"] not in terminal_keys and not row["stop_proactive_contact"])
+                rows.append([str(row["id"]), str(row["rfq_id"]), str(row["created_at"]), str(row["stage"]), str(row["owner"] or ""),
+                             str(row["next_follow_up"] or ""), str(row["note"] or ""), "1" if overdue else "0",
+                             "1" if row["stop_proactive_contact"] else "0", str(row["conv_source"] or ""), str(row["company"] or ""), str(row["contact_email"] or "")])
+            return headers, rows
+        raise ValueError("不支持的数据集")
 
     def create_product(self, tenant_id: str, model: str, name: str, use_case: str, actor: str = "demo-admin") -> str:
         self.ensure_tenant(tenant_id)
@@ -3487,6 +3816,9 @@ def admin_permission_area(path: str) -> tuple[str, str, str]:
         ("/admin/users", "访问「成员管理」", "管理员", "成员账号与模块授权关系到企业数据隔离，成员管理只对管理员开放。"),
         ("/admin/settings", "访问「企业设置」", "管理员", "企业设置会影响全企业买家的表单与跟进流程，只对管理员开放。"),
         ("/admin/audit", "访问「操作记录」", "管理员", "操作记录包含全企业范围的操作轨迹，只对管理员开放。"),
+        ("/admin/analytics", "访问「分析报表」", "管理员", "分析报表汇总全企业买家数据并提供导出入口，只对管理员开放。"),
+        ("/admin/export", "导出数据", "管理员", "数据导出包含买方联系信息，只对管理员开放。"),
+        ("/admin/material-tasks", "资料补充任务", "管理员", "资料补充任务的登记、分派与完成只对管理员开放。"),
         ("/admin/sites", "访问「网站 API 接入」", "模块权限「网站 API 接入」", module_why),
         ("/admin/products", "访问「产品管理」", "模块权限「产品管理」", module_why),
         ("/admin/tasks", "访问「人工任务」", "模块权限「人工任务」", module_why),
@@ -3544,6 +3876,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("tasks", "/admin/tasks", "tool", "人工任务"),
         )),
         ("产品经营", (("products", "/admin/products", "box", "产品管理"),)),
+        ("经营分析", (("analytics", "/admin/analytics", "chart", "分析报表"),)),
         ("团队与接入", (
             ("users", "/admin/users", "users", "成员管理"),
             ("sites", "/admin/sites", "globe", "网站 API 接入"),
@@ -3553,7 +3886,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("audit", "/admin/audit", "history", "操作记录"),
         )),
     )
-    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "audit": "设置与治理"}
+    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "audit": "设置与治理", "analytics": "经营分析"}
     role_label = "管理员" if role == "admin" else ("员工" if role else "未登录")
     lang_target = f"{esc(path)}?lang={'en' if lang == 'zh' else 'zh'}"
     counts = nav_counts or {}
@@ -3678,6 +4011,7 @@ AUDIT_ENTITY_LABELS = {
     "conversation": "会话", "requirement_revision": "工况修订", "recommendation": "推荐",
     "human_task": "人工任务", "rfq": "询价单", "lead": "线索", "product": "产品",
     "product_field": "产品字段", "source_document": "来源资料", "user": "成员账号", "settings": "企业设置",
+    "material_task": "资料补充任务", "export": "数据导出",
 }
 AUDIT_ACTION_LABELS = {
     "created": "创建", "updated": "更新", "activated": "启用", "deactivated": "停用",
@@ -3690,6 +4024,7 @@ AUDIT_ACTION_LABELS = {
     "review_finalized": "完成核对", "published": "发布版本", "withdrawn": "下架",
     "allowed_public_download": "开放下载", "revoked_public_download": "撤销下载",
     "public_download_blocked_hash_mismatch": "拦截下载（哈希不符）", "modules_updated": "模块授权",
+    "exported": "导出数据", "completed": "完成",
 }
 
 
@@ -3759,7 +4094,7 @@ class Handler(BaseHTTPRequestHandler):
         requirement: str | None = "deny"
         if path in ("/admin", "/admin/nav-counts"):
             requirement = None
-        elif path.startswith("/admin/demo") or path.startswith("/admin/lowara") or path.startswith("/admin/users") or path.startswith("/admin/settings") or path.startswith("/admin/audit"):
+        elif path.startswith("/admin/demo") or path.startswith("/admin/lowara") or path.startswith("/admin/users") or path.startswith("/admin/settings") or path.startswith("/admin/audit") or path.startswith("/admin/analytics") or path.startswith("/admin/export") or path.startswith("/admin/material-tasks"):
             requirement = "admin"
         else:
             for prefix, module_key in (
@@ -3933,6 +4268,7 @@ class Handler(BaseHTTPRequestHandler):
             keys.add("users")
             keys.add("settings")
             keys.add("audit")
+            keys.add("analytics")
         for module_key in GRANTABLE_MODULE_KEYS:
             if self.has_module(module_key):
                 keys.add(module_key)
@@ -4129,6 +4465,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/admin/audit":
             self.admin_audit(query)
+            return
+        if path == "/admin/analytics":
+            self.admin_analytics(query)
+            return
+        if re.fullmatch(r"/admin/export/(products|rfqs|leads)(\.csv)?", path):
+            self.admin_export(path.rsplit("/", 1)[1].split(".")[0])
             return
         if path == "/admin/sites":
             self.admin_sites(query)
@@ -5094,6 +5436,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/admin/settings/notify":
                 self.admin_settings_save_notify(form)
                 return
+            if path == "/admin/material-tasks":
+                self.admin_material_task_create(form)
+                return
+            match = re.fullmatch(r"/admin/material-tasks/([a-f0-9]+)/complete", path)
+            if match:
+                self.admin_material_task_complete(match.group(1))
+                return
             match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources", path)
             if match:
                 product_id = match.group(1)
@@ -5882,6 +6231,211 @@ class Handler(BaseHTTPRequestHandler):
 """
         self.send_html(self.console_page("操作记录", body, "audit"), 200)
 
+    def material_assignee_options(self) -> str:
+        options = ["<option value=''>未分派（先登记）</option>"]
+        for user in self.db.list_users(self.tenant_id):
+            if user["active"]:
+                options.append(f"<option value='{esc(user['email'])}'>{esc(user['display_name'])} · {esc(user['email'])}</option>")
+        return "".join(options)
+
+    def admin_analytics(self, query: dict[str, list[str]]) -> None:
+        try:
+            days = int(query.get("days", ["0"])[0])
+        except ValueError:
+            days = 0
+        if days not in (0, 7, 30, 90):
+            days = 0
+        exclude_demo = query.get("exclude_demo", [""])[0] == "1"
+        report = self.db.analytics_snapshot(self.tenant_id, days=days, exclude_demo=exclude_demo)
+        notice = query.get("notice", [""])[0]
+        notice_html = {
+            "material_saved": "<div class='notice'>资料补充任务已登记（见下方「资料补充任务」）。</div>",
+            "material_done": "<div class='notice'>资料补充任务已完成。</div>",
+            "material_invalid": "<div class='error'>任务未登记：请检查产品与接收人是否有效。</div>",
+            "material_duplicate": "<div class='error'>该问题已登记过资料补充任务，无需重复登记。</div>",
+        }.get(notice, "")
+        range_labels = {0: "全部时间", 7: "近 7 天", 30: "近 30 天", 90: "近 90 天"}
+        range_options = "".join(
+            f"<option value='{value}'{' selected' if days == value else ''}>{label}</option>"
+            for value, label in range_labels.items()
+        )
+        conversations = report["conversations"]
+        rfqs = report["rfqs"]
+        leads = report["leads"]
+        answers = report["answers"]
+        tasks = report["tasks"]
+        events = report["events"]
+        gaps = report["gaps"]
+        material = report["material_tasks"]
+        assignee_options = self.material_assignee_options()
+
+        def toggle(title: str, total: int, rows_html: str) -> str:
+            note = f"共 {total} 条，显示前 50 条" if total > 50 else f"共 {total} 条"
+            return f"<details class='detail-toggle'><summary>{esc(title)}（{note}）</summary><div class='simple-list'>{rows_html}</div></details>"
+
+        conv_rows = "".join(
+            f"<div class='simple-item'><div><strong>{esc(row['id'][:12])}</strong>"
+            f"<small>{esc(row['created_at'])} · 来源：{esc(row['source'])} · 语言：{esc(row['locale'])}</small></div></div>"
+            for row in conversations["rows"][:50]
+        ) or "<div class='muted-block'>无会话。</div>"
+        by_source_html = "".join(f"<span>来源 {esc(source)}：{count}</span>" for source, count in conversations["by_source"]) or "<span>无会话</span>"
+
+        rfq_rows = "".join(
+            f"<div class='simple-item'><div><strong>{esc(row['id'][:12])} · {esc(row['model'] or row['requested_model'] or '未指定型号')}</strong>"
+            f"<small>{esc(row['created_at'])} · {esc(row['status'])} · 入口：{esc(row['entry_surface'])} · 线索阶段：{esc(row['stage_label'])}"
+            + (f" · 还缺：{esc('、'.join(row['missing']))}" if row["missing"] else "")
+            + "</small></div></div>"
+            for row in rfqs["rows"][:50]
+        ) or "<div class='muted-block'>暂无 RFQ。</div>"
+        entry_html = "".join(f"<span>入口 {esc(entry)}：{count}</span>" for entry, count in rfqs["by_entry"]) or "<span>无数据</span>"
+        missing_html = "".join(f"<span>{esc(label)}：{count}</span>" for label, count in rfqs["missing_top"]) or "<span>无缺项</span>"
+
+        lead_rows = "".join(
+            f"<div class='simple-item'><div><strong>{esc(row['rfq_id'][:12])} · {esc(row['stage_label'])}</strong>"
+            f"<small>负责人：{esc(row['owner'] or '未分配')} · 跟进：{esc(row['next_follow_up'] or '未安排')}"
+            + (" · 逾期" if row["overdue"] else "")
+            + (" · 已停止主动联系" if row["stop"] else "")
+            + "</small></div></div>"
+            for row in leads["rows"][:50]
+        ) or "<div class='muted-block'>暂无线索。</div>"
+        stage_html = "".join(f"<span>{esc(label)}：{count}</span>" for key, label, count in leads["by_stage"])
+
+        task_status_html = "".join(f"<span>任务状态 {esc(status)}：{count}</span>" for status, count in tasks["by_status"]) or "<span>暂无人工任务</span>"
+        rec_status_html = "".join(f"<span>推荐状态 {esc(status)}：{count}</span>" for status, count in report["recommendations"]["by_status"]) or "<span>暂无推荐</span>"
+
+        gap_parts = []
+        for row in gaps["rows"][:50]:
+            if row["material_task_id"]:
+                actions = "<span class='badge'>已登记任务</span>"
+            elif row["product_id"]:
+                actions = (
+                    "<form method='post' action='/admin/material-tasks' class='inline'>"
+                    f"<input type='hidden' name='source_ref' value='{esc(row['answer_id'])}'>"
+                    f"<input type='hidden' name='product_id' value='{esc(row['product_id'])}'>"
+                    f"<select name='assignee'>{assignee_options}</select>"
+                    "<button class='secondary'>登记资料补充任务</button></form>"
+                )
+            else:
+                actions = "<span class='field-state'>未关联产品，无法登记修订任务</span>"
+            gap_parts.append(
+                f"<div class='simple-item'><div><strong>{esc(row['question'][:80])}</strong>"
+                f"<small>{esc(row['model'] or '未关联产品')} · {esc(row['created_at'])} · 人工任务：{esc(row['task_status'] or '无')}</small></div>"
+                f"<div class='actions'>{actions}</div></div>"
+            )
+        gap_total = len(gaps["rows"])
+        gap_note = f"<p class='field-state'>未解问题共 {gap_total} 条，显示前 50 条。</p>" if gap_total > 50 else ""
+        gap_list_html = "".join(gap_parts) or "<div class='muted-block'>暂无未解问题。</div>"
+        gap_products_html = "".join(f"<span>{esc(model)}：{count}</span>" for model, count in gaps["by_product"]) or "<span>无</span>"
+        top_q_html = "".join(f"<span>{esc(model)}：{count}</span>" for model, count in report["top_questions"]) or "<span>无</span>"
+
+        event_rows = "".join(
+            f"<div class='simple-item'><div><strong>{esc({'page_view': '浏览', 'download': '下载'}.get(row['event'], row['event']))} · {esc(row['model'] or row['product_id'][:10])}</strong>"
+            f"<small>{esc(row['created_at'])} · {esc(row['detail'])}</small></div></div>"
+            for row in events["rows"][:50]
+        ) or "<div class='muted-block'>暂无事件。</div>"
+        event_products_html = "".join(
+            f"<tr><td>{esc(model)}</td><td>{views}</td><td>{downloads}</td></tr>" for model, views, downloads in events["by_product"]
+        ) or "<tr><td colspan='3' class='muted'>无数据</td></tr>"
+
+        open_tasks = "".join(
+            f"<div class='simple-item'><div><strong>{esc(task['title'])}</strong>"
+            f"<small>{esc(task['model'] or '')} · 来源问题：{esc((task['source_question'] or '—')[:60])} · 接收人：{esc(task['assignee'] or '待分派')} · {esc(task['created_at'])}</small></div>"
+            f"<div class='actions'><form method='post' action='/admin/material-tasks/{esc(task['id'])}/complete' class='inline'><button class='secondary'>标记完成</button></form></div></div>"
+            for task in material["open"]
+        ) or "<div class='muted-block'>暂无进行中的资料补充任务。</div>"
+        done_tasks = "".join(
+            f"<div class='simple-item'><div><strong>{esc(task['title'])}</strong><small>{esc(task['completed_at'] or '')} · 完成人：{esc(task['completed_by'] or '')}</small></div></div>"
+            for task in material["done"][:20]
+        ) or "<div class='muted-block'>暂无已完成记录。</div>"
+
+        body = f"""
+<div class='toolbar'><div><h1>分析报表</h1><div class='muted'>口径：{range_labels[days]}{'；已排除演示夹具数据' if exclude_demo else '；包含全部数据'}。指标只统计实际发生的事件，不自动推断成交贡献。</div></div>
+<div><a class='button secondary' href='/admin/export/rfqs.csv'>导出 RFQ</a> <a class='button secondary' href='/admin/export/leads.csv'>导出线索</a> <a class='button secondary' href='/admin/export/products.csv'>导出产品</a> <span class='field-state'>（CSV 全量；导出记录操作者与时间）</span></div></div>
+{notice_html}
+<form method='get' action='/admin/analytics' class='filter-bar'><label>时间范围</label><select name='days'>{range_options}</select><label class='check-inline'><input type='checkbox' name='exclude_demo' value='1' {'checked' if exclude_demo else ''}>排除演示数据（会话来源 demo-fixture）</label><button class='secondary'>应用</button></form>
+<section class='card'><div class='panel-title'><h2>RFQ 漏斗（明确区分，不推断成交）</h2></div>
+<div class='compact-facts'><div><small>已提交 RFQ（含待补充）</small><strong>{rfqs['total']}</strong></div><div><small>可报价（线索阶段「{esc(report['quote_ready_label'])}」）</small><strong>{report['quote_ready']}</strong></div><div><small>已成交</small><strong>未接入订单数据</strong></div></div>
+<p class='field-state'>「已成交」需要平台接入真实订单数据；当前不统计、不显示推断成交率。RFQ 完整性见下方板块。</p>
+{toggle('已提交 RFQ 明细', rfqs['total'], rfq_rows)}
+</section>
+<section class='card'><div class='panel-title'><h2>入口渠道</h2></div>
+<div class='summary-strip'>{by_source_html}</div>
+<div class='summary-strip'><span class='muted'>RFQ 入口面：</span>{entry_html}</div>
+{toggle('会话明细', conversations['total'], conv_rows)}
+</section>
+<section class='card'><div class='panel-title'><h2>需求确认与推荐</h2></div>
+<div class='compact-facts'><div><small>已确认工况修订</small><strong>{report['requirements']['confirmed']}</strong></div><div><small>候选修订（未确认）</small><strong>{report['requirements']['candidate']}</strong></div><div><small>推荐次数</small><strong>{report['recommendations']['total']}</strong></div></div>
+<div class='summary-strip'>{rec_status_html}</div>
+</section>
+<section class='card'><div class='panel-title'><h2>问答与人工升级</h2></div>
+<div class='compact-facts'><div><small>有据回答</small><strong>{answers['grounded']}</strong></div><div><small>待核实（资料外）</small><strong>{answers['needs_human']}</strong></div><div><small>人工任务</small><strong>{tasks['total']}</strong></div></div>
+<div class='summary-strip'>{task_status_html}</div>
+</section>
+<section class='card'><div class='panel-title'><h2>RFQ 完整性</h2></div>
+<div class='compact-facts'><div><small>字段完整</small><strong>{rfqs['submitted']}</strong></div><div><small>待补充（缺项）</small><strong>{rfqs['needs_info']}</strong></div></div>
+<div class='summary-strip'><span class='muted'>缺项 Top：</span>{missing_html}</div>
+</section>
+<section class='card'><div class='panel-title'><h2>跟进时效</h2></div>
+<div class='compact-facts'><div><small>在跟线索</small><strong>{leads['active']}</strong></div><div><small>逾期</small><strong>{leads['overdue']}</strong></div><div><small>今日到期</small><strong>{leads['due_today']}</strong></div></div>
+<div class='summary-strip'>{stage_html}</div>
+{toggle('线索明细', leads['total'], lead_rows)}
+</section>
+<section class='card' id='gaps'><div class='panel-title'><h2>资料缺口与高频问题</h2></div>
+<p class='muted'>未解问题 = 资料不足以回答、已转待核实的问题（按产品聚合）；「提问最多的产品」按全部提问统计。可将缺口登记为「资料补充任务」并分派给成员（完成动作在下方板块）。</p>
+<div class='summary-strip'><span class='muted'>未解问题按产品：</span>{gap_products_html}</div>
+<div class='summary-strip'><span class='muted'>提问最多的产品：</span>{top_q_html}</div>
+{gap_list_html}{gap_note}
+</section>
+<section class='card'><div class='panel-title'><h2>产品页浏览与下载（复盘）</h2></div>
+<div class='compact-facts'><div><small>产品页浏览</small><strong>{events['page_view']}</strong></div><div><small>资料下载 / 预览</small><strong>{events['download']}</strong></div></div>
+<table><thead><tr><th>产品</th><th>浏览</th><th>下载</th></tr></thead><tbody>{event_products_html}</tbody></table>
+{toggle('事件明细', events['total'], event_rows)}
+<p class='field-state'>页面浏览为匿名事件（访客无会话身份时不带会话键）；问答、RFQ 与跟进均带会话/线索关联键，可在各自明细中追溯。事件不受「排除演示数据」开关影响。</p>
+</section>
+<section class='card' id='material-tasks'><div class='panel-title'><h2>资料补充任务</h2><span class='field-state'>进行中 {len(material['open'])} 项</span></div>
+{open_tasks}
+<details class='detail-toggle'><summary>已完成任务</summary><div class='simple-list'>{done_tasks}</div></details>
+</section>
+"""
+        self.send_html(self.console_page("分析报表", body, "analytics"), 200)
+
+    def admin_export(self, dataset: str) -> None:
+        try:
+            headers, rows = self.db.export_rows(self.tenant_id, dataset)
+        except ValueError:
+            self.send_html(self.console_page("导出不可用", "<div class='error'>不支持的数据集。</div>", "analytics"), 404)
+            return
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(headers)
+        writer.writerows(rows)
+        data = ("\ufeff" + buffer.getvalue()).encode("utf-8")
+        stamp = datetime.now(timezone.utc).date().isoformat()
+        self.db._audit(self.tenant_id, "export", dataset, "exported", self.actor, f"rows={len(rows)};format=csv")
+        self.db.conn.commit()
+        self.send_bytes(data, "text/csv; charset=utf-8", f"growave-{dataset}-{stamp}.csv", inline=False)
+
+    def admin_material_task_create(self, form: dict[str, str | bytes]) -> None:
+        product_id = str(form.get("product_id", "")).strip()
+        source_ref = str(form.get("source_ref", "")).strip()
+        assignee = str(form.get("assignee", "")).strip()
+        try:
+            self.db.create_material_task(self.tenant_id, product_id, source_ref, assignee, self.actor)
+        except ValueError as error:
+            message = str(error)
+            notice = "material_duplicate" if "已登记" in message else "material_invalid"
+            self.redirect(f"/admin/analytics?notice={notice}#gaps")
+            return
+        self.redirect("/admin/analytics?notice=material_saved#material-tasks")
+
+    def admin_material_task_complete(self, task_id: str) -> None:
+        try:
+            self.db.complete_material_task(self.tenant_id, task_id, self.actor)
+        except ValueError:
+            self.redirect("/admin/analytics?notice=material_invalid#material-tasks")
+            return
+        self.redirect("/admin/analytics?notice=material_done#material-tasks")
+
     def admin_users(self, query: dict[str, list[str]]) -> None:
         users = self.db.list_users(self.tenant_id)
         items = []
@@ -6353,6 +6907,7 @@ class Handler(BaseHTTPRequestHandler):
         page = layout(title, body, lang=lang, public=True)
         json_ld = json.dumps({'@context': 'https://schema.org', '@type': 'Product', 'name': product['name'], 'model': product['model']}, ensure_ascii=False).replace("</", "<\\/")
         page = page.replace("</head>", f"<meta name='description' content='{esc(product['name'])} - approved industrial pump specifications'><script type='application/ld+json'>{json_ld}</script><link rel='stylesheet' href='/reference-client/product-page.css'><link rel='stylesheet' href='/reference-client/chat.css'><style>@media(max-width:760px){{.chat-launcher{{bottom:74px}}.chat-panel{{bottom:64px;max-height:calc(100vh - 80px)}}}}</style></head>")
+        self.db.log_product_event(tenant_id, product["id"], "page_view", site_key=(site["site_key"] if site else ""), detail="")
         self.send_html(page, 200)
 
     def public_source(self, slug: str, source_id: str, site: sqlite3.Row | None = None, preview: bool = False) -> None:
@@ -6382,7 +6937,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         content_type = mimetypes.guess_type(source["filename"])[0] or "application/octet-stream"
         previewable = content_type in {"image/png", "image/jpeg", "image/webp", "image/avif", "application/pdf"}
-        self.send_bytes(content, content_type, source["filename"], inline=preview and previewable)
+        inline_mode = preview and previewable
+        self.db.log_product_event(tenant_id, product["id"], "download", site_key=(site["site_key"] if site else ""), detail=f"{source['filename']};{'inline' if inline_mode else 'attachment'}")
+        self.send_bytes(content, content_type, source["filename"], inline=inline_mode)
 
 
 def make_server(
