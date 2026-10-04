@@ -375,7 +375,8 @@ class BuyerApiTests(unittest.TestCase):
         self.assertNotIn("分配或改派", sales_page)
         self.assertEqual(self.form_request("POST", f"/admin/sales/{rfq_id}/claim", {}, sales_cookie)[0], 303)
         self.assertEqual(self.db.get_lead_for_rfq("demo-tenant", rfq_id)["owner"], "demo-sales@example.invalid")
-        self.assertEqual(self.form_request("POST", f"/admin/sales/{rfq_id}/assign", {"owner_email": "demo-sales@example.invalid"}, sales_cookie)[0], 400)
+        # V1-01：非管理员分配请求在处理器入口即被权限拦截（403 权限拦截页），不再走数据库层 ValueError(400)
+        self.assertEqual(self.form_request("POST", f"/admin/sales/{rfq_id}/assign", {"owner_email": "demo-sales@example.invalid"}, sales_cookie)[0], 403)
         _, admin_headers, _ = self.form_request("POST", "/login", {"email": "demo-admin@example.invalid", "password": "demo-admin"})
         admin_cookie = admin_headers["Set-Cookie"].split(";", 1)[0]
         _, _, admin_page = self.form_request("GET", f"/admin/sales/{rfq_id}", cookie=admin_cookie)
@@ -880,6 +881,10 @@ class BuyerApiTests(unittest.TestCase):
             user_id = "test-user"
             path = "/admin/rfqs"
             html = ""
+            user_modules = {"rfqs", "sales"}
+
+            def has_module(self, module):
+                return module in self.user_modules
 
             def send_html(self, content, status=200):
                 self.html = content

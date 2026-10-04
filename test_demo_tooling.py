@@ -69,13 +69,19 @@ class DemoToolingTests(unittest.TestCase):
         self.assertEqual(fields["temperature"], "rejected")
         site = conn.execute("SELECT site_key, allowed_origin FROM buyer_sites").fetchone()
         self.assertEqual((site["site_key"], site["allowed_origin"]), ("demo-site-key", "http://127.0.0.1:8137"))
-        # 演示账号只由演示命令创建，且保持文档化的账号/角色（密码即账号名）
+        # 演示账号只由演示命令创建，且保持文档化的账号/模块授权（密码即账号名；V1-01 员工制）
         users = {row["email"]: row["role"] for row in conn.execute("SELECT email, role FROM users")}
         self.assertEqual(users, {
             "demo-admin@example.invalid": "admin",
-            "demo-sales@example.invalid": "sales",
-            "demo-engineer@example.invalid": "engineer",
+            "demo-sales@example.invalid": "employee",
+            "demo-engineer@example.invalid": "employee",
         })
+        modules = {}
+        for row in conn.execute("SELECT u.email, m.module FROM user_modules m JOIN users u ON u.id=m.user_id"):
+            modules.setdefault(row["email"], set()).add(row["module"])
+        self.assertEqual(modules.get("demo-sales@example.invalid"), {"rfqs", "sales"})
+        self.assertEqual(modules.get("demo-engineer@example.invalid"), {"tasks", "rfqs", "sales"})
+        self.assertNotIn("demo-admin@example.invalid", modules)
         conn.close()
         # 文档化口令可通过登录校验（保留内部演示登录）
         from app import Database as AppDatabase

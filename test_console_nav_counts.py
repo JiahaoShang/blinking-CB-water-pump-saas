@@ -103,21 +103,21 @@ class ConsoleNavCountTests(unittest.TestCase):
         self.assertIn("class='side-count' data-nav-count='rfqs'", page)
 
     def test_role_filter_rendering_and_endpoint(self):
-        # 销售：只有 RFQ 与客户跟进两项数字；任务/产品保持隐藏
+        # 销售员工（模块：RFQ 询价+销售工作台）：只渲染这两个入口与数字；未授权模块的入口整体不出现
         _, _, sales_page = form_request(self.server, "GET", "/admin", cookie=self.sales_cookie)
         self.assertIn("data-nav-count='rfqs' data-count='1'", sales_page)
         self.assertIn("data-nav-count='sales' data-count='1'", sales_page)
         self.assertIn("class='side-count hot' data-nav-count='sales'", sales_page)
         self.assertIn("class='side-count' data-nav-count='rfqs'", sales_page)
-        self.assertIn("data-nav-count='tasks' data-count='0' hidden", sales_page)
-        self.assertIn("data-nav-count='products' data-count='0' hidden", sales_page)
-        # 工程师：只有人工任务一项数字
+        self.assertNotIn("data-nav-count='tasks'", sales_page)
+        self.assertNotIn("data-nav-count='products'", sales_page)
+        # 工程师员工（模块：人工任务+RFQ 询价+销售工作台）：三个数字都可见（跟随授权）；产品入口不出现
         _, _, engineer_page = form_request(self.server, "GET", "/admin", cookie=self.engineer_cookie)
         self.assertIn("data-nav-count='tasks' data-count='2'", engineer_page)
         self.assertIn("class='side-count hot' data-nav-count='tasks'", engineer_page)
-        self.assertIn("data-nav-count='rfqs' data-count='0' hidden", engineer_page)
-        self.assertIn("data-nav-count='sales' data-count='0' hidden", engineer_page)
-        self.assertIn("data-nav-count='products' data-count='0' hidden", engineer_page)
+        self.assertIn("data-nav-count='rfqs' data-count='1'", engineer_page)
+        self.assertIn("data-nav-count='sales' data-count='1'", engineer_page)
+        self.assertNotIn("data-nav-count='products'", engineer_page)
         # 轮询接口：角色过滤 + 只返回数字
         status, body = json_request(self.server, "/admin/nav-counts", cookie=self.admin_cookie)
         self.assertEqual(status, 200)
@@ -125,7 +125,7 @@ class ConsoleNavCountTests(unittest.TestCase):
         _, body = json_request(self.server, "/admin/nav-counts", cookie=self.sales_cookie)
         self.assertEqual(body, {"counts": {"rfqs": 1, "sales": 1}})
         _, body = json_request(self.server, "/admin/nav-counts", cookie=self.engineer_cookie)
-        self.assertEqual(body, {"counts": {"tasks": 2}})
+        self.assertEqual(body, {"counts": {"tasks": 2, "rfqs": 1, "sales": 1}})
         # 未登录：不得返回 200 数字
         status, _ = json_request(self.server, "/admin/nav-counts")
         self.assertIn(status, (302, 303, 401))

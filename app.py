@@ -293,6 +293,13 @@ class Database:
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS user_modules (
+                user_id TEXT NOT NULL REFERENCES users(id),
+                module TEXT NOT NULL,
+                granted_by TEXT NOT NULL DEFAULT '',
+                granted_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, module)
+            );
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id),
@@ -630,6 +637,14 @@ class Database:
                 "INSERT INTO rfq_revisions(id, tenant_id, rfq_id, revision, content_json, actor, created_at) VALUES (?, ?, ?, 1, ?, 'legacy-import', ?)",
                 (secrets.token_hex(12), rfq["tenant_id"], rfq["id"], json.dumps(self.rfq_current_content(rfq), ensure_ascii=False), rfq["created_at"]),
             )
+        # V1-01 账号模型迁移：旧角色 sales/engineer → 员工 + 对应模块授权（能力与迁移前一致；幂等）。
+        for legacy in self.conn.execute("SELECT id, role FROM users WHERE role IN ('sales','engineer')").fetchall():
+            self.conn.execute("UPDATE users SET role='employee' WHERE id=?", (legacy["id"],))
+            for module_key in LEGACY_ROLE_MODULES.get(legacy["role"], ()):
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO user_modules(user_id, module, granted_by, granted_at) VALUES (?, ?, 'migration', ?)",
+                    (legacy["id"], module_key, now_iso()),
+                )
         # Ordinary initialization must not create any tenant, let alone predictable
         # users. Demo state comes only from the explicit demo command
         # (tools/demo/seed_demo.py -> seed_demo_users); a production database
@@ -705,15 +720,22 @@ class Database:
         """
         self.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
         users = [
-            ("demo-admin@example.invalid", "演示管理员", "admin", "demo-admin"),
-            ("demo-sales@example.invalid", "演示销售", "sales", "demo-sales"),
-            ("demo-engineer@example.invalid", "演示工程师", "engineer", "demo-engineer"),
+            ("demo-admin@example.invalid", "演示管理员", "admin", "demo-admin", ()),
+            ("demo-sales@example.invalid", "演示员工（询价与销售）", "employee", "demo-sales", ("rfqs", "sales")),
+            ("demo-engineer@example.invalid", "演示员工（工程任务）", "employee", "demo-engineer", ("tasks", "rfqs", "sales")),
         ]
-        for email, display_name, role, password in users:
+        for email, display_name, role, password, modules in users:
             self.conn.execute(
                 "INSERT OR IGNORE INTO users(id, tenant_id, email, display_name, role, password_hash, active, created_at) VALUES (?, 'demo-tenant', ?, ?, ?, ?, 1, ?)",
                 (secrets.token_hex(12), email, display_name, role, self.password_hash(password), now_iso()),
             )
+            if modules:
+                user_row = self.conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+                for module_key in modules:
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO user_modules(user_id, module, granted_by, granted_at) VALUES (?, ?, 'demo-seed', ?)",
+                        (user_row["id"], module_key, now_iso()),
+                    )
         self.conn.commit()
 
     def authenticate_user(self, email: str, password: str) -> sqlite3.Row | None:
@@ -740,12 +762,18 @@ class Database:
     ) -> str:
         email = email.strip().lower()
         display_name = display_name.strip()
+        role = role.strip().lower()
+        grant_modules: tuple[str, ...] = ()
+        if role in LEGACY_ROLE_MODULES:
+            # 旧角色名兼容（旧库迁移路径与既有测试）：等价于"员工 + 对应模块授权"
+            grant_modules = LEGACY_ROLE_MODULES[role]
+            role = "employee"
         if not email or "@" not in email:
             raise ValueError("请输入有效邮箱")
         if not display_name:
             raise ValueError("姓名不能为空")
-        if role not in {"admin", "sales", "engineer"}:
-            raise ValueError("不支持的账号角色")
+        if role not in {"admin", "employee"}:
+            raise ValueError("不支持的账号类型")
         if len(password) < 8:
             raise ValueError("密码至少需要 8 位")
         user_id = secrets.token_hex(12)
@@ -757,7 +785,15 @@ class Database:
             )
         except sqlite3.IntegrityError as exc:
             raise ValueError("该邮箱已经存在") from exc
-        self._audit(tenant_id, "user", user_id, "created", actor, f"email={email};role={role}")
+        for module_key in grant_modules:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO user_modules(user_id, module, granted_by, granted_at) VALUES (?, ?, ?, ?)",
+                (user_id, module_key, actor, now_iso()),
+            )
+        self._audit(
+            tenant_id, "user", user_id, "created", actor,
+            f"email={email};role={role}" + (f";modules={','.join(grant_modules)}" if grant_modules else ""),
+        )
         self.conn.commit()
         return user_id
 
@@ -778,6 +814,42 @@ class Database:
             self.conn.execute("DELETE FROM sessions WHERE tenant_id=? AND user_id=?", (tenant_id, user_id))
         self._audit(tenant_id, "user", user_id, "activated" if active else "deactivated", actor, user["email"])
         self.conn.commit()
+
+    def get_user_modules(self, user_id: str) -> list[str]:
+        """员工账号已被授权的模块（管理员不落表，按全模块判定）。"""
+        return [
+            row["module"]
+            for row in self.conn.execute(
+                "SELECT module FROM user_modules WHERE user_id=? ORDER BY module", (user_id,)
+            ).fetchall()
+        ]
+
+    def set_user_modules(self, tenant_id: str, user_id: str, modules, actor: str) -> list[str]:
+        """管理员对员工账号的模块授权（全量覆盖式保存）；返回规范化后的模块集合。
+
+        新账号默认零权限："必须由管理员账号进行审批并授权后"员工才可访问对应模块。
+        """
+        user = self.conn.execute(
+            "SELECT id, email, role FROM users WHERE tenant_id=? AND id=?", (tenant_id, user_id)
+        ).fetchone()
+        if not user:
+            raise ValueError("账号不存在")
+        if user["role"] == "admin":
+            raise ValueError("管理员账号为全模块权限，无需配置")
+        wanted = [key for key in GRANTABLE_MODULE_KEYS if key in set(modules)]
+        previous = sorted(self.get_user_modules(user_id))
+        self.conn.execute("DELETE FROM user_modules WHERE user_id=?", (user_id,))
+        for module_key in wanted:
+            self.conn.execute(
+                "INSERT INTO user_modules(user_id, module, granted_by, granted_at) VALUES (?, ?, ?, ?)",
+                (user_id, module_key, actor, now_iso()),
+            )
+        self._audit(
+            tenant_id, "user", user_id, "modules_updated", actor,
+            f"email={user['email']};before={','.join(previous) or 'none'};after={','.join(wanted) or 'none'}",
+        )
+        self.conn.commit()
+        return wanted
 
     def create_session(self, user: sqlite3.Row, hours: int = 12) -> str:
         session_id = secrets.token_urlsafe(32)
@@ -1544,9 +1616,13 @@ class Database:
         ).fetchone()
 
     def claim_conversation_leads(self, tenant_id: str, rfq_id: str, actor_email: str) -> None:
-        user = self.conn.execute("SELECT role, active FROM users WHERE tenant_id=? AND email=?", (tenant_id, actor_email)).fetchone()
+        user = self.conn.execute("SELECT id, role, active FROM users WHERE tenant_id=? AND email=?", (tenant_id, actor_email)).fetchone()
         lead = self.get_lead_for_rfq(tenant_id, rfq_id)
-        if not user or not user["active"] or user["role"] != "sales" or not lead:
+        can_claim = (
+            bool(user) and user["active"] and user["role"] != "admin"
+            and "sales" in self.get_user_modules(user["id"])
+        )
+        if not can_claim or not lead:
             raise ValueError("没有可领取的线索")
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
@@ -1558,10 +1634,14 @@ class Database:
 
     def assign_conversation_leads(self, tenant_id: str, rfq_id: str, owner_email: str, actor_email: str) -> None:
         actor = self.conn.execute("SELECT role, active FROM users WHERE tenant_id=? AND email=?", (tenant_id, actor_email)).fetchone()
-        owner = self.conn.execute("SELECT role, active FROM users WHERE tenant_id=? AND email=?", (tenant_id, owner_email)).fetchone()
+        owner = self.conn.execute("SELECT id, role, active FROM users WHERE tenant_id=? AND email=?", (tenant_id, owner_email)).fetchone()
         lead = self.get_lead_for_rfq(tenant_id, rfq_id)
-        if not actor or not actor["active"] or actor["role"] != "admin" or not owner or not owner["active"] or owner["role"] != "sales" or not lead:
-            raise ValueError("管理员只能分配给本企业的有效销售成员")
+        owner_ok = (
+            bool(owner) and owner["active"] and owner["role"] != "admin"
+            and "sales" in self.get_user_modules(owner["id"])
+        )
+        if not actor or not actor["active"] or actor["role"] != "admin" or not owner_ok or not lead:
+            raise ValueError("管理员只能分配给已授权「销售工作台」模块的员工")
         with self.conn:
             self.conn.execute("UPDATE leads SET owner=?, updated_at=? WHERE tenant_id=? AND conversation_id=?", (owner_email, now_iso(), tenant_id, lead["conversation_id"]))
             self._audit(tenant_id, "lead", lead["id"], "assigned", actor_email, f"conversation={lead['conversation_id']};owner={owner_email}")
@@ -2877,6 +2957,9 @@ input::placeholder,textarea::placeholder{color:var(--text-4)}
 input:focus,select:focus,textarea:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 select{appearance:none;padding-right:30px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238B8B8B' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
 .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 14px}
+.console .check-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px 14px;margin:10px 0 4px}
+.console label.check-inline{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:500;color:var(--text-1);margin:0}
+.console label.check-inline input{width:auto;margin:0}
 .full{grid-column:1/-1}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--border-subtle);vertical-align:middle}
@@ -3243,20 +3326,22 @@ def svg_icon(name: str) -> str:
 
 
 def admin_permission_area(path: str) -> tuple[str, str, str]:
-    """按路径给出权限拦截提示的三要素：操作 / 所需权限 / 设计原因。"""
+    """按路径给出权限拦截提示的三要素：操作 / 所需权限 / 设计原因（V1-01：账号两类型 + 模块授权制）。"""
+    module_why = "该模块未向你的账号授权；如需使用，请联系企业管理员在「成员管理」中审批并开通。"
     areas = (
-        ("/admin/users", "访问「成员管理」", "管理员", "成员账号关系到企业数据隔离，成员管理只对管理员开放。"),
-        ("/admin/sites", "访问「网站 API 接入」", "管理员", "官网来源白名单决定买方会话从哪里创建，只对管理员开放。"),
-        ("/admin/products", "访问「产品管理」", "管理员", "产品资料核准与发布影响对外内容，只对管理员开放。"),
-        ("/admin/tasks", "访问「人工任务」", "管理员 或 工程师", "工程任务由工程师或管理员处理。"),
-        ("/admin/demo", "访问「演示工具」", "管理员", "演示数据操作只对管理员开放。"),
-        ("/admin/sales", "访问「销售工作台」", "管理员、销售 或 工程师", "销售工作台对管理员、销售与工程师开放。"),
-        ("/admin/rfqs", "访问「RFQ 询价」", "管理员、销售 或 工程师", "RFQ 询价对管理员、销售与工程师开放。"),
+        ("/admin/users", "访问「成员管理」", "管理员", "成员账号与模块授权关系到企业数据隔离，成员管理只对管理员开放。"),
+        ("/admin/sites", "访问「网站 API 接入」", "模块权限「网站 API 接入」", module_why),
+        ("/admin/products", "访问「产品管理」", "模块权限「产品管理」", module_why),
+        ("/admin/tasks", "访问「人工任务」", "模块权限「人工任务」", module_why),
+        ("/admin/demo", "访问「演示工具」", "管理员", "演示工具为部署级开关，只对管理员开放。"),
+        ("/admin/lowara", "访问「演示工具」", "管理员", "演示工具为部署级开关，只对管理员开放。"),
+        ("/admin/sales", "访问「销售工作台」", "模块权限「销售工作台」", module_why),
+        ("/admin/rfqs", "访问「RFQ 询价」", "模块权限「RFQ 询价」", module_why),
     )
     for prefix, area, required, why in areas:
         if path.startswith(prefix):
             return area, required, why
-    return "访问管理功能", "管理员", "该功能只对特定角色开放。"
+    return "访问管理功能", "管理员", "该功能只对管理员开放。"
 
 
 def permission_notice(area: str, role_label: str, required: str, why: str) -> str:
@@ -3292,7 +3377,7 @@ def auth_layout(title: str, body: str) -> str:
 </body></html>"""
 
 
-def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path: str = "/admin", actor: str = "", role: str = "", tenant: str = "", nav_counts: dict[str, int] | None = None) -> str:
+def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path: str = "/admin", actor: str = "", role: str = "", tenant: str = "", nav_counts: dict[str, int] | None = None, nav_keys: set[str] | None = None) -> str:
     """卖家控制台外壳：左侧按业务分组的工具架 + 右侧工作区（顶栏面包屑）。"""
     groups = (
         ("我的工作", (("admin", "/admin", "home", "管理概览"),)),
@@ -3308,7 +3393,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
         )),
     )
     group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "users": "团队与接入", "sites": "团队与接入"}
-    role_label = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}.get(role, role or "未登录")
+    role_label = "管理员" if role == "admin" else ("员工" if role else "未登录")
     lang_target = f"{esc(path)}?lang={'en' if lang == 'zh' else 'zh'}"
     counts = nav_counts or {}
     def side_count_html(key: str) -> str:
@@ -3321,9 +3406,12 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
         return f"<span class='side-count{hot}' data-nav-count='{key}' data-count='{value}'{hidden}><span class='n'>{text}</span></span>"
     sections = []
     for heading, items in groups:
+        visible_items = tuple(item for item in items if nav_keys is None or item[0] in nav_keys)
+        if not visible_items:
+            continue
         links = "".join(
             f"<a class='side-link{' active' if key == active else ''}' href='{url}'>{svg_icon(icon)}{label}{side_count_html(key)}</a>"
-            for key, url, icon, label in items
+            for key, url, icon, label in visible_items
         )
         sections.append(f"<div class='side-heading'>{heading}</div>{links}")
     crumb = f"{group_of.get(active, '卖家系统')} / <b>{esc(title)}</b>"
@@ -3389,6 +3477,13 @@ def parse_multipart(handler: BaseHTTPRequestHandler) -> dict[str, str | bytes]:
 # 演示工具端点（正式化清单 F-1～F-3）：只在演示模式下可用（demo_tools=True，默认关闭）。
 DEMO_TOOL_PATHS = {"/admin/products/seed", "/admin/products/seed-lowara", "/admin/demo/seed", "/admin/lowara/seed"}
 
+# V1-01 账号与模块权限：账号只有两种（admin=管理员 / employee=普通员工）；员工的可访问模块由管理员逐项授权。
+GRANTABLE_MODULES = (("products", "产品管理"), ("tasks", "人工任务"), ("rfqs", "RFQ 询价"), ("sales", "销售工作台"), ("sites", "网站 API 接入"))
+GRANTABLE_MODULE_KEYS = tuple(key for key, _label in GRANTABLE_MODULES)
+MODULE_LABELS = dict(GRANTABLE_MODULES)
+# 旧角色名兼容（旧库迁移与既有测试）：等价于"员工 + 对应模块授权"，能力与迁移前一致。
+LEGACY_ROLE_MODULES = {"sales": ("rfqs", "sales"), "engineer": ("tasks", "rfqs", "sales")}
+
 
 class Handler(BaseHTTPRequestHandler):
     db: Database
@@ -3448,27 +3543,38 @@ class Handler(BaseHTTPRequestHandler):
         self.actor = user["email"]
         self.user_role = user["role"]
         self.user_id = user["id"]
-        if path == "/admin":
-            allowed = {"admin", "sales", "engineer"}
-        elif path.startswith("/admin/demo") or path.startswith("/admin/lowara"):
-            allowed = {"admin"}
-        elif path.startswith("/admin/users"):
-            allowed = {"admin"}
-        elif path.startswith("/admin/sites"):
-            allowed = {"admin"}
-        elif path.startswith("/admin/products"):
-            allowed = {"admin"}
-        elif path.startswith("/admin/tasks"):
-            allowed = {"admin", "engineer"}
-        elif path.startswith("/admin/sales") or path.startswith("/admin/rfqs"):
-            allowed = {"admin", "sales", "engineer"}
-        elif path.startswith("/admin/nav-counts"):
-            allowed = {"admin", "sales", "engineer"}
+        self.user_modules = (
+            set() if user["role"] == "admin" else set(self.db.get_user_modules(user["id"]))
+        )
+        # 访问要求（V1-01 模块授权制）：None=登录即可；"admin"=仅管理员；"module:<key>"=需该模块授权。
+        # 未列入的 /admin 子路径一律拒绝（fail-closed），与既往"else=空集"语义一致。
+        requirement: str | None = "deny"
+        if path in ("/admin", "/admin/nav-counts"):
+            requirement = None
+        elif path.startswith("/admin/demo") or path.startswith("/admin/lowara") or path.startswith("/admin/users"):
+            requirement = "admin"
         else:
-            allowed = set()
-        if user["role"] not in allowed:
+            for prefix, module_key in (
+                ("/admin/sites", "sites"),
+                ("/admin/products", "products"),
+                ("/admin/tasks", "tasks"),
+                ("/admin/sales", "sales"),
+                ("/admin/rfqs", "rfqs"),
+            ):
+                if path.startswith(prefix):
+                    requirement = f"module:{module_key}"
+                    break
+        if requirement == "deny":
+            permitted = False
+        elif requirement == "admin":
+            permitted = self.user_role == "admin"
+        elif requirement and requirement.startswith("module:"):
+            permitted = self.has_module(requirement.split(":", 1)[1])
+        else:
+            permitted = True
+        if not permitted:
             area, required, why = admin_permission_area(path)
-            role_label = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}.get(user["role"] or "", user["role"] or "")
+            role_label = "管理员" if self.user_role == "admin" else "员工"
             self.send_html(self.console_page("无权限", permission_notice(area, role_label, required, why), ""), 403)
             return False
         return True
@@ -3570,21 +3676,22 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def nav_badge_counts(self) -> dict[str, int]:
-        """侧栏待办数字：与概览页待办同一评分口径与角色规则（同一计数函数），值含 0。
+        """侧栏待办数字：与概览页待办同一计数函数（get_admin_summary），值含 0。
 
-        键 = 导航项 key；未登录返回空字典。仅返回数字本身，不含任何业务内容。
+        可见集合 = 账号已授权的模块（管理员=全模块；V1-01 模块授权制）；未登录返回空字典。
+        仅返回数字本身，不含任何业务内容。
         """
         if not self.user_id:
             return {}
         summary = self.db.get_admin_summary(self.tenant_id)
-        role = self.user_role
         counts: dict[str, int] = {}
-        if role == "admin":
+        if self.has_module("products"):
             counts["products"] = summary["products_needs_review"]
-        if role in {"admin", "engineer"}:
+        if self.has_module("tasks"):
             counts["tasks"] = summary["tasks_pending"]
-        if role in {"admin", "sales"}:
+        if self.has_module("rfqs"):
             counts["rfqs"] = summary["rfqs_needs_info"]
+        if self.has_module("sales"):
             counts["sales"] = summary["leads_overdue"]
         return counts
 
@@ -3597,12 +3704,29 @@ class Handler(BaseHTTPRequestHandler):
             role=self.user_role if self.user_id else "",
             tenant=(tenant["name"] if tenant else self.tenant_id),
             nav_counts=self.nav_badge_counts(),
+            nav_keys=self.console_nav_keys(),
         )
 
     def tenant_display_name(self) -> str:
         """控制台页眉与工具栏显示的当前企业名称（读 tenants 表）；无记录时回退租户标识。"""
         row = self.db.conn.execute("SELECT name FROM tenants WHERE id=?", (self.tenant_id,)).fetchone()
         return row["name"] if row and row["name"] else self.tenant_id
+
+    def has_module(self, module: str) -> bool:
+        """当前请求上下文的模块权限：管理员=全模块；员工=已授权模块集合（V1-01）。"""
+        if self.user_role == "admin":
+            return True
+        return module in getattr(self, "user_modules", set())
+
+    def console_nav_keys(self) -> set[str]:
+        """侧栏可见集：概览人人可见；管理员另见成员管理；员工按已授权模块。"""
+        keys = {"admin"}
+        if self.user_role == "admin":
+            keys.add("users")
+        for module_key in GRANTABLE_MODULE_KEYS:
+            if self.has_module(module_key):
+                keys.add(module_key)
+        return keys
 
     def login_page(self, query: dict[str, list[str]], error: str = "") -> None:
         if self.current_user():
@@ -3632,6 +3756,9 @@ class Handler(BaseHTTPRequestHandler):
         next_path = str(form.get("next", "/admin/sales"))
         if not next_path.startswith("/") or next_path.startswith("//") or next_path.startswith("/login") or next_path.startswith("/admin/login"):
             # 登录页自身或非法目标：回到后台首页，避免登录成功后跳进登录相关路径
+            next_path = "/admin"
+        if next_path == "/admin/sales" and user["role"] != "admin" and "sales" not in set(self.db.get_user_modules(user["id"])):
+            # 默认落点自适应（V1-01 模块授权制）：没有「销售工作台」模块的员工落到概览，避免登录即见 403
             next_path = "/admin"
         session_id = self.db.create_session(user)
         self.redirect(next_path, f"cb_session={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200")
@@ -4493,7 +4620,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.tenant_id,
                     str(form.get("email", "")),
                     str(form.get("display_name", "")),
-                    str(form.get("role", "sales")),
+                    str(form.get("role", "employee")),
                     str(form.get("password", "")),
                     self.actor,
                 )
@@ -4679,16 +4806,22 @@ class Handler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/(claim|assign)", path)
             if match:
                 if match.group(2) == "claim":
+                    if self.user_role == "admin" or not self.has_module("sales"):
+                        self.send_html(self.console_page("无权操作", permission_notice("领取销售线索", "管理员" if self.user_role == "admin" else "员工", "模块权限「销售工作台」", "「领取」由获得销售工作台模块授权的员工执行；管理员可在同一页面直接分配。"), "sales"), 403)
+                        return
                     self.db.claim_conversation_leads(self.tenant_id, match.group(1), self.actor)
                 else:
+                    if self.user_role != "admin":
+                        self.send_html(self.console_page("无权操作", permission_notice("分配销售线索", "员工", "管理员", "分配或改派线索只对管理员开放。"), "sales"), 403)
+                        return
                     self.db.assign_conversation_leads(self.tenant_id, match.group(1), str(form.get("owner_email", "")), self.actor)
                 self.redirect(f"/admin/sales/{match.group(1)}?notice=assigned")
                 return
             match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/contact-stop", path)
             if match:
-                if self.user_role not in {"admin", "sales"}:
-                    role_label = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}.get(self.user_role, self.user_role)
-                    self.send_html(self.console_page("无权操作", permission_notice("记录买方联系要求", role_label, "销售 或 管理员", "只有销售或管理员可记录买方联系要求。"), "sales"), 403)
+                if not self.has_module("sales"):
+                    role_label = "管理员" if self.user_role == "admin" else "员工"
+                    self.send_html(self.console_page("无权操作", permission_notice("记录买方联系要求", role_label, "模块权限「销售工作台」", "记录买方联系要求需要销售工作台模块权限。"), "sales"), 403)
                     return
                 rfq = self.db.get_rfq(self.tenant_id, match.group(1))
                 if not rfq:
@@ -4709,6 +4842,13 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("账号不存在")
                 self.db.set_user_active(self.tenant_id, user_id, not bool(target["active"]), self.actor)
                 self.redirect("/admin/users?notice=updated")
+                return
+            match = re.fullmatch(r"/admin/users/([a-f0-9]+)/modules", path)
+            if match:
+                # V1-01：管理员对员工账号的模块授权（"审批并授权"的唯一开通路径；保存即生效）。
+                wanted = [key for key, _label in GRANTABLE_MODULES if str(form.get(f"module_{key}", "")).strip()]
+                self.db.set_user_modules(self.tenant_id, match.group(1), wanted, self.actor)
+                self.redirect("/admin/users?notice=modules")
                 return
             match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources", path)
             if match:
@@ -5181,8 +5321,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def admin_dashboard(self, query: dict[str, list[str]]) -> None:
         summary = self.db.get_admin_summary(self.tenant_id)
-        role_labels = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}
-        role_label = role_labels.get(self.user_role, self.user_role)
+        role_label = "管理员" if self.user_role == "admin" else "员工"
         demo_notice = ""
         if self.demo_tools and query.get("notice", [""])[0] == "demo":
             demo_notice = f"<div class='notice'>演示数据已加载：新增 RFQ {esc(query.get('rfqs', ['0'])[0])} 条、人工任务 {esc(query.get('tasks', ['0'])[0])} 条；重复加载不会复制已有记录。</div>"
@@ -5203,15 +5342,14 @@ class Handler(BaseHTTPRequestHandler):
                 ("进行中线索", summary["leads_active"], f"逾期跟进 {summary['leads_overdue']}"),
             )
         )
-        role = self.user_role
         todos: list[tuple[str, str, str, str]] = []
-        if role == "admin" and summary["products_needs_review"]:
+        if self.has_module("products") and summary["products_needs_review"]:
             todos.append(("产品资料核对", f"{summary['products_needs_review']} 个产品有候选字段待逐项处理；未核准内容不会进入公开页与推荐", "/admin/products", "去核对"))
-        if role in {"admin", "engineer"} and summary["tasks_pending"]:
+        if self.has_module("tasks") and summary["tasks_pending"]:
             todos.append(("待答技术问题", f"{summary['tasks_pending']} 条买家问题在等待人工答复；答复会回到买家的原会话", "/admin/tasks?status=pending", "去处理"))
-        if role in {"admin", "sales"} and summary["rfqs_needs_info"]:
+        if self.has_module("rfqs") and summary["rfqs_needs_info"]:
             todos.append(("待补充询价", f"{summary['rfqs_needs_info']} 份 RFQ 缺少数量/目的地/交期等商务信息", "/admin/rfqs", "去查看"))
-        if role in {"admin", "sales"} and summary["leads_overdue"]:
+        if self.has_module("sales") and summary["leads_overdue"]:
             todos.append(("逾期跟进线索", f"{summary['leads_overdue']} 条线索的跟进日期已过，建议尽快处理", "/admin/sales", "去跟进"))
         if todos:
             head_title, head_meta, head_href, head_action = todos[0]
@@ -5231,36 +5369,51 @@ class Handler(BaseHTTPRequestHandler):
             f"<div class='actions'><a class='button secondary' href='{href}'>{esc(action)}</a></div></div>"
             for title, meta, href, action in todos
         ) or "<div class='muted-block'>当前岗位没有待办。待办只显示需要采取行动的事项，一般记录请从左侧导航进入对应模块。</div>"
-        quick_links = [
-            ("/admin/sales", "打开销售工作台", "查看待跟进线索、负责人和完整上下文"),
-            ("/admin/rfqs", "查看 RFQ", "检查买方提交的询价和待补充字段"),
-        ]
-        if self.user_role in {"admin", "engineer"}:
+        quick_links: list[tuple[str, str, str]] = []
+        if self.has_module("sales"):
+            quick_links.append(("/admin/sales", "打开销售工作台", "查看待跟进线索、负责人和完整上下文"))
+        if self.has_module("rfqs"):
+            quick_links.append(("/admin/rfqs", "查看 RFQ", "检查买方提交的询价和待补充字段"))
+        if self.has_module("tasks"):
             quick_links.append(("/admin/tasks?status=pending", "处理人工任务", "回复资料外问题并保留当前会话上下文"))
-        if self.user_role == "admin":
+        if self.has_module("products"):
             quick_links.append(("/admin/products", "维护产品资料", "核准字段、发布版本或撤回公开页"))
-            quick_links.append(("/admin/users", "管理成员账号", "创建销售/工程师账号并控制后台访问"))
+        if self.has_module("sites"):
             quick_links.append(("/admin/sites", "网站 API 接入", "登记企业官网来源并获取公开的网站标识"))
+        if self.user_role == "admin":
+            quick_links.append(("/admin/users", "管理成员账号", "创建账号、审批并授权模块权限、启停账号"))
         quick_html = "".join(
             f"<div class='simple-item'><div><strong>{esc(title)}</strong><small>{esc(description)}</small></div>"
             f"<div class='actions'><a class='button secondary' href='{href}'>进入</a></div></div>"
             for href, title, description in quick_links
         )
         ai_section = ai_status_section(self.db, self.ai, self.tenant_id)
+        # V1-01 零权限员工：登录后只看到"等待授权"说明，不展示任何运营数字或内部状态。
+        no_module_access = self.user_role != "admin" and not any(self.has_module(key) for key in GRANTABLE_MODULE_KEYS)
+        if no_module_access:
+            focus_html = (
+                "<div class='focus'><div><span class='focus-label'>当前状态</span><strong>账号尚未开通任何模块权限</strong>"
+                "<p>请联系企业管理员在「成员管理」中审批并授权需要使用的模块；授权保存后立即生效，无需重新登录。</p></div></div>"
+            )
+            todo_html = "<div class='muted-block'>开通模块权限后，这里会显示与你相关的待处理事项。</div>"
+            quick_html = "<div class='muted-block'>目前没有可用入口。</div>"
+            ai_section = ""
+            cards_section = ""
+        else:
+            cards_section = f"<section class='card' style='margin-top:18px'><details class='detail-toggle' style='border-top:0;margin-top:0;padding-top:0'><summary>查看运营数字</summary><div><section class='metric-grid'>{cards}</section></div></details></section>"
         body = f"""
 <div class='toolbar'><div><h1>管理概览</h1><div class='muted'>当前企业：{esc(self.tenant_display_name())} · 当前账号：{esc(self.actor)}（{role_label}）</div></div>{demo_actions}</div>
 {demo_notice}
 {focus_html}
-<div class='grid'><section class='card'><div class='panel-title'><h2>待处理事项</h2><span class='muted'>只显示当前岗位需要行动的事项</span></div><div class='simple-list'>{todo_html}</div></section>
+<div class='grid'><section class='card'><div class='panel-title'><h2>待处理事项</h2><span class='muted'>只显示需要你行动的事项（跟随账号的模块授权）</span></div><div class='simple-list'>{todo_html}</div></section>
 <section class='card'><div class='panel-title'><h2>常用入口</h2></div><div class='simple-list'>{quick_html}</div></section></div>
 {ai_section}
-<section class='card' style='margin-top:18px'><details class='detail-toggle' style='border-top:0;margin-top:0;padding-top:0'><summary>查看运营数字</summary><div><section class='metric-grid'>{cards}</section></div></details></section>
-<div class='footer-note'>概览只读取当前登录账号所属企业的数据；具体修改仍需进入对应模块，并按角色权限执行。</div>
+{cards_section}
+<div class='footer-note'>概览只读取当前登录账号所属企业的数据；具体修改仍需进入对应模块，并按账号的模块授权执行。</div>
 """
         self.send_html(self.console_page("管理概览", body, "admin"), 200)
 
     def admin_users(self, query: dict[str, list[str]]) -> None:
-        role_labels = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}
         users = self.db.list_users(self.tenant_id)
         items = []
         for user in users:
@@ -5272,24 +5425,41 @@ class Handler(BaseHTTPRequestHandler):
                 if user["id"] == self.user_id
                 else f"<form method='post' action='/admin/users/{esc(user['id'])}/toggle' class='inline'><button class='{'danger' if active else 'secondary'}'>{action}</button></form>"
             )
+            if user["role"] == "admin":
+                type_badge = "<span class='badge'>管理员</span>"
+                modules_html = "<small>全模块权限（管理员账号无需逐项授权）</small>"
+            else:
+                granted = self.db.get_user_modules(user["id"])
+                summary = "、".join(MODULE_LABELS[key] for key in granted) or "未授权（无法访问任何模块）"
+                checkboxes = "".join(
+                    f"<label class='check-inline'><input type='checkbox' name='module_{key}' value='1' {'checked' if key in granted else ''}> {esc(label)}</label>"
+                    for key, label in GRANTABLE_MODULES
+                )
+                type_badge = "<span class='badge'>员工</span>"
+                modules_html = (
+                    f"<small>模块权限：{esc(summary)}</small>"
+                    f"<details class='detail-toggle'><summary>授权模块（审批并开通）</summary>"
+                    f"<form method='post' action='/admin/users/{esc(user['id'])}/modules'><div class='check-grid'>{checkboxes}</div>"
+                    f"<p><button>保存授权</button></p></form></details>"
+                )
             items.append(
-                f"<div class='simple-item'><div><strong>{esc(user['display_name'])} <span class='badge'>"
-                f"{esc(role_labels.get(user['role'], user['role']))}</span> "
+                f"<div class='simple-item'><div><strong>{esc(user['display_name'])} {type_badge} "
                 f"<span class='badge {'approved' if active else 'withdrawn'}'>{status}</span></strong>"
-                f"<small>{esc(user['email'])} · 创建于 {esc(user['created_at'])}</small></div>"
+                f"<small>{esc(user['email'])} · 创建于 {esc(user['created_at'])}</small>{modules_html}</div>"
                 f"<div class='actions'>{action_html}</div></div>"
             )
         items_html = "".join(items) or "<div class='muted-block'>暂无成员。</div>"
         notice = {
-            "created": "<div class='notice'>成员账号已创建，可以使用新邮箱和密码登录。</div>",
+            "created": "<div class='notice'>成员账号已创建。员工账号默认没有任何模块权限——请在成员列表中执行「授权模块」，保存后该员工才能访问对应功能。</div>",
             "updated": "<div class='notice'>成员账号状态已更新；停用账号的现有会话已失效。</div>",
+            "modules": "<div class='notice'>模块授权已保存并立即生效；无需该员工重新登录。</div>",
         }.get(query.get("notice", [""])[0], "")
         body = f"""
-<div class='toolbar'><div><h1>成员管理</h1><div class='muted'>管理当前企业的后台账号和最小角色权限。</div></div><a class='button secondary' href='/admin'>返回管理概览</a></div>
+<div class='toolbar'><div><h1>成员管理</h1><div class='muted'>账号只有两种：管理员（全模块）与普通员工（按模块授权）；员工新账号默认零权限，须由管理员审批并授权。</div></div><a class='button secondary' href='/admin'>返回管理概览</a></div>
 {notice}
 <section class='card'><div class='panel-title'><h2>成员列表</h2><span class='muted'>停用后不能登录，历史记录不受影响</span></div><div class='simple-list'>{items_html}</div>
-<details class='detail-toggle'><summary>创建成员账号</summary><div><p class='muted'>密码只在创建时使用，不会在后台列表显示。生产环境应接入正式身份提供商。</p><form method='post' action='/admin/users'><div class='form-grid'><div><label>姓名 *</label><input name='display_name' required placeholder='例如 Alex Chen'></div><div><label>邮箱 *</label><input name='email' type='email' required placeholder='alex@example.com'></div><div><label>角色 *</label><select name='role'><option value='sales'>销售</option><option value='engineer'>工程师</option><option value='admin'>管理员</option></select></div><div><label>初始密码 *</label><input name='password' type='password' minlength='8' required placeholder='至少 8 位'></div></div><p><button>创建账号</button></p></form></div></details>
-<details class='detail-toggle'><summary>查看角色说明</summary><div class='muted-block'><p><b>管理员：</b>产品管理、成员管理、人工任务、RFQ 和销售工作台。</p><p><b>销售：</b>RFQ 和销售工作台。</p><p><b>工程师：</b>人工任务、RFQ 和销售工作台。</p><p>账号属于当前企业；停用后不能继续登录，也不会改变历史 RFQ、任务或操作记录。</p></div></details></section>
+<details class='detail-toggle'><summary>创建成员账号</summary><div><p class='muted'>密码只在创建时使用，不会在后台列表显示。员工账号创建后没有任何模块权限；如需访问，请在上方名单中为其「授权模块」。生产环境应接入正式身份提供商。</p><form method='post' action='/admin/users'><div class='form-grid'><div><label>姓名 *</label><input name='display_name' required placeholder='例如 Alex Chen'></div><div><label>邮箱 *</label><input name='email' type='email' required placeholder='alex@example.com'></div><div><label>账号类型 *</label><select name='role'><option value='employee'>普通员工（默认零权限）</option><option value='admin'>管理员（全模块）</option></select></div><div><label>初始密码 *</label><input name='password' type='password' minlength='8' required placeholder='至少 8 位'></div></div><p><button>创建账号</button></p></form></div></details>
+<details class='detail-toggle'><summary>查看账号类型说明</summary><div class='muted-block'><p><b>管理员：</b>全模块权限，另可管理成员、审批并授权员工模块。</p><p><b>普通员工：</b>创建后默认零权限；管理员逐项授权以下模块后才可访问——产品管理 / 人工任务 / RFQ 询价 / 销售工作台 / 网站 API 接入。授权保存后立即生效。</p><p>成员管理只对管理员开放；账号属于当前企业；停用后不能继续登录，也不会改变历史 RFQ、任务或操作记录。</p></div></details></section>
 """
         self.send_html(self.console_page("成员管理", body, "users"), 200)
 
@@ -5477,7 +5647,7 @@ class Handler(BaseHTTPRequestHandler):
             f"<div class='notice'><b>买方已修改此询价 {buyer_revision_count} 次</b>（最近 {esc(detail_revisions[-1]['created_at'])}）。按最新内容处理即可；"
             f"<a href='/admin/rfqs/{rfq_id}'>查看初次提交与逐次变更对比</a>。</div>"
         ) if buyer_revision_count else ""
-        stop_form = f"<form method='post' action='/admin/sales/{rfq_id}/contact-stop'><label>记录买方在其他渠道提出的停止主动联系原话</label><textarea name='reason' required></textarea><button class='danger'>记录并停止主动跟进</button></form>" if not preference["stop_proactive_contact"] and self.user_role in {"sales", "admin"} else ""
+        stop_form = f"<form method='post' action='/admin/sales/{rfq_id}/contact-stop'><label>记录买方在其他渠道提出的停止主动联系原话</label><textarea name='reason' required></textarea><button class='danger'>记录并停止主动跟进</button></form>" if not preference["stop_proactive_contact"] and self.has_module("sales") else ""
         followup_disabled = "disabled" if preference["stop_proactive_contact"] else ""
         requirements = snapshot.get("requirements", {})
         recommendation = snapshot.get("recommendation") or {}
@@ -5490,8 +5660,8 @@ class Handler(BaseHTTPRequestHandler):
         audit_html = "".join(f"<div class='field-state'>{esc(item['created_at'])} · {esc(item['action'])} · {esc(item['actor'])} · {esc(item['details'])}</div>" for item in audit_rows) or "<p class='muted'>暂无操作记录。</p>"
         stage_options = "".join(f"<option value='{key}' {'selected' if lead['stage'] == key else ''}>{label}</option>" for key, label in {"new": "新线索", "needs_info": "待补充", "technical_review": "技术确认中", "quote_ready": "可进入报价", "paused": "暂缓", "closed": "已关闭"}.items())
         notice = "<div class='notice'>销售状态已保存，刷新后仍会保留。</div>" if query.get("notice", [""])[0] == "updated" else "<div class='notice'>负责人已更新，同会话的 RFQ 使用同一负责人。</div>" if query.get("notice", [""])[0] == "assigned" else ""
-        claim_action = f"<form method='post' action='/admin/sales/{rfq_id}/claim'><button>领取这条会话</button></form>" if not lead["owner"] and self.user_role == "sales" else ""
-        sales_options = "".join(f"<option value='{esc(user['email'])}' {'selected' if lead['owner'] == user['email'] else ''}>{esc(user['display_name'])} · {esc(user['email'])}</option>" for user in self.db.list_users(self.tenant_id) if user["role"] == "sales" and user["active"])
+        claim_action = f"<form method='post' action='/admin/sales/{rfq_id}/claim'><button>领取这条会话</button></form>" if not lead["owner"] and self.user_role != "admin" and self.has_module("sales") else ""
+        sales_options = "".join(f"<option value='{esc(user['email'])}' {'selected' if lead['owner'] == user['email'] else ''}>{esc(user['display_name'])} · {esc(user['email'])}</option>" for user in self.db.list_users(self.tenant_id) if user["role"] == "employee" and user["active"] and "sales" in self.db.get_user_modules(user["id"]))
         assign_action = f"<form method='post' action='/admin/sales/{rfq_id}/assign'><label>分配给销售</label><select name='owner_email'>{sales_options}</select><button>分配或改派</button></form>" if self.user_role == "admin" and sales_options else ""
         if recommendation:
             recommendation_html = f"<p><b>推荐型号：</b>{esc(recommendation.get('model'))}</p><p><b>产品版本：</b>v{esc(recommendation.get('product_version'))}</p><p><b>满足项：</b>{esc('；'.join(recommendation.get('satisfies', [])) or '—')}</p><p><b>冲突项：</b>{esc('；'.join(recommendation.get('conflicts', [])) or '—')}</p><a href='{esc(recommendation.get('detail_url', '#'))}' target='_blank'>打开产品页</a>"
@@ -5500,7 +5670,7 @@ class Handler(BaseHTTPRequestHandler):
         if preference["stop_proactive_contact"]:
             focus_label, focus_title, focus_text = "注意 · 已停止主动联系", "买方要求不再被主动联系", f"原话：{preference['stop_reason']}；买方主动发问时仍可回应，不得安排主动跟进。"
             focus_actions = ""
-        elif not lead["owner"] and self.user_role == "sales":
+        elif not lead["owner"] and self.user_role != "admin" and self.has_module("sales"):
             focus_label, focus_title, focus_text = "当前任务 · 领取", "先认领这位买家的线索", "同一段咨询由一位销售负责；关联的询价单各自处理。"
             focus_actions = claim_action
         elif not lead["owner"]:
