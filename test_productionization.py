@@ -119,6 +119,14 @@ class ProductionizationTests(unittest.TestCase):
         self.assertEqual(status, 303)
         status, _, _ = form_request(self.on_server, "POST", "/admin/products/seed", cookie=self.on_admin)
         self.assertEqual(status, 303)
+        # V1-01 修正：员工即使持有产品模块，也不得看到或触发演示工具（演示工具仍只对管理员开放）
+        employee_id = self.on_db.create_user("demo-tenant", "demo-employee@example.invalid", "普通员工", "employee", "strong-pass", "demo-admin")
+        self.on_db.set_user_modules("demo-tenant", employee_id, ["products"], "demo-admin")
+        employee_cookie = login(self.on_server, "demo-employee@example.invalid", "strong-pass")
+        _, _, employee_page = form_request(self.on_server, "GET", "/admin/products", cookie=employee_cookie)
+        self.assertNotIn("导入两款示例水泵", employee_page)
+        status, _, _ = form_request(self.on_server, "POST", "/admin/products/seed", cookie=employee_cookie)
+        self.assertEqual(status, 403)
 
     def test_tenant_name_is_read_from_database(self):
         # 默认演示企业名来自数据库；改名后控制台各页随之变化（F-4）

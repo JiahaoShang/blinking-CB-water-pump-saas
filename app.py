@@ -4594,9 +4594,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/admin/") and not self.authorize_admin(path, "POST"):
             return
-        if path in DEMO_TOOL_PATHS and not self.demo_tools:
-            # 正式化清单 F-1～F-3：演示工具为部署级开关，正式环境不提供（默认关闭）。
-            self.send_html(self.console_page("演示工具未启用", "<div class='error'>演示工具未启用：这是部署级的演示开关，只有通过 tools/demo/start_demo.py 启动的演示环境才可使用。</div>", ""), 403)
+        if path in DEMO_TOOL_PATHS and (not self.demo_tools or self.user_role != "admin"):
+            # 正式化清单 F-1～F-3 + V1-01：演示工具=部署级开关且只对管理员开放；
+            # 员工即使持有产品模块，也不得看到或触发演示数据重建。
+            reason = (
+                "演示工具未启用：这是部署级的演示开关，只有通过 tools/demo/start_demo.py 启动的演示环境才可使用。"
+                if not self.demo_tools
+                else "演示工具只对管理员开放；演示数据的加载与重建请联系管理员操作。"
+            )
+            self.send_html(self.console_page("演示工具不可用", f"<div class='error'>{reason}</div>", ""), 403)
             return
         buyer_match = re.fullmatch(r"/inquiry/([a-f0-9]+)/(message|confirm|ask|human-request|rfq|rfq/[a-f0-9]+/revise)", path)
         if buyer_match and not self.authorize_buyer_conversation(buyer_match.group(1)):
@@ -4933,7 +4939,7 @@ class Handler(BaseHTTPRequestHandler):
         demo_actions = (
             "<div><form method='post' action='/admin/products/seed' class='inline'><button class='secondary'>导入两款示例水泵</button></form>"
             " <form method='post' action='/admin/products/seed-lowara' class='inline'><button class='secondary'>加载 Lowara 资料</button></form></div>"
-            if self.demo_tools
+            if self.demo_tools and self.user_role == "admin"
             else ""
         )
         item_parts = []
@@ -5330,7 +5336,7 @@ class Handler(BaseHTTPRequestHandler):
         demo_actions = (
             "<div><form method='post' action='/admin/demo/seed' class='inline'><button class='secondary'>加载演示数据</button></form>"
             " <form method='post' action='/admin/lowara/seed' class='inline'><button class='secondary'>加载 Lowara 资料</button></form></div>"
-            if self.demo_tools
+            if self.demo_tools and self.user_role == "admin"
             else ""
         )
         cards = "".join(
