@@ -96,17 +96,25 @@ class ConsoleNavCountTests(unittest.TestCase):
         # 其余导航项与 0 值：保留占位但隐藏
         for key in ("admin", "users", "sites"):
             self.assertIn(f"data-nav-count='{key}' data-count='0' hidden", page, key)
+        # 告急样式（参照好友参考稿的方法）：人工任务与逾期跟进红字加粗；产品与 RFQ 为普通数字
+        self.assertIn("class='side-count hot' data-nav-count='tasks'", page)
+        self.assertIn("class='side-count hot' data-nav-count='sales'", page)
+        self.assertIn("class='side-count' data-nav-count='products'", page)
+        self.assertIn("class='side-count' data-nav-count='rfqs'", page)
 
     def test_role_filter_rendering_and_endpoint(self):
         # 销售：只有 RFQ 与客户跟进两项数字；任务/产品保持隐藏
         _, _, sales_page = form_request(self.server, "GET", "/admin", cookie=self.sales_cookie)
         self.assertIn("data-nav-count='rfqs' data-count='1'", sales_page)
         self.assertIn("data-nav-count='sales' data-count='1'", sales_page)
+        self.assertIn("class='side-count hot' data-nav-count='sales'", sales_page)
+        self.assertIn("class='side-count' data-nav-count='rfqs'", sales_page)
         self.assertIn("data-nav-count='tasks' data-count='0' hidden", sales_page)
         self.assertIn("data-nav-count='products' data-count='0' hidden", sales_page)
         # 工程师：只有人工任务一项数字
         _, _, engineer_page = form_request(self.server, "GET", "/admin", cookie=self.engineer_cookie)
         self.assertIn("data-nav-count='tasks' data-count='2'", engineer_page)
+        self.assertIn("class='side-count hot' data-nav-count='tasks'", engineer_page)
         self.assertIn("data-nav-count='rfqs' data-count='0' hidden", engineer_page)
         self.assertIn("data-nav-count='sales' data-count='0' hidden", engineer_page)
         self.assertIn("data-nav-count='products' data-count='0' hidden", engineer_page)
@@ -131,13 +139,14 @@ class ConsoleNavCountTests(unittest.TestCase):
         self.assertEqual(body, {"counts": {"products": 0, "tasks": 0, "rfqs": 0, "sales": 0}})
 
     def test_cap_and_animation_hooks(self):
-        # 99+ 封顶（保留原始数值用于比对）
+        # 99+ 封顶（保留原始数值用于比对）；告急样式同样生效
         capped = console_layout("t", "<p>x</p>", "admin", nav_counts={"tasks": 120})
         self.assertIn(">99+<", capped)
         self.assertIn("data-count='120'", capped)
+        self.assertIn("class='side-count hot' data-nav-count='tasks'", capped)
         # 页面携带轮询脚本与翻牌钩子（含"减少动态效果"的降级样式）
         _, _, page = form_request(self.server, "GET", "/admin", cookie=self.admin_cookie)
-        for marker in ("/admin/nav-counts", "setInterval(pollNavCounts", "prefers-reduced-motion", "flip-out", "flip-in", "side-count", "POLL_INTERVAL_MS = 5000"):
+        for marker in ("/admin/nav-counts", "setInterval(pollNavCounts", "prefers-reduced-motion", "flip-out", "flip-in", "side-count", "POLL_INTERVAL_MS = 5000", "HOT_KEYS", "side-count.hot"):
             self.assertIn(marker, page, marker)
 
 

@@ -2998,9 +2998,14 @@ html[data-theme="dark"]{
 h1{font-size:21px}
 .metric{font-size:21px}
 }
-/* ── 侧栏待办数字（行动待办量；变化时机械表日历跳转式翻牌，脚本见 CONSOLE_NAV_JS） ── */
-.side-count{margin-left:auto;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:var(--accent);color:#fff;font-size:11px;font-weight:600;display:inline-grid;place-items:center;font-variant-numeric:tabular-nums;perspective:120px}
+/* ── 侧栏待办数字（行动待办量；参照好友参考稿：去底纯数字 + 告急"加粗放大红"，
+      变化时机械表日历跳转式翻牌，脚本见 CONSOLE_NAV_JS） ── */
+.side-count{margin-left:auto;font-family:var(--font-mono);font-size:12px;font-weight:600;color:var(--nav-text);background:none;border:0;padding:0;text-align:right;font-variant-numeric:tabular-nums;transition:color .13s;perspective:120px}
 .side-count[hidden]{display:none}
+.side-count.hot{font-size:13px;font-weight:700;color:var(--danger)}
+.side-link:hover .side-count{color:var(--sb-hover-fg)}
+.side-link.active .side-count{color:var(--nav-text-active)}
+.side-link:hover .side-count.hot,.side-link.active .side-count.hot{color:var(--danger)}
 .side-count .n{display:block;transform:rotateX(0deg);transition:transform .12s ease-in;backface-visibility:hidden}
 .side-count .n.flip-out{transform:rotateX(90deg)}
 .side-count .n.flip-in{transform:rotateX(-90deg);transition:none}
@@ -3064,6 +3069,8 @@ CONSOLE_NAV_JS = """
 (function () {
   var POLL_INTERVAL_MS = 5000;
   var FLIP_MS = 120;
+  // 告急数字（加粗 + 放大 + 红）：与 app.py 的 HOT_COUNT_KEYS 保持一致
+  var HOT_KEYS = { tasks: true, sales: true };
   var prefersReduce = false;
   try { prefersReduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (error) {}
   function flipIn(num, text) {
@@ -3087,8 +3094,10 @@ CONSOLE_NAV_JS = """
   function applyCount(badge, value) {
     var num = badge.querySelector('.n');
     var prev = parseInt(badge.getAttribute('data-count') || '0', 10) || 0;
-    if (value === prev && (value > 0) === (!badge.hidden)) { return; }
+    var hotNow = value > 0 && HOT_KEYS[badge.getAttribute('data-nav-count')] === true;
+    if (value === prev && (value > 0) === (!badge.hidden) && hotNow === badge.classList.contains('hot')) { return; }
     badge.setAttribute('data-count', String(value));
+    badge.classList.toggle('hot', hotNow);
     if (value <= 0) {
       if (badge.hidden) { return; }
       if (prefersReduce) { num.textContent = ''; badge.hidden = true; return; }
@@ -3120,6 +3129,10 @@ CONSOLE_NAV_JS = """
   document.addEventListener('visibilitychange', function () { if (!document.hidden) { pollNavCounts(); } });
 })();
 """
+
+# 侧栏"告急"数字（加粗 + 放大 + 红）：人工任务=有人正在等答复；逾期跟进=已逾期未处理。
+# 前端 CONSOLE_NAV_JS 的 HOT_KEYS 必须与本集合保持一致。
+HOT_COUNT_KEYS = {"tasks", "sales"}
 
 
 THEME_TOGGLE_SVG = (
@@ -3205,11 +3218,13 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
     lang_target = f"{esc(path)}?lang={'en' if lang == 'zh' else 'zh'}"
     counts = nav_counts or {}
     def side_count_html(key: str) -> str:
-        """待办数字胶囊：0 时隐藏但保留占位（轮询发现变化时原地翻牌出现）。"""
+        """待办数字（参照好友参考稿方法）：纯数字随行文字色；告急类加粗放大变红；
+        0 时隐藏但保留占位（轮询发现变化时原地翻牌出现）。"""
         value = counts.get(key, 0)
+        hot = " hot" if value and key in HOT_COUNT_KEYS else ""
         hidden = "" if value else " hidden"
         text = "99+" if value > 99 else (str(value) if value else "")
-        return f"<span class='side-count' data-nav-count='{key}' data-count='{value}'{hidden}><span class='n'>{text}</span></span>"
+        return f"<span class='side-count{hot}' data-nav-count='{key}' data-count='{value}'{hidden}><span class='n'>{text}</span></span>"
     sections = []
     for heading, items in groups:
         links = "".join(
