@@ -159,7 +159,7 @@ try {
     const tab = browser.openTab({ url: pagePath(config.products.t1, `#handoff=${config.handoffCode}`), productId: config.products.t1.id });
     await tab.settle();
     rec.afterLoad = tab.snapshot();
-    await tab.submit({ email: 'buyer-one@example.invalid', phone: '', quantity: '2', destination: 'DE', notes: 'success handoff' });
+    await tab.submit({ email: 'buyer-one@example.invalid', phone: '+49 30 555 0301', quantity: '2', destination: 'DE', notes: 'success handoff' });
     rec.afterSubmit = tab.snapshot();
     rec.requests = tab.journal;
   });
@@ -169,7 +169,7 @@ try {
     const tab = browser.openTab({ url: pagePath(config.products.t2, `#handoff=${config.invalidCode}`), productId: config.products.t2.id });
     await tab.settle();
     rec.afterLoad = tab.snapshot();
-    await tab.submit({ email: 'second-buyer@example.invalid', phone: '', quantity: '1', destination: 'FR', notes: 'failed handoff should isolate' });
+    await tab.submit({ email: 'second-buyer@example.invalid', phone: '+49 30 555 0301', quantity: '1', destination: 'FR', notes: 'failed handoff should isolate' });
     rec.afterSubmit = tab.snapshot();
     rec.requests = tab.journal;
     rec.tabSession = tab.sessionStorage;
@@ -180,7 +180,7 @@ try {
     const tab = browser.openTab({ url: pagePath(config.products.t1), productId: config.products.t1.id });
     await tab.settle();
     rec.afterLoad = tab.snapshot();
-    await tab.submit({ email: 'buyer-one-again@example.invalid', phone: '', quantity: '1', destination: 'DE', notes: 'coexisting tab' });
+    await tab.submit({ email: 'buyer-one-again@example.invalid', phone: '+49 30 555 0301', quantity: '1', destination: 'DE', notes: 'coexisting tab' });
     rec.afterSubmit = tab.snapshot();
     rec.requests = tab.journal;
   });
@@ -190,7 +190,7 @@ try {
     const tab = browser.openTab({ url: pagePath(config.products.t2), productId: config.products.t2.id, session: scenarios[1].tabSession });
     await tab.settle();
     rec.afterLoad = tab.snapshot();
-    await tab.submit({ email: 'second-buyer-again@example.invalid', phone: '', quantity: '1', destination: 'FR', notes: 'failed tab reload' });
+    await tab.submit({ email: 'second-buyer-again@example.invalid', phone: '+49 30 555 0301', quantity: '1', destination: 'FR', notes: 'failed tab reload' });
     rec.afterSubmit = tab.snapshot();
     rec.requests = tab.journal;
   });
@@ -201,7 +201,7 @@ try {
     const tab = fresh.openTab({ url: pagePath(config.products.t2), productId: config.products.t2.id });
     await tab.settle();
     rec.afterLoad = tab.snapshot();
-    await tab.submit({ email: 'direct-visitor@example.invalid', phone: '', quantity: '3', destination: 'NL', notes: 'fresh direct visit' });
+    await tab.submit({ email: 'direct-visitor@example.invalid', phone: '+49 30 555 0301', quantity: '3', destination: 'NL', notes: 'fresh direct visit' });
     rec.afterSubmit = tab.snapshot();
     rec.requests = tab.journal;
   });
@@ -215,10 +215,10 @@ try {
     const tabB = browser.openTab({ url: pagePath(config.products.t2, `#handoff=${config.handoffCodeB}`), productId: config.products.t2.id });
     await tabB.settle();
     rec.afterLoadB = tabB.snapshot();
-    await tabA.submit({ email: 'buyer-a@example.invalid', phone: '', quantity: '5', destination: 'DE', notes: 'A submits after B opened' });
+    await tabA.submit({ email: 'buyer-a@example.invalid', phone: '+49 30 555 0301', quantity: '5', destination: 'DE', notes: 'A submits after B opened' });
     rec.afterSubmitA = tabA.snapshot();
     rec.requestsA = tabA.journal;
-    await tabB.submit({ email: 'buyer-b@example.invalid', phone: '', quantity: '2', destination: 'FR', notes: 'B submits' });
+    await tabB.submit({ email: 'buyer-b@example.invalid', phone: '+49 30 555 0301', quantity: '2', destination: 'FR', notes: 'B submits' });
     rec.afterSubmitB = tabB.snapshot();
     rec.requestsB = tabB.journal;
     rec.tabASession = tabA.sessionStorage;
@@ -230,7 +230,7 @@ try {
     const tab = browser.openTab({ url: pagePath(config.products.t1), productId: config.products.t1.id, session: scenarios[5].tabASession });
     await tab.settle();
     rec.afterLoad = tab.snapshot();
-    await tab.submit({ email: 'buyer-a-reload@example.invalid', phone: '', quantity: '1', destination: 'DE', notes: 'reload of connected tab' });
+    await tab.submit({ email: 'buyer-a-reload@example.invalid', phone: '+49 30 555 0301', quantity: '1', destination: 'DE', notes: 'reload of connected tab' });
     rec.afterSubmit = tab.snapshot();
     rec.requests = tab.journal;
   });
@@ -240,22 +240,22 @@ try {
   await scenario('failed_handoff_sequences', async (rec) => {
     const tabF1 = browser.openTab({ url: pagePath(config.products.t2, `#handoff=${config.invalidCode}`), productId: config.products.t2.id });
     await tabF1.settle();
-    await tabF1.submit({ email: 'visitor-f1@example.invalid', phone: '', quantity: '1', destination: 'NL', notes: 'first failed attempt' });
+    await tabF1.submit({ email: 'visitor-f1@example.invalid', phone: '+49 30 555 0301', quantity: '1', destination: 'NL', notes: 'first failed attempt' });
     rec.f1AfterSubmit = tabF1.snapshot();
     rec.f1Requests = tabF1.journal;
     const tabF1b = browser.openTab({ url: pagePath(config.products.t2, `#handoff=${config.invalidCode2}`), productId: config.products.t2.id, session: tabF1.sessionStorage });
     await tabF1b.settle();
-    await tabF1b.submit({ email: 'visitor-f1@example.invalid', phone: '', quantity: '1', destination: 'NL', notes: 'second failed attempt, same tab' });
+    await tabF1b.submit({ email: 'visitor-f1@example.invalid', phone: '+49 30 555 0301', quantity: '1', destination: 'NL', notes: 'second failed attempt, same tab' });
     rec.f1bAfterSubmit = tabF1b.snapshot();
     rec.f1bRequests = tabF1b.journal;
     const tabF2 = browser.openTab({ url: pagePath(config.products.t2, `#handoff=${config.invalidCode}`), productId: config.products.t2.id });
     await tabF2.settle();
-    await tabF2.submit({ email: 'visitor-f2@example.invalid', phone: '', quantity: '2', destination: 'NL', notes: 'separate failed visitor' });
+    await tabF2.submit({ email: 'visitor-f2@example.invalid', phone: '+49 30 555 0301', quantity: '2', destination: 'NL', notes: 'separate failed visitor' });
     rec.f2AfterSubmit = tabF2.snapshot();
     rec.f2Requests = tabF2.journal;
     const tabF3 = browser.openTab({ url: pagePath(config.products.t1, `#handoff=${config.invalidCode}`), productId: config.products.t1.id, session: scenarios[5].tabASession });
     await tabF3.settle();
-    await tabF3.submit({ email: 'visitor-f3@example.invalid', phone: '', quantity: '1', destination: 'DE', notes: 'failed handoff after a previous success in this tab' });
+    await tabF3.submit({ email: 'visitor-f3@example.invalid', phone: '+49 30 555 0301', quantity: '1', destination: 'DE', notes: 'failed handoff after a previous success in this tab' });
     rec.f3AfterSubmit = tabF3.snapshot();
     rec.f3Requests = tabF3.journal;
   });

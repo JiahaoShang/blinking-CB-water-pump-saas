@@ -124,7 +124,7 @@ class HandoffApiTests(unittest.TestCase):
         status, _, saved = self.request_via(
             self.server, "POST", f"/api/v1/buyer/conversations/{conversation_id}/rfqs",
             {"entry_surface": "product_page", "product_id": product["id"], "contact_confirmed": True,
-             "contact": {"contact_email": "buyer@example.com", "quantity": "2", "region": "DE"}, "notes": "handoff"},
+             "contact": {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0224", "quantity": "2", "region": "DE"}, "notes": "handoff"},
             {"X-Site-Key": "site-a", "Authorization": f"Bearer {token2}", "Idempotency-Key": "handoff-rfq-1"},
         )
         self.assertEqual(status, 201)
@@ -274,7 +274,7 @@ class HandoffApiTests(unittest.TestCase):
         status, _, saved = self.request_via(
             platform, "POST", f"/api/v1/buyer/conversations/{conversation_id}/rfqs",
             {"entry_surface": "product_page", "product_id": product["id"], "contact_confirmed": True,
-             "contact": {"contact_phone": "+4900000001"}, "notes": "cross-origin"},
+             "contact": {"contact_phone": "+49 30 555 0225", "contact_email": "cross@example.com", "quantity": "1", "region": "DE"}, "notes": "cross-origin"},
             {"X-Site-Key": "site-a", "Authorization": f"Bearer {token2}", "Idempotency-Key": "xc-rfq-1"},
         )
         self.assertEqual(status, 201)
@@ -289,7 +289,7 @@ class HandoffApiTests(unittest.TestCase):
             status, _, _ = self.request(
                 "POST", f"/api/v1/buyer/conversations/{conversation_id}/rfqs",
                 {"entry_surface": "product_page", "contact_confirmed": True,
-                 "contact": {"contact_email": "same@example.com", "quantity": "1", "region": "FR"}, "notes": "direct"},
+                 "contact": {"contact_email": "same@example.com", "contact_phone": "+49 30 555 0226", "quantity": "1", "region": "FR"}, "notes": "direct"},
                 {"X-Site-Key": "site-a", "Authorization": f"Bearer {token}", "Idempotency-Key": f"direct-{conversation_id}"},
             )
             self.assertEqual(status, 201)

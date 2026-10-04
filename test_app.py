@@ -350,18 +350,19 @@ class RfqTests(unittest.TestCase):
 
     def test_incomplete_rfq_is_saved_as_needs_info(self):
         conversation_id, _revision_id, _recommendation_id = self._conversation_with_recommendation()
-        rfq_id, created = self.db.create_rfq("demo-tenant", conversation_id, "partial-token", {"contact_email": "buyer@example.com"}, "Need help", self.product["id"])
+        # V1-01：必填字段补齐后，软缺项只剩"期望交期"，照旧进入 needs_info 与"还缺"清单
+        rfq_id, created = self.db.create_rfq("demo-tenant", conversation_id, "partial-token", {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0201", "quantity": "2", "region": "Germany"}, "Need help", self.product["id"])
         rfq = self.db.get_rfq("demo-tenant", rfq_id)
         self.assertTrue(created)
         self.assertEqual(rfq["status"], "needs_info")
-        self.assertIn("数量", json.loads(rfq["missing_json"]))
-        self.assertIn("目的地", json.loads(rfq["missing_json"]))
+        self.assertIn("期望交期", json.loads(rfq["missing_json"]))
+        self.assertNotIn("数量", json.loads(rfq["missing_json"]))
 
     def test_buyer_can_submit_before_requirement_confirmation_with_contact(self):
         conversation_id = self.db.create_conversation("demo-tenant")
         rfq_id, created = self.db.create_rfq(
             "demo-tenant", conversation_id, "early-rfq",
-            {"contact_email": "buyer@example.com"}, "Please quote for my project",
+            {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0202", "quantity": "1", "region": "Germany"}, "Please quote for my project",
         )
         self.assertTrue(created)
         rfq = self.db.get_rfq("demo-tenant", rfq_id)
@@ -370,7 +371,8 @@ class RfqTests(unittest.TestCase):
 
     def test_rfq_without_reply_contact_creates_no_record(self):
         conversation_id = self.db.create_conversation("demo-tenant")
-        with self.assertRaisesRegex(ValueError, "联系方式"):
+        # V1-01：默认口径下四个必填字段缺一即拒绝（报错列出全部缺项）
+        with self.assertRaisesRegex(ValueError, "请填写：邮箱、电话、数量、目的地"):
             self.db.create_rfq("demo-tenant", conversation_id, "no-contact", {}, "Please quote")
         self.assertEqual(len(self.db.list_rfqs("demo-tenant")), 0)
 
@@ -464,7 +466,7 @@ class LowaraFixtureTests(unittest.TestCase):
         self.db.save_recommendation("demo-tenant", conversation_id, revision_id, status, results)
         rfq_id, created = self.db.create_rfq(
             "demo-tenant", conversation_id, "lowara-rfq-token",
-            {"quantity": "1", "region": "上海", "delivery": "6 周", "contact_email": "buyer@example.com"}, "演示询价"
+            {"quantity": "1", "region": "上海", "delivery": "6 周", "contact_email": "buyer@example.com", "contact_phone": "+86 21 5555 0204"}, "演示询价"
         )
         self.assertTrue(created)
         rfq = self.db.get_rfq("demo-tenant", rfq_id)
@@ -492,7 +494,7 @@ class SalesWorkspaceTests(unittest.TestCase):
         revision_id = self.db.create_requirement_revision("demo-tenant", conversation_id, values, "confirmed")
         status, results, _ = match_products(self.db, "demo-tenant", values)
         self.db.save_recommendation("demo-tenant", conversation_id, revision_id, status, results)
-        self.rfq_id, _ = self.db.create_rfq("demo-tenant", conversation_id, "sales-token", {"contact_email": "buyer@example.com", "quantity": "2", "region": "Germany", "delivery": "8 weeks"}, "Sales handoff")
+        self.rfq_id, _ = self.db.create_rfq("demo-tenant", conversation_id, "sales-token", {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0205", "quantity": "2", "region": "Germany", "delivery": "8 weeks"}, "Sales handoff")
 
     def tearDown(self):
         self.db.conn.close()
@@ -510,11 +512,11 @@ class SalesWorkspaceTests(unittest.TestCase):
 
     def test_claim_and_assignment_keep_one_owner_across_conversation_rfqs(self):
         first = self.db.get_rfq("demo-tenant", self.rfq_id)
-        other_rfq, _ = self.db.create_rfq("demo-tenant", first["conversation_id"], "second-purchase", {"contact_email": "buyer@example.com"}, "Another purchase")
+        other_rfq, _ = self.db.create_rfq("demo-tenant", first["conversation_id"], "second-purchase", {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0206", "quantity": "1", "region": "Germany"}, "Another purchase")
         self.db.claim_conversation_leads("demo-tenant", self.rfq_id, "demo-sales@example.invalid")
         self.assertEqual(self.db.get_lead_for_rfq("demo-tenant", self.rfq_id)["owner"], "demo-sales@example.invalid")
         self.assertEqual(self.db.get_lead_for_rfq("demo-tenant", other_rfq)["owner"], "demo-sales@example.invalid")
-        third_rfq, _ = self.db.create_rfq("demo-tenant", first["conversation_id"], "third-purchase", {"contact_email": "buyer@example.com"}, "Another model")
+        third_rfq, _ = self.db.create_rfq("demo-tenant", first["conversation_id"], "third-purchase", {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0207", "quantity": "1", "region": "Germany"}, "Another model")
         self.assertEqual(self.db.get_lead_for_rfq("demo-tenant", third_rfq)["owner"], "demo-sales@example.invalid")
         with self.assertRaises(ValueError):
             self.db.claim_conversation_leads("demo-tenant", other_rfq, "demo-engineer@example.invalid")

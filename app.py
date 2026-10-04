@@ -384,6 +384,14 @@ class Database:
                 details TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_log(tenant_id, id);
+            CREATE TABLE IF NOT EXISTS tenant_settings (
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                key TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, key)
+            );
             CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -1474,22 +1482,37 @@ class Database:
         if rfq["current_revision"] != expected_revision:
             raise ConflictError("询价已更新，请刷新后再修改")
         current = self.rfq_current_content(rfq)
+        # V1-01 步骤②：隐藏字段不接受买家改动（保留现值）；必填字段修改后不可为空。
+        field_config = self.get_rfq_field_config(tenant_id)
+        hidden_content_keys = {RFQ_FIELD_CONTENT_KEYS[key] for key, state in field_config.items() if state == "hidden"}
         editable = ("contact_name", "company", "contact_email", "contact_phone", "quantity", "destination", "requested_delivery", "notes", "requested_model")
         for key in editable:
-            if key in changes:
+            if key in changes and key not in hidden_content_keys:
                 current[key] = str(changes[key]).strip()
         if "product_id" in changes:
             current["product_id"] = changes["product_id"] or None
-        if not (current["contact_email"] or current["contact_phone"]):
-            raise ValueError("请保留至少一种可回复联系方式")
+        missing_required = [
+            RFQ_FIELD_LABELS[field_key]
+            for field_key in RFQ_FIELD_ORDER
+            if field_config[field_key] == "required" and not str(current[RFQ_FIELD_CONTENT_KEYS[field_key]] or "").strip()
+        ]
+        if missing_required:
+            raise ValueError("请保留：" + "、".join(missing_required))
         product_id = current["product_id"]
         version = self.get_published_version(tenant_id, product_id) if product_id else None
         if product_id and not version:
             raise ValueError("所选产品未发布或不属于当前企业")
-        technical_missing = [item for item in json.loads(rfq["missing_json"]) if item not in {"数量", "目的地", "期望交期"}]
+        business_missing_labels = {"数量", "目的地", "期望交期", "邮箱", "电话"}
+        technical_missing = [item for item in json.loads(rfq["missing_json"]) if item not in business_missing_labels]
         if "product_id" in changes and product_id != rfq["product_id"] and "产品适用性待核实" not in technical_missing:
             technical_missing.append("产品适用性待核实")
-        missing = technical_missing + [label for key, label in (("quantity", "数量"), ("destination", "目的地"), ("requested_delivery", "期望交期")) if not current[key]]
+        missing = technical_missing + [
+            RFQ_FIELD_LABELS[field_key]
+            for field_key in RFQ_FIELD_ORDER
+            if field_key != "notes" and field_config[field_key] == "optional" and not str(current[RFQ_FIELD_CONTENT_KEYS[field_key]] or "").strip()
+        ]
+        if not str(current["requested_delivery"] or "").strip():
+            missing.append("期望交期")
         status = "needs_info" if missing else "submitted"
         timestamp = now_iso()
         next_revision = expected_revision + 1
@@ -1521,6 +1544,14 @@ class Database:
         requested_model: str = "",
     ) -> tuple[str, bool]:
         requested_model = str(requested_model or "").strip()
+        # V1-01 步骤②：按企业设置归一化（隐藏=不收集；不修改调用方传参）。
+        contact = dict(contact)
+        field_config = self.get_rfq_field_config(tenant_id)
+        for field_key, field_state in field_config.items():
+            if field_key != "notes" and field_state == "hidden":
+                contact[RFQ_FIELD_INPUT_KEYS[field_key]] = ""
+        if field_config["notes"] == "hidden":
+            notes = ""
         normalized_contact = {key: contact.get(key, "").strip() for key in ("contact_name", "company", "contact_email", "contact_phone", "quantity", "region", "delivery")}
         request_hash = hashlib.sha256(json.dumps({
             "conversation_id": conversation_id, "contact": normalized_contact, "notes": notes.strip(),
@@ -1535,8 +1566,15 @@ class Database:
         conversation = self.get_conversation(tenant_id, conversation_id)
         if not conversation:
             raise ValueError("会话不存在")
-        if not (contact.get("contact_email", "").strip() or contact.get("contact_phone", "").strip()):
-            raise ValueError("请填写可回复的邮箱或电话等联系方式")
+        # V1-01 步骤②：必填校验（三个买方入口同口径；重试已在幂等分支返回，不受配置变化影响）。
+        missing_required = [
+            RFQ_FIELD_LABELS[field_key]
+            for field_key in RFQ_FIELD_ORDER
+            if field_config[field_key] == "required"
+            and not (str(notes or "").strip() if field_key == "notes" else str(contact.get(RFQ_FIELD_INPUT_KEYS[field_key], "")).strip())
+        ]
+        if missing_required:
+            raise ValueError("请填写：" + "、".join(missing_required))
         revision = self.latest_confirmed_revision(tenant_id, conversation_id)
         recommendation = self.latest_active_recommendation(tenant_id, conversation_id)
         revision_values = json.loads(revision["values_json"]) if revision else {}
@@ -1572,10 +1610,13 @@ class Database:
             missing.append("工况待确认")
         if selected_result and selected_result.get("status") == "needs_confirmation":
             missing.append("产品适用性待工程师核实")
-        for key, label in (("quantity", "数量"), ("region", "目的地"), ("delivery", "期望交期")):
-            value = contact.get(key, "")
-            if not value.strip():
-                missing.append(label)
+        for field_key in RFQ_FIELD_ORDER:
+            if field_key == "notes":
+                continue
+            if field_config[field_key] == "optional" and not str(contact.get(RFQ_FIELD_INPUT_KEYS[field_key], "")).strip():
+                missing.append(RFQ_FIELD_LABELS[field_key])
+        if not contact.get("delivery", "").strip():
+            missing.append("期望交期")
         status = "submitted" if not missing else "needs_info"
         snapshot = {
             "requirement_revision_id": revision["id"] if revision else None,
@@ -1647,12 +1688,15 @@ class Database:
             self._audit(tenant_id, "lead", lead["id"], "assigned", actor_email, f"conversation={lead['conversation_id']};owner={owner_email}")
 
     def list_sales_records(self, tenant_id: str) -> list[sqlite3.Row]:
+        # 排序按企业设置的阶段顺序（V1-01 步骤②：可改名/排序；键来自固定常量，无注入面）。
+        stage_keys = [stage["key"] for stage in self.get_lead_stages(tenant_id)]
+        order_case = " ".join(f"WHEN '{key}' THEN {index}" for index, key in enumerate(stage_keys))
         return self.conn.execute(
             "SELECT r.*, p.model, l.id AS lead_id, l.stage, l.owner, l.next_follow_up, l.note, l.updated_at AS lead_updated_at, c.stop_proactive_contact, "
             "(SELECT COUNT(*) FROM rfq_revisions v WHERE v.rfq_id=r.id AND v.revision>1) AS buyer_revision_count, "
             "(SELECT MAX(v.created_at) FROM rfq_revisions v WHERE v.rfq_id=r.id) AS last_revision_at "
             "FROM rfqs r LEFT JOIN products p ON p.id=r.product_id LEFT JOIN leads l ON l.rfq_id=r.id AND l.tenant_id=r.tenant_id JOIN conversations c ON c.id=r.conversation_id AND c.tenant_id=r.tenant_id "
-            "WHERE r.tenant_id=? ORDER BY CASE l.stage WHEN 'new' THEN 0 WHEN 'needs_info' THEN 1 WHEN 'technical_review' THEN 2 WHEN 'quote_ready' THEN 3 WHEN 'paused' THEN 4 ELSE 5 END, l.next_follow_up, r.created_at DESC",
+            f"WHERE r.tenant_id=? ORDER BY CASE l.stage {order_case} ELSE {len(stage_keys)} END, l.next_follow_up, r.created_at DESC",
             (tenant_id,),
         ).fetchall()
 
@@ -1681,12 +1725,15 @@ class Database:
             (tenant_id,),
         ).fetchone()
         today = datetime.now(timezone.utc).date().isoformat()
+        # 终态阶段（默认：暂缓/已关闭）不计入在跟与逾期；随企业设置的阶段终态标记变化。
+        terminal_keys = [stage["key"] for stage in self.get_lead_stages(tenant_id) if stage["terminal"]]
+        terminal_clause = f"stage NOT IN ({', '.join('?' for _ in terminal_keys)})" if terminal_keys else "1=1"
         lead_counts = self.conn.execute(
-            "SELECT "
-            "SUM(CASE WHEN stage NOT IN ('closed', 'paused') THEN 1 ELSE 0 END) AS active, "
-            "SUM(CASE WHEN next_follow_up < ? AND stage NOT IN ('closed', 'paused') THEN 1 ELSE 0 END) AS overdue "
+            f"SELECT "
+            f"SUM(CASE WHEN {terminal_clause} THEN 1 ELSE 0 END) AS active, "
+            f"SUM(CASE WHEN next_follow_up < ? AND {terminal_clause} THEN 1 ELSE 0 END) AS overdue "
             "FROM leads WHERE tenant_id=?",
-            (today, tenant_id),
+            [*terminal_keys, today, *terminal_keys, tenant_id],
         ).fetchone()
         return {
             "products_total": int(product_counts["total"] or 0),
@@ -1744,7 +1791,7 @@ class Database:
         note: str,
         actor: str = "demo-sales",
     ) -> None:
-        allowed = {"new", "needs_info", "technical_review", "quote_ready", "paused", "closed"}
+        allowed = {stage["key"] for stage in self.get_lead_stages(tenant_id)}
         if stage not in allowed:
             raise ValueError("不支持的线索阶段")
         lead = self.get_lead_for_rfq(tenant_id, rfq_id)
@@ -1770,6 +1817,103 @@ class Database:
             f"SELECT * FROM audit_log WHERE tenant_id=? AND entity_id IN ({placeholders}) ORDER BY created_at DESC",
             [tenant_id, *entity_ids],
         ).fetchall()
+
+    # ── 企业设置（V1-01 步骤②）：通用存取 + 校验回退 ─────────────────────────
+    def get_tenant_setting(self, tenant_id: str, key: str) -> tuple[object, str]:
+        """读取企业设置；返回 (解析值, 更新时间)。无记录返回 (None, "")；损坏 JSON 视为无值。"""
+        row = self.conn.execute(
+            "SELECT value_json, updated_at FROM tenant_settings WHERE tenant_id=? AND key=?",
+            (tenant_id, key),
+        ).fetchone()
+        if not row:
+            return None, ""
+        try:
+            return json.loads(row["value_json"]), row["updated_at"]
+        except json.JSONDecodeError:
+            return None, row["updated_at"]
+
+    def set_tenant_setting(self, tenant_id: str, key: str, value: object, actor: str) -> None:
+        """写入企业设置并留审计（before/after 全量）。"""
+        before, _ = self.get_tenant_setting(tenant_id, key)
+        timestamp = now_iso()
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO tenant_settings(tenant_id, key, value_json, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(tenant_id, key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
+                (tenant_id, key, json.dumps(value, ensure_ascii=False), timestamp),
+            )
+            self._audit(
+                tenant_id, "settings", key, "updated", actor,
+                f"before={json.dumps(before, ensure_ascii=False)};after={json.dumps(value, ensure_ascii=False)}",
+            )
+
+    def get_lead_stages(self, tenant_id: str) -> list[dict[str, object]]:
+        """线索阶段清单（按保存顺序）；键集合固定，损坏数据回退默认。"""
+        stored, _ = self.get_tenant_setting(tenant_id, SETTING_LEAD_STAGES)
+        defaults = {stage["key"]: dict(stage) for stage in DEFAULT_LEAD_STAGES}
+        stages: list[dict[str, object]] = []
+        seen: set[str] = set()
+        if isinstance(stored, list):
+            for item in stored:
+                if not isinstance(item, dict) or item.get("key") not in defaults or item["key"] in seen:
+                    continue
+                seen.add(item["key"])
+                label = str(item.get("label") or "").strip() or str(defaults[item["key"]]["label"])
+                stages.append({"key": item["key"], "label": label[:24], "terminal": bool(item.get("terminal", defaults[item["key"]]["terminal"]))})
+        if len(stages) != len(LEAD_STAGE_KEYS):
+            return [dict(stage) for stage in DEFAULT_LEAD_STAGES]
+        return stages
+
+    def get_rfq_field_config(self, tenant_id: str) -> dict[str, str]:
+        """RFQ 字段三态配置；非法值回退默认；邮箱与电话不可同时隐藏（损坏数据兜底：电话回落选填）。"""
+        stored, _ = self.get_tenant_setting(tenant_id, SETTING_RFQ_FIELDS)
+        config: dict[str, str] = {}
+        for key in RFQ_FIELD_ORDER:
+            value = stored.get(key) if isinstance(stored, dict) else None
+            config[key] = value if value in RFQ_FIELD_STATES else DEFAULT_RFQ_FIELDS[key]
+        if config["email"] == "hidden" and config["phone"] == "hidden":
+            config["phone"] = "optional"
+        return config
+
+    def get_notify_recipients(self, tenant_id: str) -> list[str]:
+        """通知接收人（仅登记；渠道未接入）。返回去重后的合法邮箱列表（最多 20 个）。"""
+        stored, _ = self.get_tenant_setting(tenant_id, SETTING_NOTIFY_RECIPIENTS)
+        if not isinstance(stored, list):
+            return []
+        recipients: list[str] = []
+        for item in stored:
+            address = str(item or "").strip()
+            if address and EMAIL_PATTERN.match(address) and address not in recipients:
+                recipients.append(address)
+        return recipients[:20]
+
+    def list_audit_records(self, tenant_id: str, page: int = 1, page_size: int = 50, entity_type: str = "", actor: str = "") -> tuple[int, list[sqlite3.Row]]:
+        """操作记录分页查询（租户隔离；可按对象类型/操作者筛选）。"""
+        clauses = ["tenant_id=?"]
+        params: list[object] = [tenant_id]
+        if entity_type:
+            clauses.append("entity_type=?")
+            params.append(entity_type)
+        if actor:
+            clauses.append("actor=?")
+            params.append(actor)
+        where = " AND ".join(clauses)
+        total = int(self.conn.execute(f"SELECT COUNT(*) AS n FROM audit_log WHERE {where}", params).fetchone()["n"])
+        rows = self.conn.execute(
+            f"SELECT * FROM audit_log WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            [*params, page_size, max(page - 1, 0) * page_size],
+        ).fetchall()
+        return total, rows
+
+    def audit_filter_options(self, tenant_id: str) -> tuple[list[str], list[str]]:
+        """操作记录筛选下拉选项：本租户出现过的对象类型与操作者。"""
+        entity_types = [row["entity_type"] for row in self.conn.execute(
+            "SELECT DISTINCT entity_type FROM audit_log WHERE tenant_id=? ORDER BY entity_type", (tenant_id,)
+        )]
+        actors = [row["actor"] for row in self.conn.execute(
+            "SELECT DISTINCT actor FROM audit_log WHERE tenant_id=? ORDER BY actor", (tenant_id,)
+        )]
+        return entity_types, actors
 
     def create_product(self, tenant_id: str, model: str, name: str, use_case: str, actor: str = "demo-admin") -> str:
         self.ensure_tenant(tenant_id)
@@ -2960,6 +3104,15 @@ select{appearance:none;padding-right:30px;background-image:url("data:image/svg+x
 .console .check-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px 14px;margin:10px 0 4px}
 .console label.check-inline{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:500;color:var(--text-1);margin:0}
 .console label.check-inline input{width:auto;margin:0}
+.console .stage-row{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border-subtle);flex-wrap:wrap}
+.console .stage-row:last-of-type{border-bottom:none;padding-bottom:0}
+.console .chip-key{font-family:var(--font-mono);font-size:11px;color:var(--text-3);background:var(--surface-2);border:1px solid var(--border);border-radius:3px;padding:1px 6px}
+.console .stage-row input[name^="label_"]{flex:1;min-width:150px}
+.console .stage-row button.mini{padding:2px 9px;font-size:12px;line-height:1.5}
+.console .filter-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.console .filter-bar label{margin:0;font-size:13px;color:var(--text-2)}
+.console .pager{display:flex;align-items:center;gap:12px;margin-top:14px;justify-content:flex-end}
+.console .pager .muted{font-size:12px}
 .full{grid-column:1/-1}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--border-subtle);vertical-align:middle}
@@ -3109,6 +3262,8 @@ CONSOLE_ICONS = """<svg width="0" height="0" style="position:absolute" aria-hidd
 <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></symbol>
 <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/></symbol>
 <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></symbol>
+<symbol id="i-sliders" viewBox="0 0 24 24"><path d="M21 4h-7"/><path d="M10 4H3"/><path d="M21 12h-9"/><path d="M8 12H3"/><path d="M21 20h-5"/><path d="M12 20H3"/><path d="M14 2v4"/><path d="M8 10v4"/><path d="M16 18v4"/></symbol>
+<symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></symbol>
 <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></symbol>
 <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
 <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></symbol>
@@ -3330,6 +3485,8 @@ def admin_permission_area(path: str) -> tuple[str, str, str]:
     module_why = "该模块未向你的账号授权；如需使用，请联系企业管理员在「成员管理」中审批并开通。"
     areas = (
         ("/admin/users", "访问「成员管理」", "管理员", "成员账号与模块授权关系到企业数据隔离，成员管理只对管理员开放。"),
+        ("/admin/settings", "访问「企业设置」", "管理员", "企业设置会影响全企业买家的表单与跟进流程，只对管理员开放。"),
+        ("/admin/audit", "访问「操作记录」", "管理员", "操作记录包含全企业范围的操作轨迹，只对管理员开放。"),
         ("/admin/sites", "访问「网站 API 接入」", "模块权限「网站 API 接入」", module_why),
         ("/admin/products", "访问「产品管理」", "模块权限「产品管理」", module_why),
         ("/admin/tasks", "访问「人工任务」", "模块权限「人工任务」", module_why),
@@ -3391,8 +3548,12 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("users", "/admin/users", "users", "成员管理"),
             ("sites", "/admin/sites", "globe", "网站 API 接入"),
         )),
+        ("设置与治理", (
+            ("settings", "/admin/settings", "sliders", "企业设置"),
+            ("audit", "/admin/audit", "history", "操作记录"),
+        )),
     )
-    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "users": "团队与接入", "sites": "团队与接入"}
+    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "audit": "设置与治理"}
     role_label = "管理员" if role == "admin" else ("员工" if role else "未登录")
     lang_target = f"{esc(path)}?lang={'en' if lang == 'zh' else 'zh'}"
     counts = nav_counts or {}
@@ -3484,6 +3645,53 @@ MODULE_LABELS = dict(GRANTABLE_MODULES)
 # 旧角色名兼容（旧库迁移与既有测试）：等价于"员工 + 对应模块授权"，能力与迁移前一致。
 LEGACY_ROLE_MODULES = {"sales": ("rfqs", "sales"), "engineer": ("tasks", "rfqs", "sales")}
 
+# ── V1-01 步骤② 企业设置：线索阶段 / RFQ 表单字段 / 通知接收人 ──────────────────
+SETTING_LEAD_STAGES = "lead_stages"
+SETTING_RFQ_FIELDS = "rfq_fields"
+SETTING_NOTIFY_RECIPIENTS = "notify_recipients"
+
+# 阶段 KEY 集合首版固定（仅支持改名/排序/终态；增删已登记为暂缓项 F-15）。
+DEFAULT_LEAD_STAGES = (
+    {"key": "new", "label": "新线索", "terminal": False},
+    {"key": "needs_info", "label": "待补充", "terminal": False},
+    {"key": "technical_review", "label": "技术确认中", "terminal": False},
+    {"key": "quote_ready", "label": "可进入报价", "terminal": False},
+    {"key": "paused", "label": "暂缓", "terminal": True},
+    {"key": "closed", "label": "已关闭", "terminal": True},
+)
+LEAD_STAGE_KEYS = tuple(stage["key"] for stage in DEFAULT_LEAD_STAGES)
+
+# RFQ 基础字段三态：required=必填（缺一不可）/ optional=选填（可空，缺项进"还缺"清单）/ hidden=隐藏（不收集）。
+# 默认值=用户拍板：邮箱/电话/数量/目的地必填、备注选填；邮箱与电话不可同时隐藏。
+DEFAULT_RFQ_FIELDS = {"email": "required", "phone": "required", "quantity": "required", "destination": "required", "notes": "optional"}
+RFQ_FIELD_ORDER = ("email", "phone", "quantity", "destination", "notes")
+RFQ_FIELD_LABELS = {"email": "邮箱", "phone": "电话", "quantity": "数量", "destination": "目的地", "notes": "备注"}
+RFQ_FIELD_STATES = ("required", "optional", "hidden")
+# 字段 → 建询价入参键（create 用 region；text 来自表单/接口）与内容键（revise/落库 destination）。
+RFQ_FIELD_INPUT_KEYS = {"email": "contact_email", "phone": "contact_phone", "quantity": "quantity", "destination": "region", "notes": "notes"}
+RFQ_FIELD_CONTENT_KEYS = {"email": "contact_email", "phone": "contact_phone", "quantity": "quantity", "destination": "destination", "notes": "notes"}
+
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+# 操作记录页的中文标签（未知值回退原值显示）。
+AUDIT_ENTITY_LABELS = {
+    "conversation": "会话", "requirement_revision": "工况修订", "recommendation": "推荐",
+    "human_task": "人工任务", "rfq": "询价单", "lead": "线索", "product": "产品",
+    "product_field": "产品字段", "source_document": "来源资料", "user": "成员账号", "settings": "企业设置",
+}
+AUDIT_ACTION_LABELS = {
+    "created": "创建", "updated": "更新", "activated": "启用", "deactivated": "停用",
+    "submitted": "提交", "buyer_revised": "买方修改", "claimed": "领取", "assigned": "分配",
+    "stop_proactive_contact": "停止主动联系", "handoff_code_created": "生成交接码", "handoff_code_exchanged": "交接码换取凭据",
+    "confirmed": "确认工况", "candidate_saved": "保存候选", "generated": "生成推荐",
+    "asked_buyer": "向买方追问", "buyer_replied": "买方回复", "resolved": "完成答复",
+    "registered": "登记", "scope_updated": "修订归属", "extraction_rerun": "重新提取", "extraction_completed": "完成提取",
+    "updated_candidate": "更新候选", "field_approved": "核准字段", "field_rejected": "驳回字段", "field_reopened": "回到候选",
+    "review_finalized": "完成核对", "published": "发布版本", "withdrawn": "下架",
+    "allowed_public_download": "开放下载", "revoked_public_download": "撤销下载",
+    "public_download_blocked_hash_mismatch": "拦截下载（哈希不符）", "modules_updated": "模块授权",
+}
+
 
 class Handler(BaseHTTPRequestHandler):
     db: Database
@@ -3551,7 +3759,7 @@ class Handler(BaseHTTPRequestHandler):
         requirement: str | None = "deny"
         if path in ("/admin", "/admin/nav-counts"):
             requirement = None
-        elif path.startswith("/admin/demo") or path.startswith("/admin/lowara") or path.startswith("/admin/users"):
+        elif path.startswith("/admin/demo") or path.startswith("/admin/lowara") or path.startswith("/admin/users") or path.startswith("/admin/settings") or path.startswith("/admin/audit"):
             requirement = "admin"
         else:
             for prefix, module_key in (
@@ -3723,6 +3931,8 @@ class Handler(BaseHTTPRequestHandler):
         keys = {"admin"}
         if self.user_role == "admin":
             keys.add("users")
+            keys.add("settings")
+            keys.add("audit")
         for module_key in GRANTABLE_MODULE_KEYS:
             if self.has_module(module_key):
                 keys.add(module_key)
@@ -3889,7 +4099,7 @@ class Handler(BaseHTTPRequestHandler):
                     **recommendation_flags(stored_results, latest_recommendation["status"]),
                 }
             self.send_json(
-                {"conversation_id": conversation["id"], "status": conversation["status"], "locale": conversation["locale"], "contact_preference": {"stop_proactive_contact": bool(conversation["stop_proactive_contact"]), "reason": conversation["stop_reason"], "source": conversation["stop_source"], "stopped_at": conversation["stopped_at"]}, "messages": messages, "requirement": requirement, "recommendation": recommendation, "answers": answers, "human_tasks": human_tasks, "rfqs": rfqs},
+                {"conversation_id": conversation["id"], "status": conversation["status"], "locale": conversation["locale"], "contact_preference": {"stop_proactive_contact": bool(conversation["stop_proactive_contact"]), "reason": conversation["stop_reason"], "source": conversation["stop_source"], "stopped_at": conversation["stopped_at"]}, "messages": messages, "requirement": requirement, "recommendation": recommendation, "answers": answers, "human_tasks": human_tasks, "rfqs": rfqs, "rfq_fields": self.db.get_rfq_field_config(site["tenant_id"])},
                 allowed_origin=site["allowed_origin"] if self.headers.get("Origin") else None,
             )
             return
@@ -3913,6 +4123,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/admin/users":
             self.admin_users(query)
+            return
+        if path == "/admin/settings":
+            self.admin_settings(query)
+            return
+        if path == "/admin/audit":
+            self.admin_audit(query)
             return
         if path == "/admin/sites":
             self.admin_sites(query)
@@ -4512,9 +4728,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(contact, dict) or not all(isinstance(value, str) for value in contact.values()) or payload.get("contact_confirmed") is not True or not submission_key or entry_surface not in {"chat", "product_page"}:
                 self.send_json({"error": "confirmed_contact_and_submission_key_required"}, 422)
                 return
-            if not (str(contact.get("contact_email", "")).strip() or str(contact.get("contact_phone", "")).strip()):
-                self.send_json({"error": "reply_contact_required"}, 422)
-                return
+            # V1-01 步骤②：必填校验在 create_rfq 内按企业设置统一执行（三个买方入口同口径）。
             notes = payload.get("notes", "")
             product_id = payload.get("product_id")
             requested_model = payload.get("requested_model", "")
@@ -4528,6 +4742,11 @@ class Handler(BaseHTTPRequestHandler):
                 rfq_id, created = self.db.create_rfq(site["tenant_id"], conversation["id"], submission_key, contact, notes, product_id, entry_surface, requested_model)
             except ConflictError:
                 self.send_json({"error": "idempotency_conflict"}, 409)
+                return
+            except ValueError as error:
+                message = str(error)
+                code = "rfq_required_fields_missing" if message.startswith("请填写") else "invalid_rfq_request"
+                self.send_json({"error": code, "message": message}, 422)
                 return
             row = self.db.get_rfq(site["tenant_id"], rfq_id)
             related = self.db.related_rfqs_in_conversation(site["tenant_id"], conversation["id"], row["product_id"], rfq_id)
@@ -4760,7 +4979,16 @@ class Handler(BaseHTTPRequestHandler):
                 if not submission_key:
                     raise ValueError("询价提交标识缺失，请刷新页面后重试")
                 contact = {key: str(form.get(key, "")) for key in ("contact_name", "company", "contact_email", "contact_phone", "quantity", "region", "delivery")}
-                rfq_id, created = self.db.create_rfq(self.tenant_id, conversation_id, submission_key, contact, str(form.get("notes", "")), str(form.get("product_id", "")) or None)
+                try:
+                    rfq_id, created = self.db.create_rfq(self.tenant_id, conversation_id, submission_key, contact, str(form.get("notes", "")), str(form.get("product_id", "")) or None)
+                except ConflictError:
+                    self.redirect(f"/inquiry/{conversation_id}?notice=rfq_conflict")
+                    return
+                except ValueError as error:
+                    message = str(error)
+                    notice = "rfq_required" if ("请填写" in message or "请保留" in message) else "rfq_missing"
+                    self.redirect(f"/inquiry/{conversation_id}?notice={notice}")
+                    return
                 self.redirect(f"/inquiry/{conversation_id}?notice=rfq&rfq_id={rfq_id}&created={'1' if created else '0'}")
                 return
             match = re.fullmatch(r"/inquiry/([a-f0-9]+)/rfq/([a-f0-9]+)/revise", path)
@@ -4789,7 +5017,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.redirect(f"/inquiry/{conversation_id}?notice=rfq_stale&rfq_id={rfq_id}")
                     return
                 except ValueError as error:
-                    notice = "rfq_contact" if "联系方式" in str(error) else "rfq_missing"
+                    message = str(error)
+                    notice = "rfq_required" if ("请填写" in message or "请保留" in message) else "rfq_missing"
                     self.redirect(f"/inquiry/{conversation_id}?notice={notice}&rfq_id={rfq_id}")
                     return
                 self.redirect(f"/inquiry/{conversation_id}?notice=rfq&rfq_id={rfq_id}&created=0&revised=1")
@@ -4855,6 +5084,15 @@ class Handler(BaseHTTPRequestHandler):
                 wanted = [key for key, _label in GRANTABLE_MODULES if str(form.get(f"module_{key}", "")).strip()]
                 self.db.set_user_modules(self.tenant_id, match.group(1), wanted, self.actor)
                 self.redirect("/admin/users?notice=modules")
+                return
+            if path == "/admin/settings/stages":
+                self.admin_settings_save_stages(form)
+                return
+            if path == "/admin/settings/rfq-fields":
+                self.admin_settings_save_rfq_fields(form)
+                return
+            if path == "/admin/settings/notify":
+                self.admin_settings_save_notify(form)
                 return
             match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources", path)
             if match:
@@ -5203,7 +5441,8 @@ class Handler(BaseHTTPRequestHandler):
             "extract_unavailable": "<div class='error'>消息已保存，但需求提取暂不可用（服务故障）；请再次提交同一内容重试。</div>",
             "answer_unavailable": "<div class='error'>问题已保存，但回答服务暂不可用；请稍后重新提交同一问题重试，或请求工程师核实。</div>",
             "rfq_stale": "<div class='error'>这张询价已在别处更新，请刷新页面后再修改（避免覆盖较新的版本）。</div>",
-            "rfq_contact": "<div class='error'>请保留至少一种可回复联系方式（邮箱或电话）。</div>",
+            "rfq_required": "<div class='error'>操作未完成：有必填信息未填写（请检查带 * 的必填字段），补全后重试。</div>",
+            "rfq_conflict": "<div class='error'>提交未完成：同一提交标识对应了不同内容，请刷新页面后重新提交。</div>",
             "rfq_missing": "<div class='error'>没有找到要修改的询价，请刷新页面后重试。</div>",
         }.get(notice, "")
         if notice == "rfq" and current_rfq:
@@ -5279,6 +5518,41 @@ class Handler(BaseHTTPRequestHandler):
                 if result.get("status") in {"candidate", "needs_confirmation"}:
                     candidate_options += f"<option value='{esc(result['product_id'])}'>{esc(result['model'])} · v{esc(result['product_version'])}</option>"
         prefill = {key: values.get(key, {}).get("value", "") for key in ("quantity", "region", "delivery")}
+        # V1-01 步骤②：RFQ 字段三态（必填/选填/隐藏）——三个买方入口与服务端校验同口径。
+        rfq_field_config = self.db.get_rfq_field_config(self.tenant_id)
+
+        def rfq_visible(field_key: str) -> bool:
+            return rfq_field_config[field_key] != "hidden"
+
+        def rfq_star(field_key: str) -> str:
+            return " *" if rfq_field_config[field_key] == "required" else ""
+
+        def rfq_required_attr(field_key: str) -> str:
+            return " required" if rfq_field_config[field_key] == "required" else ""
+
+        rfq_required_labels = [RFQ_FIELD_LABELS[key] for key in RFQ_FIELD_ORDER if rfq_field_config[key] == "required"]
+        rfq_intro = "您可以随时提交询价，无须先完成选型。"
+        if rfq_required_labels:
+            rfq_intro += f"请填写：{'、'.join(rfq_required_labels)}。"
+        rfq_intro += "已确认的工况会随询价保存，缺少的技术或商务信息会标为待补充。"
+
+        create_form_fields = ""
+        create_field_specs = (
+            ("email", "Email / 邮箱", "contact_email", " type='email'", "you@example.com", ""),
+            ("phone", "Phone / 电话", "contact_phone", "", "+49 ...", ""),
+            ("quantity", "Quantity / 数量", "quantity", "", "e.g. 2", esc(prefill["quantity"])),
+            ("destination", "Destination / 目的地", "region", "", "e.g. Germany", esc(prefill["region"])),
+        )
+        for field_key, field_label, field_name, field_type, field_placeholder, field_value in create_field_specs:
+            if not rfq_visible(field_key):
+                continue
+            create_form_fields += (
+                f"<div><label>{field_label}{rfq_star(field_key)}</label>"
+                f"<input name='{field_name}'{field_type}{rfq_required_attr(field_key)} value='{field_value}' placeholder='{field_placeholder}'></div>"
+            )
+        create_form_fields += f"<div><label>Expected delivery / 期望交期</label><input name='delivery' value='{esc(prefill['delivery'])}' placeholder='e.g. 8 weeks'></div>"
+        if rfq_visible("notes"):
+            create_form_fields += f"<div class='full'><label>Notes / 补充说明{rfq_star('notes')}</label><textarea name='notes'{rfq_required_attr('notes')} placeholder='Additional operating conditions or questions'></textarea></div>"
         submission_key = secrets.token_urlsafe(18)
         confirm_key = secrets.token_urlsafe(18)
         ask_key = secrets.token_urlsafe(18)
@@ -5290,6 +5564,24 @@ class Handler(BaseHTTPRequestHandler):
         ):
             content = self.db.rfq_current_content(rfq_row)
             edit_key = secrets.token_urlsafe(18)
+            revise_field_specs = (
+                ("email", "Email / 邮箱", "contact_email", " type='email'", content["contact_email"] or ""),
+                ("phone", "Phone / 电话", "contact_phone", "", content["contact_phone"] or ""),
+                ("quantity", "Quantity / 数量", "quantity", "", content["quantity"] or ""),
+                ("destination", "Destination / 目的地", "region", "", content["destination"] or ""),
+            )
+            revise_fields = f"<div><label>Contact name / 联系人</label><input name='contact_name' value='{esc(content['contact_name'] or '')}'></div>"
+            revise_fields += f"<div><label>Company / 公司</label><input name='company' value='{esc(content['company'] or '')}'></div>"
+            for field_key, field_label, field_name, field_type, field_value in revise_field_specs:
+                if not rfq_visible(field_key):
+                    continue
+                revise_fields += (
+                    f"<div><label>{field_label}{rfq_star(field_key)}</label>"
+                    f"<input name='{field_name}'{field_type}{rfq_required_attr(field_key)} value='{esc(field_value)}'></div>"
+                )
+            revise_fields += f"<div><label>Expected delivery / 期望交期</label><input name='delivery' value='{esc(content['requested_delivery'] or '')}'></div>"
+            if rfq_visible("notes"):
+                revise_fields += f"<div class='full'><label>Notes / 补充说明{rfq_star('notes')}</label><textarea name='notes'{rfq_required_attr('notes')}>{esc(content['notes'] or '')}</textarea></div>"
             rfq_card_parts.append(
                 f"<div class='source' style='flex-direction:column;align-items:stretch;gap:6px'>"
                 f"<span><b>RFQ {esc(rfq_row['id'][:8])} · v{rfq_row['current_revision']} · {esc(rfq_row['status'])}</b> "
@@ -5300,16 +5592,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"<form method='post' action='/inquiry/{conversation_id}/rfq/{rfq_row['id']}/revise'>"
                 f"<input type='hidden' name='submission_key' value='{esc(edit_key)}'>"
                 f"<input type='hidden' name='expected_revision' value='{rfq_row['current_revision']}'>"
-                f"<div class='form-grid'>"
-                f"<div><label>Contact name / 联系人</label><input name='contact_name' value='{esc(content['contact_name'] or '')}'></div>"
-                f"<div><label>Company / 公司</label><input name='company' value='{esc(content['company'] or '')}'></div>"
-                f"<div><label>Email / 邮箱</label><input name='contact_email' type='email' value='{esc(content['contact_email'] or '')}'></div>"
-                f"<div><label>Phone / 电话</label><input name='contact_phone' value='{esc(content['contact_phone'] or '')}'></div>"
-                f"<div><label>Quantity / 数量</label><input name='quantity' value='{esc(content['quantity'] or '')}'></div>"
-                f"<div><label>Destination / 目的地</label><input name='region' value='{esc(content['destination'] or '')}'></div>"
-                f"<div><label>Expected delivery / 期望交期</label><input name='delivery' value='{esc(content['requested_delivery'] or '')}'></div>"
-                f"<div class='full'><label>Notes / 补充说明</label><textarea name='notes'>{esc(content['notes'] or '')}</textarea></div>"
-                f"</div><p><button>Save changes / 保存修改</button></p></form></details></div>"
+                f"<div class='form-grid'>{revise_fields}</div><p><button>Save changes / 保存修改</button></p></form></details></div>"
             )
         rfq_cards_html = "".join(rfq_card_parts) or "<p class='muted'>本会话还没有询价记录。</p>"
 
@@ -5320,7 +5603,7 @@ class Handler(BaseHTTPRequestHandler):
 <section class='card'><h2>Requirement summary</h2>{missing_html}<form method='post' action='/inquiry/{conversation_id}/confirm'><input type='hidden' name='submission_key' value='{esc(confirm_key)}'><div class='form-grid'>{input_fields}</div><p><button>Confirm summary and match</button></p></form><table><thead><tr><th>Field</th><th>Value</th><th>State</th></tr></thead><tbody>{summary_rows}</tbody></table></section></div>
 <section class='card' style='margin-top:18px'><h2>Recommendations</h2>{recommendation_html}</section>
 <section class='card' style='margin-top:18px'><h2>Ask about the recommended product</h2><p class='muted'>资料内问题显示出处。资料外问题先保存为待核实；只有您点击“请求工程师核实”后才会交给工程师，在此对话查看回复无需另留联系方式。</p><form method='post' action='/inquiry/{conversation_id}/ask'><input type='hidden' name='submission_key' value='{esc(ask_key)}'><label>Product context</label><select name='product_id'>{candidate_options}</select><label>Your question / 技术问题 *</label><textarea name='question' required placeholder='Example: What is the flow range? Or ask about price, stock, certification to test handoff.'></textarea><p><button>Ask and save answer</button></p></form><h3>Answers and handoff</h3>{answer_html}{task_html}</section>
-<section class='card' style='margin-top:18px'><h2>Request for quotation (RFQ)</h2><p class='muted'>您可以随时提交询价，无须先完成选型。请至少提供邮箱或电话，方便销售回复；已确认的工况会随询价保存，缺少的技术或商务信息会标为待补充。</p><form method='post' action='/inquiry/{conversation_id}/rfq'><input type='hidden' name='submission_key' value='{esc(submission_key)}'><div class='form-grid'><div><label>Product / 产品</label><select name='product_id'>{candidate_options}</select></div><div><label>Contact name / 联系人</label><input name='contact_name' placeholder='Your name'></div><div><label>Company / 公司</label><input name='company' placeholder='Company name'></div><div><label>Email / 邮箱</label><input name='contact_email' type='email' placeholder='you@example.com'></div><div><label>Phone / 电话</label><input name='contact_phone' placeholder='+49 ...'></div><div><label>Quantity / 数量</label><input name='quantity' value='{esc(prefill['quantity'])}' placeholder='e.g. 2'></div><div><label>Destination / 目的地</label><input name='region' value='{esc(prefill['region'])}' placeholder='e.g. Germany'></div><div><label>Expected delivery / 期望交期</label><input name='delivery' value='{esc(prefill['delivery'])}' placeholder='e.g. 8 weeks'></div><div class='full'><label>Notes / 补充说明</label><textarea name='notes' placeholder='Additional operating conditions or questions'></textarea></div></div><p><button>Save RFQ / 提交询价</button></p></form><h3>Your RFQs / 我的询价</h3>{rfq_cards_html}</section>
+<section class='card' style='margin-top:18px'><h2>Request for quotation (RFQ)</h2><p class='muted'>{rfq_intro}</p><form method='post' action='/inquiry/{conversation_id}/rfq'><input type='hidden' name='submission_key' value='{esc(submission_key)}'><div class='form-grid'><div><label>Product / 产品</label><select name='product_id'>{candidate_options}</select></div><div><label>Contact name / 联系人</label><input name='contact_name' placeholder='Your name'></div><div><label>Company / 公司</label><input name='company' placeholder='Company name'></div>{create_form_fields}</div><p><button>Save RFQ / 提交询价</button></p></form><h3>Your RFQs / 我的询价</h3>{rfq_cards_html}</section>
 <div class='footer-note'>产品页面、推荐和后续 chatbot 都只读取已核准并已发布的产品版本。当前规则是透明的水泵演示规则，正式阈值需由企业工程师确认。</div>
 """
         self.send_html(layout("Buyer inquiry", body, lang=lang), 200)
@@ -5418,6 +5701,186 @@ class Handler(BaseHTTPRequestHandler):
 <div class='footer-note'>概览只读取当前登录账号所属企业的数据；具体修改仍需进入对应模块，并按账号的模块授权执行。</div>
 """
         self.send_html(self.console_page("管理概览", body, "admin"), 200)
+
+    def admin_settings(self, query: dict[str, list[str]]) -> None:
+        stages = self.db.get_lead_stages(self.tenant_id)
+        field_config = self.db.get_rfq_field_config(self.tenant_id)
+        recipients = self.db.get_notify_recipients(self.tenant_id)
+        _, stages_updated = self.db.get_tenant_setting(self.tenant_id, SETTING_LEAD_STAGES)
+        _, fields_updated = self.db.get_tenant_setting(self.tenant_id, SETTING_RFQ_FIELDS)
+        _, notify_updated = self.db.get_tenant_setting(self.tenant_id, SETTING_NOTIFY_RECIPIENTS)
+        notice = query.get("notice", [""])[0]
+        notice_html = {
+            "stages": "<div class='notice'>线索阶段已保存：改名、排序与终态标记已生效（销售工作台与「在跟 / 逾期」数字同步）。</div>",
+            "fields": "<div class='notice'>RFQ 字段设置已保存：三个买方入口的表单与服务端校验同步生效。</div>",
+            "notify": "<div class='notice'>通知接收人已保存。（渠道未接入、暂不发送，仅登记）</div>",
+            "stages_invalid": "<div class='error'>阶段设置未保存：每个阶段都需要名称，且名称不能重复。</div>",
+            "fields_invalid": "<div class='error'>字段设置未保存：存在无效的收集方式，请重新选择。</div>",
+            "fields_both_hidden": "<div class='error'>字段设置未保存：邮箱与电话不能同时设为「隐藏」（至少保留一种可回复方式）。</div>",
+            "notify_invalid": "<div class='error'>接收人未保存：请检查邮箱格式（每行一个或用逗号分隔，最多 20 个）。</div>",
+        }.get(notice, "")
+        stage_rows = "".join(
+            f"<div class='stage-row'><code class='chip-key'>{esc(stage['key'])}</code>"
+            f"<input name='label_{esc(stage['key'])}' value='{esc(stage['label'])}' maxlength='24' aria-label='阶段名称'>"
+            f"<label class='check-inline'><input type='checkbox' name='terminal_{esc(stage['key'])}' value='1' {'checked' if stage['terminal'] else ''}>终态</label>"
+            f"<button class='secondary mini' name='move' value='{esc(stage['key'])}:up' title='上移'>↑</button>"
+            f"<button class='secondary mini' name='move' value='{esc(stage['key'])}:down' title='下移'>↓</button></div>"
+            for stage in stages
+        )
+        state_labels = {"required": "必填", "optional": "选填", "hidden": "隐藏"}
+        field_hints = {
+            "email": "买家邮箱；与电话不能同时隐藏。",
+            "phone": "买家电话；与邮箱不能同时隐藏。",
+            "quantity": "采购数量。",
+            "destination": "货物目的地。",
+            "notes": "补充说明。",
+        }
+
+        def field_select(field_key: str) -> str:
+            options = "".join(
+                f"<option value='{esc(state)}'{' selected' if field_config[field_key] == state else ''}>{esc(state_labels[state])}</option>"
+                for state in RFQ_FIELD_STATES
+            )
+            return f"<select name='state_{esc(field_key)}'>{options}</select>"
+
+        field_rows = "".join(
+            f"<tr><td><b>{esc(RFQ_FIELD_LABELS[field_key])}</b><br><span class='field-state'>{esc(field_hints[field_key])}</span></td><td>{field_select(field_key)}</td></tr>"
+            for field_key in RFQ_FIELD_ORDER
+        )
+        recipients_value = esc("\n".join(recipients))
+        body = f"""
+<div class='toolbar'><div><h1>企业设置</h1><div class='muted'>影响全企业买家表单与跟进流程的配置；保存后立即生效。</div></div></div>
+{notice_html}
+<section class='card'><div class='panel-title'><h2>线索阶段</h2><span class='field-state'>上次修改：{esc(stages_updated or '未修改（当前为默认）')}</span></div>
+<p class='muted'>首版支持改名、排序与终态标记（增删阶段暂未开放，已登记待办）。「终态」= 该阶段不计入「在跟」与「逾期」统计；保存后销售工作台与其数字同步。</p>
+<form method='post' action='/admin/settings/stages'>{stage_rows}<p><button>保存阶段设置</button></p></form>
+</section>
+<section class='card'><div class='panel-title'><h2>RFQ 询价表单字段</h2><span class='field-state'>上次修改：{esc(fields_updated or '未修改（当前为默认）')}</span></div>
+<p class='muted'>三个买方入口（聊天窗 / 产品详情页 / 旧询价页）与后台校验同口径。隐藏只影响买家表单展示与新提交，历史数据保留；邮箱与电话不可同时隐藏。</p>
+<form method='post' action='/admin/settings/rfq-fields'><table><thead><tr><th>字段</th><th>收集方式</th></tr></thead><tbody>{field_rows}</tbody></table><p><button>保存字段设置</button></p></form>
+</section>
+<section class='card'><div class='panel-title'><h2>通知接收人</h2><span class='field-state'>上次修改：{esc(notify_updated or '未登记')}</span></div>
+<p class='muted'>渠道未接入、暂不发送：当前版本还没有邮件/短信等通知通道；此处仅登记接收人名单，功能接入后才会按此发送。</p>
+<form method='post' action='/admin/settings/notify'><label>接收人邮箱（每行一个）</label><textarea name='recipients' rows='4' placeholder='ops@company.example'>{recipients_value}</textarea><p><button>保存接收人</button></p></form>
+</section>
+"""
+        self.send_html(self.console_page("企业设置", body, "settings"), 200)
+
+    def admin_settings_save_stages(self, form: dict[str, str | bytes]) -> None:
+        stages = self.db.get_lead_stages(self.tenant_id)
+        labels: dict[str, str] = {}
+        for stage in stages:
+            label = str(form.get(f"label_{stage['key']}", "")).strip()
+            if not label:
+                self.redirect("/admin/settings?notice=stages_invalid")
+                return
+            labels[stage["key"]] = label[:24]
+        if len(set(labels.values())) != len(labels):
+            self.redirect("/admin/settings?notice=stages_invalid")
+            return
+        terminals = {stage["key"]: bool(str(form.get(f"terminal_{stage['key']}", "")).strip()) for stage in stages}
+        ordered = [stage["key"] for stage in stages]
+        move = str(form.get("move", "")).strip()
+        if move:
+            moved_key, _, direction = move.partition(":")
+            if moved_key in ordered:
+                index = ordered.index(moved_key)
+                target = index - 1 if direction == "up" else index + 1
+                if 0 <= target < len(ordered):
+                    ordered[index], ordered[target] = ordered[target], ordered[index]
+        self.db.set_tenant_setting(
+            self.tenant_id, SETTING_LEAD_STAGES,
+            [{"key": key, "label": labels[key], "terminal": terminals[key]} for key in ordered],
+            self.actor,
+        )
+        self.redirect("/admin/settings?notice=stages")
+
+    def admin_settings_save_rfq_fields(self, form: dict[str, str | bytes]) -> None:
+        wanted: dict[str, str] = {}
+        for field_key in RFQ_FIELD_ORDER:
+            state = str(form.get(f"state_{field_key}", "")).strip()
+            if state not in RFQ_FIELD_STATES:
+                self.redirect("/admin/settings?notice=fields_invalid")
+                return
+            wanted[field_key] = state
+        if wanted["email"] == "hidden" and wanted["phone"] == "hidden":
+            self.redirect("/admin/settings?notice=fields_both_hidden")
+            return
+        self.db.set_tenant_setting(self.tenant_id, SETTING_RFQ_FIELDS, wanted, self.actor)
+        self.redirect("/admin/settings?notice=fields")
+
+    def admin_settings_save_notify(self, form: dict[str, str | bytes]) -> None:
+        raw = str(form.get("recipients", ""))
+        candidates = [item.strip() for item in re.split(r"[,\n;，；]+", raw) if item.strip()]
+        if len(candidates) > 20 or any(not EMAIL_PATTERN.match(item) for item in candidates):
+            self.redirect("/admin/settings?notice=notify_invalid")
+            return
+        recipients = list(dict.fromkeys(candidates))
+        self.db.set_tenant_setting(self.tenant_id, SETTING_NOTIFY_RECIPIENTS, recipients, self.actor)
+        self.redirect("/admin/settings?notice=notify")
+
+    def admin_audit(self, query: dict[str, list[str]]) -> None:
+        try:
+            page = max(int(query.get("page", ["1"])[0]), 1)
+        except ValueError:
+            page = 1
+        entity_type = query.get("type", [""])[0].strip()
+        actor = query.get("actor", [""])[0].strip()
+        page_size = 50
+        total, rows = self.db.list_audit_records(self.tenant_id, page=page, page_size=page_size, entity_type=entity_type, actor=actor)
+        page_count = max((total + page_size - 1) // page_size, 1)
+
+        def select_options(values: list[str], selected: str, empty_label: str, label_map: dict[str, str] | None = None) -> str:
+            options = f"<option value=''>{esc(empty_label)}</option>"
+            for value in values:
+                label = (label_map or {}).get(value, value)
+                options += f"<option value='{esc(value)}'{' selected' if value == selected else ''}>{esc(label)}</option>"
+            return options
+
+        entity_types, actors = self.db.audit_filter_options(self.tenant_id)
+        type_options = select_options(entity_types, entity_type, "全部对象", AUDIT_ENTITY_LABELS)
+        actor_options = select_options(actors, actor, "全部操作者")
+        items = []
+        for row in rows:
+            type_label = AUDIT_ENTITY_LABELS.get(row["entity_type"], row["entity_type"])
+            action_label = AUDIT_ACTION_LABELS.get(row["action"], row["action"])
+            details = row["details"] or ""
+            if len(details) > 90:
+                details_html = f"<details class='detail-toggle'><summary>{esc(details[:90])}…</summary><div class='field-state'>{esc(details)}</div></details>"
+            elif details:
+                details_html = f"<small>{esc(details)}</small>"
+            else:
+                details_html = ""
+            items.append(
+                f"<div class='simple-item'><div><strong>{esc(action_label)} · {esc(type_label)} <code class='chip-key'>{esc(row['entity_id'][:14])}</code></strong>"
+                f"<small>{esc(row['created_at'])} · 操作者：{esc(row['actor'])}</small>{details_html}</div></div>"
+            )
+        items_html = "".join(items) or "<div class='muted-block'>暂无操作记录。</div>"
+        query_parts = []
+        if entity_type:
+            query_parts.append("type=" + quote(entity_type))
+        if actor:
+            query_parts.append("actor=" + quote(actor))
+
+        def page_link(target: int) -> str:
+            return "/admin/audit?" + "&".join([*query_parts, f"page={target}"])
+
+        pager = "<div class='pager'>"
+        if page > 1:
+            pager += f"<a class='button secondary' href='{page_link(page - 1)}'>← 上一页</a>"
+        pager += f"<span class='muted'>第 {page} / {page_count} 页 · 共 {total} 条</span>"
+        if page < page_count:
+            pager += f"<a class='button secondary' href='{page_link(page + 1)}'>下一页 →</a>"
+        pager += "</div>"
+        body = f"""
+<div class='toolbar'><div><h1>操作记录</h1><div class='muted'>本企业关键操作的审计轨迹（时间 / 操作者 / 对象 / 动作）；只读，按最新在前。</div></div></div>
+<section class='card'>
+<form method='get' action='/admin/audit' class='filter-bar'><label>对象</label><select name='type'>{type_options}</select><label>操作者</label><select name='actor'>{actor_options}</select><button class='secondary'>筛选</button></form>
+<div class='simple-list'>{items_html}</div>
+{pager}
+</section>
+"""
+        self.send_html(self.console_page("操作记录", body, "audit"), 200)
 
     def admin_users(self, query: dict[str, list[str]]) -> None:
         users = self.db.list_users(self.tenant_id)
@@ -5618,10 +6081,12 @@ class Handler(BaseHTTPRequestHandler):
     def admin_sales(self, query: dict[str, list[str]]) -> None:
         records = self.db.list_sales_records(self.tenant_id)
         today = datetime.now(timezone.utc).date().isoformat()
-        stage_labels = {"new": "新线索", "needs_info": "待补充", "technical_review": "技术确认中", "quote_ready": "可进入报价", "paused": "暂缓", "closed": "已关闭"}
+        stages = self.db.get_lead_stages(self.tenant_id)
+        stage_labels = {stage["key"]: stage["label"] for stage in stages}
+        terminal_keys = {stage["key"] for stage in stages if stage["terminal"]}
         items = []
         for record in records:
-            overdue = bool(record["next_follow_up"] and record["next_follow_up"] < today and record["stage"] not in ("closed", "paused") and not record["stop_proactive_contact"])
+            overdue = bool(record["next_follow_up"] and record["next_follow_up"] < today and record["stage"] not in terminal_keys and not record["stop_proactive_contact"])
             follow_up = f"<span class='badge withdrawn'>逾期 {esc(record['next_follow_up'])}</span>" if overdue else esc(record["next_follow_up"] or "未安排")
             if record["stop_proactive_contact"]:
                 follow_up = "<span class='badge withdrawn'>停止主动联系</span>"
@@ -5664,7 +6129,7 @@ class Handler(BaseHTTPRequestHandler):
         task_rows = "".join(f"<div class='source'><span><b>{esc(task['status'])}</b><br>{esc(task['question'])}<br><span class='field-state'>{esc(task['reason'])}</span></span><a href='/admin/tasks/{task['id']}'>处理</a></div>" for task in tasks) or "<p class='muted'>暂无人工任务。</p>"
         audit_rows = self.db.list_entity_audit(self.tenant_id, [rfq["id"], lead["id"]])
         audit_html = "".join(f"<div class='field-state'>{esc(item['created_at'])} · {esc(item['action'])} · {esc(item['actor'])} · {esc(item['details'])}</div>" for item in audit_rows) or "<p class='muted'>暂无操作记录。</p>"
-        stage_options = "".join(f"<option value='{key}' {'selected' if lead['stage'] == key else ''}>{label}</option>" for key, label in {"new": "新线索", "needs_info": "待补充", "technical_review": "技术确认中", "quote_ready": "可进入报价", "paused": "暂缓", "closed": "已关闭"}.items())
+        stage_options = "".join(f"<option value='{esc(stage['key'])}' {'selected' if lead['stage'] == stage['key'] else ''}>{esc(stage['label'])}</option>" for stage in self.db.get_lead_stages(self.tenant_id))
         notice = "<div class='notice'>销售状态已保存，刷新后仍会保留。</div>" if query.get("notice", [""])[0] == "updated" else "<div class='notice'>负责人已更新，同会话的 RFQ 使用同一负责人。</div>" if query.get("notice", [""])[0] == "assigned" else ""
         claim_action = f"<form method='post' action='/admin/sales/{rfq_id}/claim'><button>领取这条会话</button></form>" if not lead["owner"] and self.user_role != "admin" and self.has_module("sales") else ""
         sales_options = "".join(f"<option value='{esc(user['email'])}' {'selected' if lead['owner'] == user['email'] else ''}>{esc(user['display_name'])} · {esc(user['email'])}</option>" for user in self.db.list_users(self.tenant_id) if user["role"] == "employee" and user["active"] and "sales" in self.db.get_user_modules(user["id"]))
@@ -5838,10 +6303,31 @@ class Handler(BaseHTTPRequestHandler):
 <form id="message-form" class="message-form"><label for="message">Your message</label><div><textarea id="message" rows="2"></textarea><button type="submit">Send</button></div></form>
 </aside>
 <script src='/reference-client/app.js' defer></script>"""
+        product_field_config = self.db.get_rfq_field_config(tenant_id)
+
+        def product_input(field_key: str, name: str, label_html: str, attrs: str = "") -> str:
+            if product_field_config[field_key] == "hidden":
+                return ""
+            star = " *" if product_field_config[field_key] == "required" else ""
+            required_attr = " required" if product_field_config[field_key] == "required" else ""
+            return f"<label>{label_html}{star} <input name='{name}'{attrs}{required_attr}></label>"
+
+        product_rfq_fields = (
+            product_input("email", "email", "Email", " type='email'")
+            + product_input("phone", "phone", "Phone", " type='tel'")
+            + product_input("quantity", "quantity", "Quantity")
+            + product_input("destination", "destination", "Destination")
+        )
+        if product_field_config["notes"] != "hidden":
+            notes_star = " *" if product_field_config["notes"] == "required" else ""
+            notes_required = " required" if product_field_config["notes"] == "required" else ""
+            product_rfq_fields += f"<label class='full'>Requirements{notes_star} <textarea name='notes'{notes_required}></textarea></label>"
+        product_field_json = json.dumps(product_field_config, ensure_ascii=False)
         rfq_html = f"""<section class='card' id='product-rfq' data-site-key='{esc(site['site_key'])}' data-product-id='{esc(product['id'])}' style='margin-top:18px'>
-<h2>Request a quotation / 发起询价</h2><p class='muted'>You may send a request at any time. Please confirm an email or phone so the seller can reply.</p>
+<h2>Request for a quotation / 发起询价</h2><p class='muted'>You may send a request at any time; fields marked * are required. / 可随时提交询价，带 * 为必填项。</p>
 <p id='product-rfq-session' class='muted' role='status'></p>
-<form id='product-rfq-form'><div class='form-grid'><label>Email <input name='email' type='email'></label><label>Phone <input name='phone' type='tel'></label><label>Quantity <input name='quantity'></label><label>Destination <input name='destination'></label><label class='full'>Requirements <textarea name='notes'></textarea></label></div><label><input name='contact_confirmed' type='checkbox' style='width:auto'> I confirm this reply contact may be used for this request.</label><button type='submit'>Submit RFQ</button></form><p id='product-rfq-result' role='status'></p></section>
+<form id='product-rfq-form'><div class='form-grid'>{product_rfq_fields}</div><label><input name='contact_confirmed' type='checkbox' style='width:auto'> I confirm this reply contact may be used for this request.</label><button type='submit'>Submit RFQ</button></form><p id='product-rfq-result' role='status'></p></section>
+<script>window.RFQ_FIELD_CONFIG={product_field_json};</script>
 <script src='/reference-client/product-page.js' defer></script>""" if site else ""
         public_path = f"/s/{quote(site['site_key'])}/products/{esc(product['slug'])}" if site else f"/products/{esc(product['slug'])}"
         mobile_cta_html = f"<a class='page-mobile-cta' href='#product-rfq'>{t('Request a quote', '发起询价')}</a>" if site else ""

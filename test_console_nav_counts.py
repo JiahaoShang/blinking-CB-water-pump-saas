@@ -69,7 +69,7 @@ class ConsoleNavCountTests(unittest.TestCase):
         for index in range(2):
             message_id = cls.db.save_message("demo-tenant", conversation_id, "buyer", f"nav question {index}")
             cls.db.create_human_task("demo-tenant", conversation_id, message_id, f"nav question {index}", "nav test", {})
-        rfq_id, _ = cls.db.create_rfq("demo-tenant", conversation_id, "nav-rfq-1", {"contact_email": "buyer@example.com"}, "", None)
+        rfq_id, _ = cls.db.create_rfq("demo-tenant", conversation_id, "nav-rfq-1", {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0222", "quantity": "2", "region": "DE"}, "", None)
         cls.db.conn.execute("UPDATE leads SET next_follow_up='2020-01-01' WHERE rfq_id=?", (rfq_id,))
         cls.db.conn.commit()
 

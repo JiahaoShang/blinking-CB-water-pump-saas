@@ -65,7 +65,7 @@ class ConsolePresentationTests(unittest.TestCase):
         _, _, confirmed_text = self.request("POST", f"/api/v1/buyer/conversations/{conversation_id}/requirements/confirm", json_body={"base_revision_id": draft["revision_id"], "values": draft["values"]}, extra_headers=extra)
         confirmed = json.loads(confirmed_text)
         assert confirmed["revision_id"]
-        _, _, rfq_text = self.request("POST", f"/api/v1/buyer/conversations/{conversation_id}/rfqs", json_body={"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "quantity": "2"}}, extra_headers={**extra, "Idempotency-Key": "console-test-rfq"})
+        _, _, rfq_text = self.request("POST", f"/api/v1/buyer/conversations/{conversation_id}/rfqs", json_body={"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0223", "quantity": "2", "region": "DE"}}, extra_headers={**extra, "Idempotency-Key": "console-test-rfq"})
         return json.loads(rfq_text)["rfq_id"]
 
     def test_dashboard_focus_card_and_todo_list(self):

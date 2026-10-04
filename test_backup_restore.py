@@ -27,10 +27,10 @@ class BackupRestoreTests(unittest.TestCase):
             )
             db.conn.commit()
             conversation_id = db.create_conversation("demo-tenant")
-            db.create_rfq("demo-tenant", conversation_id, "first", {"contact_email": "buyer@example.invalid"}, "First RFQ")
+            db.create_rfq("demo-tenant", conversation_id, "first", {"contact_email": "buyer@example.invalid", "contact_phone": "+49 30 555 0208", "quantity": "1", "region": "Germany"}, "First RFQ")
             bundle = root / "snapshot"
             backup(root / "app.db", uploads, bundle)
-            db.create_rfq("demo-tenant", conversation_id, "second", {"contact_email": "buyer@example.invalid"}, "Later RFQ")
+            db.create_rfq("demo-tenant", conversation_id, "second", {"contact_email": "buyer@example.invalid", "contact_phone": "+49 30 555 0209", "quantity": "1", "region": "Germany"}, "Later RFQ")
             (uploads / filename).unlink()
             db.conn.close()
 

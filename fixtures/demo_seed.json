@@ -46,13 +46,15 @@
         "contact_name": "李工",
         "company": "华东设备有限公司",
         "contact_email": "li.gong@example.invalid",
-        "contact_phone": "+86 21 5555 0103"
+        "contact_phone": "+86 21 5555 0103",
+        "quantity": "5",
+        "region": "China"
       },
-      "notes": "客户还在确认数量、目的地和期望交期。",
+      "notes": "客户还在确认期望交期。",
       "stage": "needs_info",
       "owner": "",
       "next_follow_up": "2030-01-20",
-      "lead_note": "等待买方补充数量、目的地和期望交期。"
+      "lead_note": "等待买方补充期望交期。"
     }
   ],
   "human_task": {

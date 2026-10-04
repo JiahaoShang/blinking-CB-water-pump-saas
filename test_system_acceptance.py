@@ -123,7 +123,7 @@ class SystemAcceptanceTests(unittest.TestCase):
         self.assertEqual(raw_status(server, f"/s/site-b/products/x-ten/sources/{source_id}"), 404)
         # 另一企业的 RFQ 对当前企业管理员不可见
         second_conv = db.create_conversation("second-tenant")
-        second_rfq, _ = db.create_rfq("second-tenant", second_conv, "xten-rfq", {"contact_email": "other@example.invalid"}, "other tenant")
+        second_rfq, _ = db.create_rfq("second-tenant", second_conv, "xten-rfq", {"contact_email": "other@example.invalid", "contact_phone": "+49 30 555 0227", "quantity": "1", "region": "DE"}, "other tenant")
         cookie = form_login(server, "demo-admin@example.invalid", "demo-admin")
         self.assertEqual(html_get(server, f"/admin/rfqs/{second_rfq}", cookie)[0], 404)
         self.assertEqual(html_get(server, f"/admin/sales/{second_rfq}", cookie)[0], 404)
@@ -146,7 +146,7 @@ class SystemAcceptanceTests(unittest.TestCase):
         draft = sent["requirement_draft"]
         _, _, confirmed = request(server, "POST", path + "/requirements/confirm", {"base_revision_id": draft["revision_id"], "values": draft["values"]}, headers)
         request(server, "POST", path + "/recommendations", {"revision_id": confirmed["revision_id"]}, headers)
-        _, _, rfq = request(server, "POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "product_id": product["id"]}, {**headers, "Idempotency-Key": "ver-1"})
+        _, _, rfq = request(server, "POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0228", "quantity": "2", "region": "DE"}, "product_id": product["id"]}, {**headers, "Idempotency-Key": "ver-1"})
         # 更新并重新发布为 v2
         source_id = db.get_sources("demo-tenant", product["id"])[0]["id"]
         db.save_field("demo-tenant", product["id"], "flow_range", "21-81", "m³/h", source_id, "第 1 页：规格参数表（更新）")
@@ -178,7 +178,7 @@ class SystemAcceptanceTests(unittest.TestCase):
         headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
         request(server, "POST", path + "/messages", {"text": "flow 15 m3/h"}, headers)
-        request(server, "POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "quantity": "2"}}, {**headers, "Idempotency-Key": "restart-1"})
+        request(server, "POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0229", "quantity": "2", "region": "DE"}}, {**headers, "Idempotency-Key": "restart-1"})
         # 模拟进程重启：关闭整个服务与数据库连接，在同一数据库上重新启动
         self.stop_last()
         server2 = self.start()

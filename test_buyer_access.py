@@ -53,14 +53,17 @@ class BuyerConversationAccessTests(unittest.TestCase):
         other_cookie = other_headers["Set-Cookie"].split(";", 1)[0]
         self.assertEqual(self.request("GET", path, cookie=other_cookie)[0], 404)
 
-    def test_early_rfq_requires_reply_contact_and_is_saved_once(self):
+    def test_early_rfq_requires_required_fields_and_is_saved_once(self):
         _, headers, _ = self.request("GET", "/inquiry")
         path = headers["Location"].split("?", 1)[0]
         cookie = headers["Set-Cookie"].split(";", 1)[0]
         no_contact = urlencode({"submission_key": "same-early", "notes": "Need a quote"})
-        self.assertEqual(self.request("POST", path + "/rfq", no_contact, cookie)[0], 400)
+        status, headers_unfilled, _ = self.request("POST", path + "/rfq", no_contact, cookie)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=rfq_required", headers_unfilled["Location"])
         self.assertEqual(len(self.server.RequestHandlerClass.db.list_rfqs("demo-tenant")), 0)
-        with_contact = urlencode({"submission_key": "same-early", "notes": "Need a quote", "contact_email": "buyer@example.com"})
+        # V1-01：邮箱/电话/数量/目的地均为默认必填；补齐后照常创建并去重
+        with_contact = urlencode({"submission_key": "same-early", "notes": "Need a quote", "contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0210", "quantity": "2", "region": "Germany"})
         self.assertEqual(self.request("POST", path + "/rfq", with_contact, cookie)[0], 303)
         self.assertEqual(self.request("POST", path + "/rfq", with_contact, cookie)[0], 303)
         self.assertEqual(len(self.server.RequestHandlerClass.db.list_rfqs("demo-tenant")), 1)
@@ -132,12 +135,12 @@ class BuyerConversationAccessTests(unittest.TestCase):
         self.assertEqual(len(db.list_answers("demo-tenant", conversation_id)), 1)
 
     def test_legacy_rfq_edit_revises_same_rfq_with_dedupe_and_conflicts(self):
-        """旧页可修改同一张询价单：同一 RFQ 版本推进、同键去重、陈旧基准拒绝、联系方式不可清空。"""
+        """旧页可修改同一张询价单：同一 RFQ 版本推进、同键去重、陈旧基准拒绝、必填字段不可清空。"""
         db = self.server.RequestHandlerClass.db
         _, headers, _ = self.request("GET", "/inquiry")
         path = headers["Location"].split("?", 1)[0]
         cookie = headers["Set-Cookie"].split(";", 1)[0]
-        create = urlencode({"submission_key": "legacy-rfq-create", "contact_email": "buyer@example.com", "quantity": "2", "region": "Germany", "notes": "first"})
+        create = urlencode({"submission_key": "legacy-rfq-create", "contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0211", "quantity": "2", "region": "Germany", "notes": "first"})
         self.assertEqual(self.request("POST", path + "/rfq", create, cookie)[0], 303)
         rfqs = db.list_rfqs("demo-tenant")
         self.assertEqual(len(rfqs), 1)
@@ -145,7 +148,7 @@ class BuyerConversationAccessTests(unittest.TestCase):
         self.assertEqual(rfq["current_revision"], 1)
         self.assertEqual(len(db.list_rfq_revisions("demo-tenant", rfq["id"])), 1)
         # 修改数量 2 → 3：同一张单推进到 v2，不新建
-        edit = urlencode({"submission_key": "legacy-rfq-edit-1", "expected_revision": "1", "contact_email": "buyer@example.com", "quantity": "3", "region": "Germany", "notes": "second"})
+        edit = urlencode({"submission_key": "legacy-rfq-edit-1", "expected_revision": "1", "contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0211", "quantity": "3", "region": "Germany", "notes": "second"})
         status, headers2, _ = self.request("POST", f"{path}/rfq/{rfq['id']}/revise", edit, cookie)
         self.assertEqual(status, 303)
         self.assertIn("revised=1", headers2.get("Location", ""))
@@ -160,16 +163,16 @@ class BuyerConversationAccessTests(unittest.TestCase):
         self.assertEqual(db.get_rfq("demo-tenant", rfq["id"])["current_revision"], 2)
         self.assertEqual(len(db.list_rfq_revisions("demo-tenant", rfq["id"])), 2)
         # 陈旧基准版本（拿旧页面再改）：拒绝为 rfq_stale，内容不变
-        stale = urlencode({"submission_key": "legacy-rfq-edit-2", "expected_revision": "1", "contact_email": "buyer@example.com", "quantity": "9", "region": "Germany"})
+        stale = urlencode({"submission_key": "legacy-rfq-edit-2", "expected_revision": "1", "contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0211", "quantity": "9", "region": "Germany"})
         status, headers3, _ = self.request("POST", f"{path}/rfq/{rfq['id']}/revise", stale, cookie)
         self.assertEqual(status, 303)
         self.assertIn("notice=rfq_stale", headers3.get("Location", ""))
         self.assertEqual(db.get_rfq("demo-tenant", rfq["id"])["quantity"], "3")
-        # 联系方式不可清空：拒绝为 rfq_contact
+        # 必填字段不可清空：拒绝为 rfq_required（V1-01：按企业设置校验）
         contactless = urlencode({"submission_key": "legacy-rfq-edit-3", "expected_revision": "2", "contact_email": "", "contact_phone": "", "quantity": "3", "region": "Germany"})
         status, headers4, _ = self.request("POST", f"{path}/rfq/{rfq['id']}/revise", contactless, cookie)
         self.assertEqual(status, 303)
-        self.assertIn("notice=rfq_contact", headers4.get("Location", ""))
+        self.assertIn("notice=rfq_required", headers4.get("Location", ""))
         self.assertEqual(db.get_rfq("demo-tenant", rfq["id"])["current_revision"], 2)
         # 买方页面：显示当前版本 v2 与编辑入口；不展示历史差异（那属于销售侧）
         page = self.request("GET", path, cookie=cookie)[2]

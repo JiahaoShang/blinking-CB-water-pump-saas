@@ -194,12 +194,16 @@ function openChat({ language, languages, session = {}, chatContext = null }) {
       const input = collectTags(elements['chat-log'], 'INPUT').find((item) => item.name === name);
       return input ? input.value : null;
     },
-    async fillAndSubmitRfq(email) {
+    async fillAndSubmitRfq(fields) {
+      // V1-01 企业设置：默认口径下邮箱/电话/数量/目的地均为必填（按名称填充若干输入框）。
+      const values = typeof fields === 'string' ? { contact_email: fields } : fields;
       const inputs = collectTags(elements['chat-log'], 'INPUT');
       const byName = (name) => inputs.find((item) => item.name === name);
-      const emailInput = byName('contact_email');
-      if (!emailInput) throw new Error('未找到询价邮箱输入框');
-      emailInput.value = email;
+      if (!byName('contact_email')) throw new Error('未找到询价邮箱输入框');
+      for (const [name, value] of Object.entries(values || {})) {
+        const input = byName(name);
+        if (input) input.value = value;
+      }
       const confirmed = byName('contact_confirmed');
       if (confirmed) confirmed.checked = true;
       const form = collectTags(elements['chat-log'], 'FORM')[0];
@@ -368,7 +372,7 @@ try {
     await chat.clickShowRfq();
     const modelPrefill = chat.inputValue('requested_model');
     const rfqSlice = chat.journal.length;
-    await chat.fillAndSubmitRfq('buyer@example.com');
+    await chat.fillAndSubmitRfq({ contact_email: 'buyer@example.com', contact_phone: '+49 30 555 0302', quantity: '2', destination: 'DE' });
     const rfqRequests = chat.journal.slice(rfqSlice);
     const questionSlice = chat.journal.length;
     await chat.submitMessage('What is the flow range?');

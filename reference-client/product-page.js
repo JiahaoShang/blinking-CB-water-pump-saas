@@ -13,6 +13,8 @@ if (rfqSection) {
   const isolatedSessionKey = `pump_product_handoff_session_${siteKey}`;
   const connectedSessionKey = `pump_product_handoff_connected_${siteKey}`;
   const submissionStorageKey = `pump_product_rfq_key_${siteKey}_${productId}`;
+  // V1-01 企业设置：RFQ 字段三态（由服务端注入；缺失时按“不拦截”处理，服务端兜底校验）。
+  const fieldConfig = (typeof window !== 'undefined' && window.RFQ_FIELD_CONFIG) || {};
 
   async function request(path, method = 'GET', payload = null, token = '', key = '') {
     const response = await fetch(`/api/v1/buyer${path}`, {
@@ -26,7 +28,7 @@ if (rfqSection) {
       body: payload === null ? undefined : JSON.stringify(payload),
     });
     const body = await response.json();
-    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    if (!response.ok) throw new Error(body.message || body.error || `HTTP ${response.status}`);
     return body;
   }
 
@@ -149,8 +151,15 @@ if (rfqSection) {
     const values = new FormData(form);
     const email = String(values.get('email') || '').trim();
     const phone = String(values.get('phone') || '').trim();
-    if ((!email && !phone) || !values.has('contact_confirmed')) {
-      result.textContent = 'Please provide and confirm an email or phone for the seller to reply. / 请提供并确认可回复的联系方式。';
+    if (!values.has('contact_confirmed')) {
+      result.textContent = 'Please confirm the reply contact before submitting. / 请先勾选确认可回复的联系方式。';
+      return;
+    }
+    // V1-01 企业设置：必填字段校验（配置由服务端注入 window.RFQ_FIELD_CONFIG）。
+    const fieldLabels = { email: '邮箱', phone: '电话', quantity: '数量', destination: '目的地', notes: '备注' };
+    const missing = Object.keys(fieldLabels).filter((key) => fieldConfig[key] === 'required' && !String(values.get(key) || '').trim());
+    if (missing.length) {
+      result.textContent = `请填写：${missing.map((key) => fieldLabels[key]).join('、')} / Please fill: ${missing.join(', ')}`;
       return;
     }
     const submit = form.querySelector('button[type="submit"]');

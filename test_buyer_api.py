@@ -349,8 +349,14 @@ class BuyerApiTests(unittest.TestCase):
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
         headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}", "Idempotency-Key": "rfq-1"}
-        payload = {"entry_surface": "chat", "contact": {"contact_email": "buyer@example.com"}, "notes": "Need price", "contact_confirmed": True}
+        payload = {"entry_surface": "chat", "contact": {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0212", "quantity": "2", "region": "Germany"}, "notes": "Need price", "contact_confirmed": True}
         self.assertEqual(self.request("POST", path + "/rfqs", {**payload, "contact_confirmed": False}, headers)[0], 422)
+        # V1-01：默认口径缺必填 → 422 且回传缺项清单（不落记录、不占用幂等键）
+        status_missing, _, missing_body = self.request("POST", path + "/rfqs", {**payload, "contact": {"contact_email": "buyer@example.com"}}, headers)
+        self.assertEqual(status_missing, 422)
+        self.assertEqual(missing_body["error"], "rfq_required_fields_missing")
+        self.assertIn("电话", missing_body["message"])
+        self.assertEqual(len(self.db.list_rfqs("demo-tenant")), 0)
         status, _, first = self.request("POST", path + "/rfqs", payload, headers)
         self.assertEqual(status, 201)
         self.assertEqual(first["status"], "needs_info")
@@ -366,7 +372,7 @@ class BuyerApiTests(unittest.TestCase):
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
         headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}", "Idempotency-Key": "sales-claim-rfq"}
-        _, _, submitted = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.test"}}, headers)
+        _, _, submitted = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.test", "contact_phone": "+49 30 555 0213", "quantity": "2", "region": "DE"}}, headers)
         rfq_id = submitted["rfq_id"]
         _, sales_headers, _ = self.form_request("POST", "/login", {"email": "demo-sales@example.invalid", "password": "demo-sales"})
         sales_cookie = sales_headers["Set-Cookie"].split(";", 1)[0]
@@ -387,7 +393,7 @@ class BuyerApiTests(unittest.TestCase):
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
         headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
-        _, _, submitted = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.test"}}, {**headers, "Idempotency-Key": "stop-rfq"})
+        _, _, submitted = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.test", "contact_phone": "+49 30 555 0214", "quantity": "2", "region": "DE"}}, {**headers, "Idempotency-Key": "stop-rfq"})
         rfq_id = submitted["rfq_id"]
         _, sales_headers, _ = self.form_request("POST", "/login", {"email": "demo-sales@example.invalid", "password": "demo-sales"})
         cookie = sales_headers["Set-Cookie"].split(";", 1)[0]
@@ -755,7 +761,7 @@ class BuyerApiTests(unittest.TestCase):
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
         auth = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
-        _, _, first = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "quantity": "2"}, {**auth, "Idempotency-Key": "init-conc"})
+        _, _, first = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0215", "quantity": "2", "region": "DE"}}, {**auth, "Idempotency-Key": "init-conc"})
         rfq_id = first["rfq_id"]
         revision = {"expected_revision": 1, "contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "quantity": "3"}
         barrier = threading.Barrier(2)
@@ -780,12 +786,12 @@ class BuyerApiTests(unittest.TestCase):
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
         headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
         # 买方手填的型号文字匹配已发布产品 → 绑定该产品
-        _, _, matched = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "requested_model": product["model"]}, {**headers, "Idempotency-Key": "model-1"})
+        _, _, matched = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0216", "quantity": "2", "region": "DE"}, "requested_model": product["model"]}, {**headers, "Idempotency-Key": "model-1"})
         row = self.db.get_rfq("demo-tenant", matched["rfq_id"])
         self.assertEqual(row["product_id"], product["id"])
         self.assertEqual(row["requested_model"], product["model"])
         # 手填型号无匹配 → 只记录文字、不绑定任何产品（尊重买方表述）
-        _, _, custom = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "requested_model": "ZZ-999（定制款）"}, {**headers, "Idempotency-Key": "model-2"})
+        _, _, custom = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0217", "quantity": "2", "region": "DE"}, "requested_model": "ZZ-999（定制款）"}, {**headers, "Idempotency-Key": "model-2"})
         row = self.db.get_rfq("demo-tenant", custom["rfq_id"])
         self.assertIsNone(row["product_id"])
         self.assertEqual(row["requested_model"], "ZZ-999（定制款）")
@@ -802,7 +808,7 @@ class BuyerApiTests(unittest.TestCase):
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
         headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
-        payload = {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "product_id": product["id"]}
+        payload = {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0218", "quantity": "2", "region": "DE"}, "product_id": product["id"]}
         _, _, first = self.request("POST", path + "/rfqs", payload, {**headers, "Idempotency-Key": "hint-1"})
         self.assertEqual(first["related_rfq_hint"], [])
         _, _, second = self.request("POST", path + "/rfqs", {**payload, "notes": "second request"}, {**headers, "Idempotency-Key": "hint-2"})
@@ -812,7 +818,7 @@ class BuyerApiTests(unittest.TestCase):
         self.assertNotEqual(second["rfq_id"], first["rfq_id"])
         self.assertEqual(len(self.db.list_rfqs("demo-tenant")), 2)
         # 未选型号的 RFQ 不产生同型号提示
-        _, _, third = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com"}, "notes": "no model"}, {**headers, "Idempotency-Key": "hint-3"})
+        _, _, third = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0219", "quantity": "2", "region": "DE"}, "notes": "no model"}, {**headers, "Idempotency-Key": "hint-3"})
         self.assertEqual(third["related_rfq_hint"], [])
         # 跨会话不提示（提示只检查同一会话）
         _, _, other = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
@@ -826,7 +832,7 @@ class BuyerApiTests(unittest.TestCase):
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
         headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
-        _, _, first = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "quantity": "2"}, "notes": "First"}, {**headers, "Idempotency-Key": "alert-1"})
+        _, _, first = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0220", "quantity": "2", "region": "DE"}, "notes": "First"}, {**headers, "Idempotency-Key": "alert-1"})
         rfq_id = first["rfq_id"]
         _, admin_headers, _ = self.form_request("POST", "/login", {"email": "demo-admin@example.invalid", "password": "demo-admin"})
         cookie = admin_headers["Set-Cookie"].split(";", 1)[0]
@@ -858,7 +864,7 @@ class BuyerApiTests(unittest.TestCase):
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
         headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
         rfq_headers = {**headers, "Idempotency-Key": "initial-rfq"}
-        payload = {"entry_surface": "chat", "contact": {"contact_email": "buyer@example.com"}, "contact_confirmed": True, "notes": "First request"}
+        payload = {"entry_surface": "chat", "contact": {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0221", "quantity": "2", "region": "DE"}, "contact_confirmed": True, "notes": "First request"}
         _, _, first = self.request("POST", path + "/rfqs", payload, rfq_headers)
         rfq_id = first["rfq_id"]
         revision_path = path + f"/rfqs/{rfq_id}/revisions"

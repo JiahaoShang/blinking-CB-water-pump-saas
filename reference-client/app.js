@@ -70,7 +70,7 @@ async function api(path, method = 'GET', data = null, extra = {}) {
     body: data === null ? undefined : JSON.stringify(data),
   });
   const body = await response.json();
-  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+  if (!response.ok) throw new Error(body.message || body.error || `HTTP ${response.status}`);
   return body;
 }
 async function connect() {
@@ -397,16 +397,26 @@ function showRfqForm(rfq = null) {
     modelField.setAttribute('list', modelList.id);
     form.append(modelList);
   }
-  const email = field(form, 'Email', 'contact_email', rfq?.contact_email || '', 'email');
-  const phone = field(form, 'Phone', 'contact_phone', rfq?.contact_phone || '', 'tel');
-  const quantity = field(form, t('quantity'), 'quantity', rfq?.quantity || '');
-  const destination = field(form, t('destination'), 'destination', rfq?.destination || '');
-  const notes = field(form, t('notes'), 'notes', rfq?.notes || '');
+  // V1-01 企业设置：字段三态（必填/选填/隐藏）随会话载荷 rfq_fields 下发；缺失时全部可见，交由服务端校验兜底。
+  const rfqFields = (current && current.rfq_fields) || { email: 'optional', phone: 'optional', quantity: 'optional', destination: 'optional', notes: 'optional' };
+  const rfqField = (key, label, name, value, type) => {
+    if (rfqFields[key] === 'hidden') return null;
+    return field(form, `${label}${rfqFields[key] === 'required' ? ' *' : ''}`, name, value, type);
+  };
+  const email = rfqField('email', 'Email', 'contact_email', rfq?.contact_email || '', 'email');
+  const phone = rfqField('phone', 'Phone', 'contact_phone', rfq?.contact_phone || '', 'tel');
+  const quantity = rfqField('quantity', t('quantity'), 'quantity', rfq?.quantity || '');
+  const destination = rfqField('destination', t('destination'), 'destination', rfq?.destination || '');
+  const notes = rfqField('notes', t('notes'), 'notes', rfq?.notes || '');
   const confirmed = field(form, t('confirmContact'), 'contact_confirmed', '', 'checkbox');
   const submit = node('button', '', rfq ? t('saveEdit') : t('save')); submit.type = 'submit'; form.append(submit);
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (!confirmed.checked || (!email.value.trim() && !phone.value.trim())) { showNotice(t('contact')); return; }
+    const missingFields = [['email', email, 'Email'], ['phone', phone, 'Phone'], ['quantity', quantity, t('quantity')], ['destination', destination, t('destination')], ['notes', notes, t('notes')]]
+      .filter(([key, input]) => rfqFields[key] === 'required' && input && !input.value.trim())
+      .map(([, , label]) => label);
+    if (missingFields.length) { showNotice((locale === 'zh' ? '请填写：' : 'Please fill: ') + missingFields.join(locale === 'zh' ? '、' : ', ')); return; }
+    if (!confirmed.checked) { showNotice(t('contact')); return; }
     submit.disabled = true;
     try {
       // 型号解析：与页面上下文 / 当前推荐候选 / 原绑定型号匹配则绑定 product_id；否则只记文字。
@@ -422,8 +432,8 @@ function showRfqForm(rfq = null) {
         if (!boundProductId && rfq && rfq.product_id && String(rfq.model || '').trim().toLowerCase() === normalizedModel) boundProductId = rfq.product_id;
       }
       const saved = rfq
-        ? await api(`/conversations/${conversationId}/rfqs/${rfq.id}/revisions`, 'POST', { expected_revision: rfq.current_revision, contact_confirmed: true, contact: { contact_email: email.value.trim(), contact_phone: phone.value.trim() }, quantity: quantity.value.trim(), destination: destination.value.trim(), notes: notes.value.trim(), product_id: boundProductId, requested_model: modelText }, { 'Idempotency-Key': submissionKey })
-        : await api(`/conversations/${conversationId}/rfqs`, 'POST', { entry_surface: 'chat', contact_confirmed: true, product_id: boundProductId, requested_model: modelText, contact: { contact_email: email.value.trim(), contact_phone: phone.value.trim(), quantity: quantity.value.trim(), region: destination.value.trim() }, notes: notes.value.trim() }, { 'Idempotency-Key': submissionKey });
+        ? await api(`/conversations/${conversationId}/rfqs/${rfq.id}/revisions`, 'POST', { expected_revision: rfq.current_revision, contact_confirmed: true, contact: { contact_email: email ? email.value.trim() : (rfq.contact_email || ''), contact_phone: phone ? phone.value.trim() : (rfq.contact_phone || '') }, quantity: quantity ? quantity.value.trim() : (rfq.quantity || ''), destination: destination ? destination.value.trim() : (rfq.destination || ''), notes: notes ? notes.value.trim() : (rfq.notes || ''), product_id: boundProductId, requested_model: modelText }, { 'Idempotency-Key': submissionKey })
+        : await api(`/conversations/${conversationId}/rfqs`, 'POST', { entry_surface: 'chat', contact_confirmed: true, product_id: boundProductId, requested_model: modelText, contact: { contact_email: email ? email.value.trim() : '', contact_phone: phone ? phone.value.trim() : '', quantity: quantity ? quantity.value.trim() : '', region: destination ? destination.value.trim() : '' }, notes: notes ? notes.value.trim() : '' }, { 'Idempotency-Key': submissionKey });
       await refresh();
       if (!rfq && saved?.related_rfq_hint?.length) {
         showNotice((locale === 'zh' ? '本会话 24 小时内已有同型号询价（不会自动合并，请检查是否相关）：' : 'A same-model RFQ from this conversation exists within 24h (no auto-merge; please check if related): ')
