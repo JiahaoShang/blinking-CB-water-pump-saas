@@ -98,6 +98,16 @@ CATEGORY_SOURCE_LABELS = dict(CATEGORY_SOURCE_OPTIONS)
 CATEGORY_MAX_LENGTH = 40
 # V1-02 批量上传：一次请求最多登记的文件数（防止误选整个目录）。
 MAX_BATCH_SOURCE_FILES = 20
+# V1-08 待培育线索：未形成 RFQ 的手动登记线索（线下/展会等）；来源渠道口径固定为下列选项。
+NURTURE_SOURCE_OPTIONS = (
+    ("expo", "展会"),
+    ("visit", "线下拜访"),
+    ("phone", "电话"),
+    ("email", "邮件"),
+    ("referral", "转介绍"),
+    ("other", "其他"),
+)
+NURTURE_SOURCE_LABELS = dict(NURTURE_SOURCE_OPTIONS)
 # 跨站会话交接（一次性交接码）：官网聊天（来源 A）与平台产品页（来源 B）不同来源时，
 # 由持有会话凭据的聊天方出具短时、一次性、绑定站点与型号的交接码；产品页在平台自身
 # 来源上用它换取同一会话的新凭据。码与凭据都只存摘要（SHA-256）；长期会话凭据绝不
@@ -610,12 +620,22 @@ class Database:
             CREATE TABLE IF NOT EXISTS leads (
                 id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL REFERENCES tenants(id),
-                rfq_id TEXT NOT NULL REFERENCES rfqs(id),
-                conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                rfq_id TEXT REFERENCES rfqs(id),
+                conversation_id TEXT REFERENCES conversations(id),
+                kind TEXT NOT NULL DEFAULT 'rfq',
+                source TEXT NOT NULL DEFAULT '',
+                contact_name TEXT NOT NULL DEFAULT '',
+                company TEXT NOT NULL DEFAULT '',
+                contact_email TEXT NOT NULL DEFAULT '',
+                contact_phone TEXT NOT NULL DEFAULT '',
                 stage TEXT NOT NULL DEFAULT 'new',
                 owner TEXT,
                 next_follow_up TEXT,
                 note TEXT NOT NULL DEFAULT '',
+                close_reason TEXT NOT NULL DEFAULT '',
+                closed_at TEXT,
+                merged_into TEXT,
+                merged_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE (tenant_id, rfq_id)
@@ -648,6 +668,47 @@ class Database:
         for column, definition in (("close_reason", "TEXT NOT NULL DEFAULT ''"), ("closed_at", "TEXT")):
             if column not in lead_columns:
                 self.conn.execute(f"ALTER TABLE leads ADD COLUMN {column} {definition}")
+        if "kind" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(leads)")}:
+            # V1-08：待培育线索（无 RFQ）要求 rfq_id/conversation_id 可空，并新增 kind/来源/联系/合并列。
+            # 采用「新建→拷贝→删旧→改名」顺序重建（标准做法，避免 RENAME 反向改写其它表的引用）。
+            # FK ON 时 DROP 父表会隐式 DELETE 并触发 lead_milestones/lead_replies 的约束，须临时关闭外键。
+            self.conn.commit()
+            self.conn.execute("PRAGMA foreign_keys = OFF")
+            self.conn.execute(
+                """CREATE TABLE leads_migrate_v2 (
+                    id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                    rfq_id TEXT REFERENCES rfqs(id),
+                    conversation_id TEXT REFERENCES conversations(id),
+                    kind TEXT NOT NULL DEFAULT 'rfq',
+                    source TEXT NOT NULL DEFAULT '',
+                    contact_name TEXT NOT NULL DEFAULT '',
+                    company TEXT NOT NULL DEFAULT '',
+                    contact_email TEXT NOT NULL DEFAULT '',
+                    contact_phone TEXT NOT NULL DEFAULT '',
+                    stage TEXT NOT NULL DEFAULT 'new',
+                    owner TEXT,
+                    next_follow_up TEXT,
+                    note TEXT NOT NULL DEFAULT '',
+                    close_reason TEXT NOT NULL DEFAULT '',
+                    closed_at TEXT,
+                    merged_into TEXT,
+                    merged_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (tenant_id, rfq_id)
+                )"""
+            )
+            self.conn.execute(
+                "INSERT INTO leads_migrate_v2 (id, tenant_id, rfq_id, conversation_id, kind, stage, owner, next_follow_up, note, close_reason, closed_at, created_at, updated_at) "
+                "SELECT id, tenant_id, rfq_id, conversation_id, 'rfq', stage, owner, next_follow_up, note, close_reason, closed_at, created_at, updated_at FROM leads"
+            )
+            self.conn.execute("DROP TABLE leads")
+            self.conn.execute("ALTER TABLE leads_migrate_v2 RENAME TO leads")
+            # PRAGMA 在事务中会被静默忽略：先 commit 关掉隐式事务，再恢复外键开关。
+            self.conn.commit()
+            self.conn.execute("PRAGMA foreign_keys = ON")
+            self.conn.commit()
         product_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(products)")}
         for column, definition in (
             ("category", "TEXT NOT NULL DEFAULT ''"),
@@ -1793,7 +1854,7 @@ class Database:
             "(SELECT COUNT(*) FROM rfq_revisions v WHERE v.rfq_id=r.id AND v.revision>1) AS buyer_revision_count, "
             "(SELECT MAX(v.created_at) FROM rfq_revisions v WHERE v.rfq_id=r.id) AS last_revision_at "
             "FROM rfqs r LEFT JOIN products p ON p.id=r.product_id LEFT JOIN leads l ON l.rfq_id=r.id AND l.tenant_id=r.tenant_id JOIN conversations c ON c.id=r.conversation_id AND c.tenant_id=r.tenant_id "
-            f"WHERE r.tenant_id=? ORDER BY CASE l.stage {order_case} ELSE {len(stage_keys)} END, l.next_follow_up, r.created_at DESC",
+            f"WHERE r.tenant_id=? AND COALESCE(l.merged_into, '') = '' ORDER BY CASE l.stage {order_case} ELSE {len(stage_keys)} END, l.next_follow_up, r.created_at DESC",
             (tenant_id,),
         ).fetchall()
 
@@ -1829,7 +1890,7 @@ class Database:
             f"SELECT "
             f"SUM(CASE WHEN {terminal_clause} THEN 1 ELSE 0 END) AS active, "
             f"SUM(CASE WHEN next_follow_up < ? AND {terminal_clause} THEN 1 ELSE 0 END) AS overdue "
-            "FROM leads WHERE tenant_id=?",
+            "FROM leads WHERE tenant_id=? AND COALESCE(merged_into, '') = ''",
             [*terminal_keys, today, *terminal_keys, tenant_id],
         ).fetchone()
         return {
@@ -1929,6 +1990,117 @@ class Database:
                 details += ";transition=reopened"
             self._audit(tenant_id, "lead", lead["id"], "updated", actor, details)
 
+    # ── V1-08：待培育线索（未形成 RFQ；手动登记线下/展会询盘）────────────────────
+    def create_nurture_lead(
+        self,
+        tenant_id: str,
+        actor: str,
+        contact_name: str,
+        company: str,
+        contact_email: str,
+        contact_phone: str,
+        source: str,
+        note: str,
+    ) -> str:
+        if source not in NURTURE_SOURCE_LABELS:
+            raise ValueError("来源渠道无效")
+        email = contact_email.strip()
+        phone = contact_phone.strip()
+        if not email and not phone:
+            raise ValueError("需要至少一种可回复的联系方式（邮箱或电话）")
+        if not (contact_name.strip() or company.strip()):
+            raise ValueError("请至少填写联系人称呼或公司名称")
+        lead_id = secrets.token_hex(12)
+        timestamp = now_iso()
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO leads(id, tenant_id, rfq_id, conversation_id, kind, source, contact_name, company, contact_email, contact_phone, "
+                "stage, owner, next_follow_up, note, created_at, updated_at) "
+                "VALUES (?, ?, NULL, NULL, 'nurture', ?, ?, ?, ?, ?, 'new', ?, NULL, ?, ?, ?)",
+                (lead_id, tenant_id, source, contact_name.strip(), company.strip(), email, phone, actor, note.strip(), timestamp, timestamp),
+            )
+            self._audit(
+                tenant_id, "lead", lead_id, "nurture_created", actor,
+                f"source={NURTURE_SOURCE_LABELS[source]};contact={contact_name.strip() or company.strip()}",
+            )
+        return lead_id
+
+    def get_lead(self, tenant_id: str, lead_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM leads WHERE tenant_id=? AND id=?", (tenant_id, lead_id)
+        ).fetchone()
+
+    def list_nurture_leads(self, tenant_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM leads WHERE tenant_id=? AND kind='nurture' AND COALESCE(merged_into, '') = '' "
+            "ORDER BY (next_follow_up IS NULL), next_follow_up, created_at DESC",
+            (tenant_id,),
+        ).fetchall()
+
+    def update_lead_by_id(
+        self,
+        tenant_id: str,
+        lead_id: str,
+        stage: str,
+        next_follow_up: str,
+        note: str,
+        actor: str = "demo-sales",
+        close_reason: str = "",
+    ) -> None:
+        """按线索 id 更新（待培育线索；与 RFQ 线索同一套阶段/关闭/重开语义）。"""
+        allowed = {stage["key"] for stage in self.get_lead_stages(tenant_id)}
+        if stage not in allowed:
+            raise ValueError("不支持的线索阶段")
+        lead = self.get_lead(tenant_id, lead_id)
+        if not lead:
+            raise ValueError("线索不存在")
+        closing = stage == "closed"
+        reopening = bool(lead["stage"] == "closed" and not closing)
+        close_reason = close_reason.strip()
+        if closing and not close_reason:
+            raise ValueError("关闭线索需要填写原因")
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            timestamp = now_iso()
+            if closing:
+                self.conn.execute(
+                    "UPDATE leads SET stage=?, next_follow_up=?, note=?, close_reason=?, closed_at=?, updated_at=? WHERE tenant_id=? AND id=?",
+                    (stage, next_follow_up.strip() or None, note.strip(), close_reason, timestamp, timestamp, tenant_id, lead_id),
+                )
+            elif reopening:
+                self.conn.execute(
+                    "UPDATE leads SET stage=?, next_follow_up=?, note=?, close_reason='', closed_at=NULL, updated_at=? WHERE tenant_id=? AND id=?",
+                    (stage, next_follow_up.strip() or None, note.strip(), timestamp, tenant_id, lead_id),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE leads SET stage=?, next_follow_up=?, note=?, updated_at=? WHERE tenant_id=? AND id=?",
+                    (stage, next_follow_up.strip() or None, note.strip(), timestamp, tenant_id, lead_id),
+                )
+            details = f"stage={stage};next_follow_up={next_follow_up}"
+            if closing:
+                details += f";close_reason={close_reason};transition=closed"
+            if reopening:
+                details += ";transition=reopened"
+            self._audit(tenant_id, "lead", lead_id, "updated", actor, details)
+
+    def assign_nurture_lead(self, tenant_id: str, lead_id: str, owner_email: str, actor_email: str) -> None:
+        actor = self.conn.execute("SELECT role, active FROM users WHERE tenant_id=? AND email=?", (tenant_id, actor_email)).fetchone()
+        owner = self.conn.execute("SELECT id, role, active FROM users WHERE tenant_id=? AND email=?", (tenant_id, owner_email)).fetchone()
+        lead = self.get_lead(tenant_id, lead_id)
+        owner_ok = (
+            bool(owner) and owner["active"] and owner["role"] != "admin"
+            and "sales" in self.get_user_modules(owner["id"])
+        )
+        if not actor or not actor["active"] or actor["role"] != "admin" or not owner_ok or not lead or lead["kind"] != "nurture":
+            raise ValueError("管理员只能把待培育线索分配给已授权「销售工作台」模块的员工")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE leads SET owner=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (owner_email, now_iso(), tenant_id, lead_id),
+            )
+            self._audit(tenant_id, "lead", lead_id, "assigned", actor_email, f"owner={owner_email}")
+
     # ── V1-09：跟进节点（技术确认/样品/报价准备）──────────────────────────────
     def list_lead_milestones(self, tenant_id: str, lead_id: str) -> dict[str, sqlite3.Row]:
         rows = self.conn.execute(
@@ -1937,9 +2109,15 @@ class Database:
         return {row["key"]: row for row in rows}
 
     def toggle_lead_milestone(self, tenant_id: str, rfq_id: str, key: str, actor: str) -> bool:
+        lead = self.get_lead_for_rfq(tenant_id, rfq_id)
+        if not lead:
+            raise ValueError("线索不存在")
+        return self.toggle_lead_milestone_for_lead(tenant_id, lead["id"], key, actor)
+
+    def toggle_lead_milestone_for_lead(self, tenant_id: str, lead_id: str, key: str, actor: str) -> bool:
         if key not in LEAD_MILESTONE_KEYS:
             raise ValueError("不支持的跟进节点")
-        lead = self.get_lead_for_rfq(tenant_id, rfq_id)
+        lead = self.get_lead(tenant_id, lead_id)
         if not lead:
             raise ValueError("线索不存在")
         existing = self.conn.execute(
@@ -4200,6 +4378,7 @@ def admin_permission_area(path: str) -> tuple[str, str, str]:
         ("/admin/demo", "访问「演示工具」", "管理员", "演示工具为部署级开关，只对管理员开放。"),
         ("/admin/lowara", "访问「演示工具」", "管理员", "演示工具为部署级开关，只对管理员开放。"),
         ("/admin/sales", "访问「销售工作台」", "模块权限「销售工作台」", module_why),
+        ("/admin/leads", "访问「销售工作台」", "模块权限「销售工作台」", module_why),
         ("/admin/rfqs", "访问「RFQ 询价」", "模块权限「RFQ 询价」", module_why),
     )
     for prefix, area, required, why in areas:
@@ -4411,6 +4590,7 @@ AUDIT_ACTION_LABELS = {
     "allowed_public_download": "开放下载", "revoked_public_download": "撤销下载",
     "usage_changed": "更新文件可见性", "public_permission_revoked_on_usage_change": "可见性变更撤销公开",
     "category_candidate_set": "登记品类候选", "category_approved": "核准品类", "category_candidate_cleared": "清除品类候选",
+    "nurture_created": "登记待培育线索",
     "public_download_blocked_hash_mismatch": "拦截下载（哈希不符）", "modules_updated": "模块授权",
     "exported": "导出数据", "completed": "完成", "sent": "记录发送", "discarded": "废弃",
     "milestone_completed": "节点完成", "milestone_reopened": "节点重开",
@@ -4491,6 +4671,7 @@ class Handler(BaseHTTPRequestHandler):
                 ("/admin/products", "products"),
                 ("/admin/tasks", "tasks"),
                 ("/admin/sales", "sales"),
+                ("/admin/leads", "sales"),
                 ("/admin/rfqs", "rfqs"),
             ):
                 if path.startswith(prefix):
@@ -4905,6 +5086,10 @@ class Handler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/?", path)
         if match:
             self.admin_sales_detail(match.group(1), query)
+            return
+        match = re.fullmatch(r"/admin/leads/([a-f0-9]+)/?", path)
+        if match:
+            self.admin_nurture_lead(match.group(1), query)
             return
         match = re.fullmatch(r"/products/([a-zA-Z0-9-]+)/?", path)
         if match:
@@ -5843,6 +6028,52 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("询价不存在")
                 self.db.stop_proactive_contact(self.tenant_id, rfq["conversation_id"], str(form.get("reason", "")), "seller_record", self.actor)
                 self.redirect(f"/admin/sales/{match.group(1)}?notice=contact-stop")
+                return
+            if path == "/admin/sales/nurture":
+                if not self.has_module("sales"):
+                    role_label = "管理员" if self.user_role == "admin" else "员工"
+                    self.send_html(self.console_page("无权操作", permission_notice("登记待培育线索", role_label, "模块权限「销售工作台」", "登记待培育线索需要销售工作台模块权限。"), "sales"), 403)
+                    return
+                lead_id = self.db.create_nurture_lead(
+                    self.tenant_id, self.actor,
+                    str(form.get("contact_name", "")), str(form.get("company", "")),
+                    str(form.get("contact_email", "")), str(form.get("contact_phone", "")),
+                    str(form.get("source", "")), str(form.get("note", "")),
+                )
+                self.redirect(f"/admin/leads/{lead_id}?notice=nurture-created")
+                return
+            match = re.fullmatch(r"/admin/leads/([a-f0-9]+)/update", path)
+            if match:
+                if not self.has_module("sales"):
+                    role_label = "管理员" if self.user_role == "admin" else "员工"
+                    self.send_html(self.console_page("无权操作", permission_notice("更新待培育线索", role_label, "模块权限「销售工作台」", "更新线索需要销售工作台模块权限。"), "sales"), 403)
+                    return
+                self.db.update_lead_by_id(
+                    self.tenant_id, match.group(1), str(form.get("stage", "")), str(form.get("next_follow_up", "")),
+                    str(form.get("note", "")), self.actor, close_reason=str(form.get("close_reason", "")),
+                )
+                self.redirect(f"/admin/leads/{match.group(1)}?notice=updated#lead-update")
+                return
+            match = re.fullmatch(r"/admin/leads/([a-f0-9]+)/assign", path)
+            if match:
+                if self.user_role != "admin":
+                    self.send_html(self.console_page("无权操作", permission_notice("分配待培育线索", "员工", "管理员", "分配或改派线索只对管理员开放。"), "sales"), 403)
+                    return
+                self.db.assign_nurture_lead(self.tenant_id, match.group(1), str(form.get("owner_email", "")), self.actor)
+                self.redirect(f"/admin/leads/{match.group(1)}?notice=assigned")
+                return
+            match = re.fullmatch(r"/admin/leads/([a-f0-9]+)/milestones/([a-z_]+)", path)
+            if match:
+                if not self.has_module("sales"):
+                    role_label = "管理员" if self.user_role == "admin" else "员工"
+                    self.send_html(self.console_page("无权操作", permission_notice("更新跟进节点", role_label, "模块权限「销售工作台」", "更新跟进节点需要销售工作台模块权限。"), "sales"), 403)
+                    return
+                try:
+                    activated = self.db.toggle_lead_milestone_for_lead(self.tenant_id, match.group(1), match.group(2), self.actor)
+                    notice = "milestone_on" if activated else "milestone_off"
+                except ValueError:
+                    notice = "milestone_invalid"
+                self.redirect(f"/admin/leads/{match.group(1)}?notice={notice}#milestones")
                 return
             match = re.fullmatch(r"/admin/users/([a-f0-9]+)/toggle", path)
             if match:
@@ -7319,14 +7550,130 @@ class Handler(BaseHTTPRequestHandler):
             f"<a href='/admin/sales?timing=soon'>3 天内到期 {counts['soon']}</a>"
             f"<a href='/admin/sales?owner=unassigned'>未分配 {counts['unassigned']}</a></div>"
         )
+        nurture_leads = self.db.list_nurture_leads(self.tenant_id)
+        nurture_items = []
+        for nurture in nurture_leads:
+            follow = esc(nurture["next_follow_up"] or "未安排")
+            if nurture["next_follow_up"] and nurture["next_follow_up"] < today and nurture["stage"] not in terminal_keys:
+                follow = f"<span class='badge withdrawn'>逾期 {esc(nurture['next_follow_up'])}</span>"
+            contact_bits = esc(nurture["contact_email"] or nurture["contact_phone"] or "")
+            company_bit = f" · {esc(nurture['company'])}" if nurture["company"] else ""
+            nurture_items.append(
+                f"<div class='simple-item'><div><strong>{esc(nurture['contact_name'] or nurture['company'] or '未命名线索')}"
+                f" <span class='badge pending_review'>待培育</span> <span class='badge'>{esc(stage_labels.get(nurture['stage'], nurture['stage'] or '新线索'))}</span></strong>"
+                f"<small>{contact_bits}{company_bit} · 来源：{esc(NURTURE_SOURCE_LABELS.get(nurture['source'], nurture['source'] or '未填'))} · 负责人：{esc(nurture['owner'] or '未分配')} · 跟进：{follow}</small></div>"
+                f"<div class='actions'><a class='button' href='/admin/leads/{nurture['id']}'>打开线索 →</a></div></div>"
+            )
+        nurture_items_html = "".join(nurture_items) or "<div class='muted-block'>还没有待培育线索。线下询盘、展会名片等未形成 RFQ 的线索可登记在这里。</div>"
+        nurture_source_options = "".join(f"<option value='{key}'>{label}</option>" for key, label in NURTURE_SOURCE_OPTIONS)
+        nurture_section = (
+            "<section class='card' style='margin-top:18px' id='nurture'><div class='panel-title'><h2>待培育线索（未形成 RFQ）</h2>"
+            "<span class='muted'>手动登记，不受上方筛选影响</span></div>"
+            f"<div class='simple-list'>{nurture_items_html}</div>"
+            "<details class='detail-toggle'><summary>登记待培育线索</summary><div><form method='post' action='/admin/sales/nurture'><div class='form-grid'>"
+            "<div><label>联系人称呼</label><input name='contact_name' placeholder='例如 王工'></div>"
+            "<div><label>公司 / 单位</label><input name='company' placeholder='例如 华东水务工程公司'></div>"
+            "<div><label>邮箱</label><input type='email' name='contact_email' placeholder='name@company.example'></div>"
+            "<div><label>电话</label><input name='contact_phone' placeholder='+86 …'></div>"
+            f"<div><label>来源渠道 *</label><select name='source' required>{nurture_source_options}</select></div>"
+            "<div class='full'><label>需求摘要 / 备注</label><textarea name='note' placeholder='例如：展会接触，正在做新建项目选型，预计 Q4 招标'></textarea></div>"
+            "</div><p class='muted'>邮箱与电话至少填写一种；登记后负责人默认为登记人，可在线索详情中调整。</p>"
+            "<p><button>登记待培育线索</button></p></form></div></details></section>"
+        )
         body = f"""
 <div class='toolbar'><div><h1>销售工作台</h1><div class='muted'>统一查看 RFQ、需求、推荐、问答和人工任务；当前企业：{esc(self.tenant_display_name())}</div></div><a class='button secondary' href='/admin/rfqs'>RFQ 原始记录</a></div>
 <section class='card'><div class='panel-title'><h2>线索列表</h2><span class='muted'>领取或接手的线索从这里打开处理{filtered_note}</span></div>
 {reminder_strip}
 <form method='get' action='/admin/sales' class='filter-bar'><label>阶段</label><select name='stage'>{stage_options_html}</select><label>负责人</label><select name='owner'>{owner_options_html}</select><label>时效</label><select name='timing'>{timing_options_html}</select><label>关键词</label><input name='q' value='{esc(keyword_raw)}' placeholder='公司 / 型号 / 邮箱 / 编号'><button class='secondary'>筛选</button></form>
 <div class='simple-list'>{items_html}</div></section>
+{nurture_section}
 """
         self.send_html(self.console_page("销售工作台", body, "sales"), 200)
+
+    def admin_nurture_lead(self, lead_id: str, query: dict[str, list[str]]) -> None:
+        """待培育线索详情（V1-08）：跟进状态、节点、操作历史与分配；无 RFQ/会话。"""
+        lead = self.db.get_lead(self.tenant_id, lead_id)
+        if not lead:
+            self.send_html(self.console_page("线索不存在", "<div class='error'>线索不存在或不属于当前企业。</div>", "sales"), 404)
+            return
+        if lead["kind"] != "nurture":
+            self.redirect(f"/admin/sales/{lead['rfq_id']}")
+            return
+        notice = query.get("notice", [""])[0]
+        notice_text = {
+            "updated": "跟进状态已保存。",
+            "assigned": "负责人已更新。",
+            "nurture-created": "待培育线索已登记；负责人默认为登记人，可在下方调整阶段与下一步。",
+            "milestone_on": "跟进节点已标记完成。",
+            "milestone_off": "跟进节点已重新打开。",
+            "milestone_invalid": "该跟进节点不可用。",
+        }.get(notice, "")
+        notice_banner = f"<div class='notice'>{esc(notice_text)}</div>" if notice_text else ""
+        stages = self.db.get_lead_stages(self.tenant_id)
+        stage_labels = {stage["key"]: stage["label"] for stage in stages}
+        today = datetime.now(timezone.utc).date().isoformat()
+        stage_options = "".join(
+            f"<option value='{esc(stage['key'])}' {'selected' if lead['stage'] == stage['key'] else ''}>{esc(stage['label'])}</option>"
+            for stage in stages
+        )
+        closed_info = (
+            f"<p class='field-state'>已于 {esc(lead['closed_at'])} 关闭（原因：{esc(lead['close_reason'])}）；重新选择其他阶段即可重新激活。</p>"
+            if lead["stage"] == "closed" and lead["closed_at"] else ""
+        )
+        assign_action = ""
+        if self.user_role == "admin":
+            sales_options = "".join(
+                f"<option value='{esc(user['email'])}' {'selected' if lead['owner'] == user['email'] else ''}>{esc(user['display_name'])} · {esc(user['email'])}</option>"
+                for user in self.db.list_users(self.tenant_id)
+                if user["role"] == "employee" and user["active"] and "sales" in self.db.get_user_modules(user["id"])
+            )
+            if sales_options:
+                assign_action = (
+                    f"<form method='post' action='/admin/leads/{lead_id}/assign'><label>负责人（分配或改派）</label>"
+                    f"<select name='owner_email'>{sales_options}</select><button>分配或改派</button></form>"
+                )
+        if lead["stage"] == "closed":
+            focus_label, focus_title, focus_text = "当前状态 · 已关闭", "这条待培育线索已关闭", "如客户重启需求，可改回其他阶段重新激活；历史记录保留。"
+        elif lead["next_follow_up"] and lead["next_follow_up"] < today:
+            focus_label, focus_title, focus_text = "当前任务 · 逾期跟进", f"跟进日期 {lead['next_follow_up']} 已过", "建议尽快联系，并在下方更新下一步或阶段。"
+        else:
+            focus_label, focus_title, focus_text = "当前任务 · 培育推进", "安排下一步跟进或推进阶段", "记录技术确认、样品与报价准备节点；客户在官网提交询价后可人工核对并合并线索。"
+        focus_html = (
+            f"<div class='focus'><div><span class='focus-label'>{esc(focus_label)}</span><strong>{esc(focus_title)}</strong>"
+            f"<p>{esc(focus_text)}</p></div><div class='actions'><a class='button' href='#lead-update'>更新跟进状态 →</a></div></div>"
+        )
+        milestones = self.db.list_lead_milestones(self.tenant_id, lead_id)
+        milestone_rows = []
+        for key, label in LEAD_MILESTONE_DEFS:
+            done = milestones.get(key)
+            state = f"已完成 · {esc(done['done_by'])} · {esc(done['done_at'])}" if done else "未完成"
+            action_label = "重新打开" if done else "标记完成"
+            milestone_rows.append(
+                f"<div class='simple-item'><div><strong>{esc(label)}</strong><small>{state}</small></div>"
+                f"<div class='actions'><form method='post' action='/admin/leads/{lead_id}/milestones/{key}' class='inline'><button class='secondary'>{action_label}</button></form></div></div>"
+            )
+        timeline_rows = self.db.conn.execute(
+            "SELECT action, actor, details, created_at FROM audit_log WHERE tenant_id=? AND entity_type='lead' AND entity_id=? ORDER BY id DESC LIMIT 20",
+            (self.tenant_id, lead_id),
+        ).fetchall()
+        timeline_html = "".join(
+            f"<div class='source'><span><b>{esc(AUDIT_ACTION_LABELS.get(row['action'], row['action']))}</b> · {esc(row['actor'])}"
+            f"<br><span class='field-state'>{esc(row['created_at'])}</span></span><span class='field-state'>{esc(row['details'])}</span></div>"
+            for row in timeline_rows
+        ) or "<p class='muted'>暂无操作记录。</p>"
+        source_label = NURTURE_SOURCE_LABELS.get(lead["source"], lead["source"] or "未填")
+        body = f"""
+<div class='toolbar'><div><a href='/admin/sales'>← 返回销售工作台</a><h1>{esc(lead['contact_name'] or lead['company'] or '待培育线索')}</h1>
+<div class='muted'>{esc(lead['company'])} <span class='badge pending_review'>待培育</span> <span class='badge'>{esc(stage_labels.get(lead['stage'], lead['stage'] or '新线索'))}</span></div></div></div>
+{notice_banner}
+{focus_html}
+<div class='summary-strip'><span>来源：{esc(source_label)}</span><span>负责人：{esc(lead['owner'] or '未分配')}</span><span>跟进：{esc(lead['next_follow_up'] or '未安排')}</span><span>登记：{esc(lead['created_at'])}</span></div>
+<div class='grid'><section class='card' id='lead-update'><h2>线索处理</h2>{closed_info}{assign_action}<form method='post' action='/admin/leads/{lead_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}'><label>销售备注</label><textarea name='note'>{esc(lead['note'])}</textarea><label>关闭原因（阶段设为「已关闭」时必填）</label><input name='close_reason' value='{esc(lead['close_reason'] or '')}' placeholder='例如：客户取消项目 / 已转向其他方案'><p><button>保存跟进状态</button></p></form></section>
+<section class='card'><h2>联系人与来源</h2><p><b>联系人：</b>{esc(lead['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(lead['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(lead['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(lead['contact_phone']) or '未提供'}</p><p><b>来源渠道：</b>{esc(source_label)}</p><p><b>需求摘要：</b>{esc(lead['note']) or '无'}</p><p class='field-state'>待培育线索尚未形成 RFQ；客户在官网提交询价后，销售可核对是否为同一采购需求（人工合并，系统不会自动合并）。</p></section></div>
+<section class='card' style='margin-top:18px' id='milestones'><div class='panel-title'><h2>跟进节点</h2><span class='muted'>技术确认 / 样品准备 / 报价准备</span></div><div class='simple-list'>{"".join(milestone_rows)}</div></section>
+<details class='detail-toggle' style='margin-top:18px'><summary>操作历史（最近 20 条）</summary><div class='muted-block'>{timeline_html}</div></details>
+"""
+        self.send_html(self.console_page(f"{lead['contact_name'] or lead['company'] or '待培育线索'} · 待培育线索", body, "sales"), 200)
 
     def admin_sales_detail(self, rfq_id: str, query: dict[str, list[str]]) -> None:
         rfq = self.db.get_rfq(self.tenant_id, rfq_id)
