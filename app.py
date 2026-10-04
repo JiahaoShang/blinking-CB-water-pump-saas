@@ -2816,9 +2816,12 @@ hr{border:0;border-top:1px solid var(--border-subtle);margin:16px 0}
 .console .side-tenant{display:flex;align-items:center;gap:8px;margin:12px 0;padding:8px 9px;border:1px solid var(--nav-line);border-radius:var(--r-md);background:var(--tenant-bg);font-size:12px;color:var(--sb-name)}
 .console .side-tenant .tenant-avatar{display:grid;place-items:center;width:22px;height:22px;flex:none;border-radius:var(--r-sm);background:var(--sb-avatar-bg);color:var(--sb-avatar-fg);font-size:11px;font-weight:600}
 .console .side-nav{flex:1;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;gap:1px;padding-top:2px}
+/* 磁吸放大的前提：导航项不参与 flex 收缩——否则放大的行高会被压回 min-content 地板（溢出交给滚动），效果被吃掉 */
+.console .side-nav>*{flex:none}
 .console .side-heading{font-size:10px;font-weight:600;letter-spacing:.1em;color:var(--nav-text-2);margin:16px 10px 6px}
 .console .side-heading:first-child{margin-top:4px}
-.console .side-link{position:relative;display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--r-md);color:var(--nav-text);font-size:13px;transition:.13s}
+/* 侧栏模块磁吸放大（CONSOLE_DOCK_JS）逐帧驱动行高与图标，transition 只保留配色属性，避免拖慢逐帧更新 */
+.console .side-link{position:relative;display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--r-md);color:var(--nav-text);font-size:13px;transition:background-color .13s ease,color .13s ease}
 .console .side-link .ic{opacity:.75}
 .console .side-link:hover{background:var(--nav-hover);color:var(--sb-hover-fg);text-decoration:none}
 .console .side-link:hover .ic{opacity:1}
@@ -3135,6 +3138,97 @@ CONSOLE_NAV_JS = """
 HOT_COUNT_KEYS = {"tasks", "sales"}
 
 
+CONSOLE_DOCK_JS = """
+// 侧栏模块磁吸放大（macOS Dock 手法竖向移植）：
+// 指针靠近哪一项，哪一项平滑放大——行高增长 + 图标弹性放大，下方条目被自然顶开；
+// 目标尺寸按指针到条目中心的距离线性衰减（与参考组件一致的磁吸手感），用弹簧物理平滑
+// （参数沿用参考组件默认值）；指针离开侧栏整列弹回。
+// 纯原生实现（本项目无 React/framer-motion）；触屏（无 hover 指针）与系统"减少动态效果"时不启用。
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll('.side-nav .side-link'));
+  if (!links.length) { return; }
+  var reduce = false, fine = false;
+  try {
+    reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    fine = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  } catch (error) { /* 无法判定媒体能力时不启用 */ }
+  if (reduce || !fine) { return; }
+
+  var DOCK_GROW = 12;   // 最近处行高增量（px）：36 → 48
+  var DOCK_RANGE = 120; // 磁吸影响半径（px）：超出此距离的条目保持原尺寸
+  var DOCK_ICON_GROW = 0.35; // 图标随放大系数增加的比例（1 → 1.35）
+  var DOCK_SPRING = { mass: 0.1, stiffness: 150, damping: 12 }; // 参考组件默认弹簧参数
+
+  var sidebar = document.getElementById('console-side');
+  if (!sidebar) { return; }
+  var items = links.map(function (link) {
+    var base = link.offsetHeight;
+    link.style.height = base + 'px';
+    return { link: link, icon: link.querySelector('.ic'), base: base, x: 0, v: 0, t: 0 };
+  });
+  var pointerY = null;
+  var raf = null;
+  var last = 0;
+
+  function computeTargets() {
+    for (var i = 0; i < items.length; i += 1) {
+      var item = items[i];
+      var rect = item.link.getBoundingClientRect();
+      var center = rect.top + rect.height / 2;
+      var distance = pointerY === null ? Infinity : Math.abs(pointerY - center);
+      // 与参考组件一致：半径内线性衰减，半径外为 0
+      item.t = distance >= DOCK_RANGE ? 0 : 1 - distance / DOCK_RANGE;
+    }
+  }
+
+  function frame(now) {
+    var dt = Math.min(Math.max((now - last) / 1000, 0.001), 0.1);
+    last = now;
+    var steps = Math.max(1, Math.ceil(dt / (1 / 120)));
+    var h = dt / steps;
+    var busy = false;
+    for (var i = 0; i < items.length; i += 1) {
+      var item = items[i];
+      for (var s = 0; s < steps; s += 1) {
+        var accel = (-DOCK_SPRING.stiffness * (item.x - item.t) - DOCK_SPRING.damping * item.v) / DOCK_SPRING.mass;
+        item.v += accel * h;
+        item.x += item.v * h;
+      }
+      if (Math.abs(item.x - item.t) > 0.001 || Math.abs(item.v) > 0.001) { busy = true; }
+      item.link.style.height = (item.base + DOCK_GROW * item.x) + 'px';
+      if (item.icon) { item.icon.style.transform = 'scale(' + (1 + DOCK_ICON_GROW * item.x) + ')'; }
+    }
+    raf = busy ? requestAnimationFrame(frame) : null;
+  }
+
+  function kick() {
+    if (raf !== null) { return; }
+    last = performance.now();
+    raf = requestAnimationFrame(frame);
+  }
+
+  sidebar.addEventListener('mousemove', function (event) {
+    pointerY = event.clientY;
+    computeTargets();
+    kick();
+  });
+  sidebar.addEventListener('mouseleave', function () {
+    pointerY = null;
+    computeTargets();
+    kick();
+  });
+  var scroller = sidebar.querySelector('.side-nav');
+  if (scroller) {
+    scroller.addEventListener('scroll', function () {
+      if (pointerY === null) { return; }
+      computeTargets();
+      kick();
+    });
+  }
+})();
+"""
+
+
 THEME_TOGGLE_SVG = (
     "<svg class='tt-sun' viewBox='0 0 24 24' aria-hidden='true'><circle cx='12' cy='12' r='4'/><path d='M12 2v2'/><path d='M12 20v2'/>"
     "<path d='m4.93 4.93 1.41 1.41'/><path d='m17.66 17.66 1.41 1.41'/><path d='M2 12h2'/><path d='M20 12h2'/>"
@@ -3262,6 +3356,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
 </div>
 <script>document.getElementById('console-menu').addEventListener('click',function(){{document.getElementById('console-side').classList.toggle('open');}});</script>
 <script>{CONSOLE_NAV_JS}</script>
+<script>{CONSOLE_DOCK_JS}</script>
 </body></html>"""
 
 
