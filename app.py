@@ -3386,10 +3386,16 @@ def parse_multipart(handler: BaseHTTPRequestHandler) -> dict[str, str | bytes]:
     return result
 
 
+# 演示工具端点（正式化清单 F-1～F-3）：只在演示模式下可用（demo_tools=True，默认关闭）。
+DEMO_TOOL_PATHS = {"/admin/products/seed", "/admin/products/seed-lowara", "/admin/demo/seed", "/admin/lowara/seed"}
+
+
 class Handler(BaseHTTPRequestHandler):
     db: Database
     # AI 调用边界：由 make_server 按显式模式装配（rules 时 ai 为空操作对象，不发外部请求）。
     ai: AIService | None = None
+    # 演示工具（页面按钮 + seed 端点）为部署级开关：默认关闭；唯一开启方式见 make_server / tools/demo/start_demo.py。
+    demo_tools = False
     tenant_id = "demo-tenant"
     actor = "demo-admin"
     user_role = "admin"
@@ -3444,7 +3450,7 @@ class Handler(BaseHTTPRequestHandler):
         self.user_id = user["id"]
         if path == "/admin":
             allowed = {"admin", "sales", "engineer"}
-        elif path.startswith("/admin/demo"):
+        elif path.startswith("/admin/demo") or path.startswith("/admin/lowara"):
             allowed = {"admin"}
         elif path.startswith("/admin/users"):
             allowed = {"admin"}
@@ -3592,6 +3598,11 @@ class Handler(BaseHTTPRequestHandler):
             tenant=(tenant["name"] if tenant else self.tenant_id),
             nav_counts=self.nav_badge_counts(),
         )
+
+    def tenant_display_name(self) -> str:
+        """控制台页眉与工具栏显示的当前企业名称（读 tenants 表）；无记录时回退租户标识。"""
+        row = self.db.conn.execute("SELECT name FROM tenants WHERE id=?", (self.tenant_id,)).fetchone()
+        return row["name"] if row and row["name"] else self.tenant_id
 
     def login_page(self, query: dict[str, list[str]], error: str = "") -> None:
         if self.current_user():
@@ -4456,6 +4467,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/admin/") and not self.authorize_admin(path, "POST"):
             return
+        if path in DEMO_TOOL_PATHS and not self.demo_tools:
+            # 正式化清单 F-1～F-3：演示工具为部署级开关，正式环境不提供（默认关闭）。
+            self.send_html(self.console_page("演示工具未启用", "<div class='error'>演示工具未启用：这是部署级的演示开关，只有通过 tools/demo/start_demo.py 启动的演示环境才可使用。</div>", ""), 403)
+            return
         buyer_match = re.fullmatch(r"/inquiry/([a-f0-9]+)/(message|confirm|ask|human-request|rfq|rfq/[a-f0-9]+/revise)", path)
         if buyer_match and not self.authorize_buyer_conversation(buyer_match.group(1)):
             return
@@ -4770,9 +4785,17 @@ class Handler(BaseHTTPRequestHandler):
         lang = query.get("lang", ["zh"])[0]
         products = self.db.list_products(self.tenant_id)
         notice = query.get("notice", [""])[0]
-        notice_html = "<div class='notice'>示例资料已登记为候选值，请逐个核对后核准，再发布到买方产品页。</div>" if notice == "demo" else ""
-        if notice == "lowara":
+        notice_html = ""
+        if self.demo_tools and notice == "demo":
+            notice_html = "<div class='notice'>示例资料已登记为候选值，请逐个核对后核准，再发布到买方产品页。</div>"
+        if self.demo_tools and notice == "lowara":
             notice_html = f"<div class='notice'>Lowara 资料已加载：新增 {esc(query.get('created', ['0'])[0])} 个内部演示型号。来源文件只登记元数据，外部再发布授权仍待确认。</div>"
+        demo_actions = (
+            "<div><form method='post' action='/admin/products/seed' class='inline'><button class='secondary'>导入两款示例水泵</button></form>"
+            " <form method='post' action='/admin/products/seed-lowara' class='inline'><button class='secondary'>加载 Lowara 资料</button></form></div>"
+            if self.demo_tools
+            else ""
+        )
         item_parts = []
         for product in products:
             published = self.db.get_published_version(self.tenant_id, product["id"])
@@ -4798,11 +4821,11 @@ class Handler(BaseHTTPRequestHandler):
             )
         items_html = "".join(item_parts) or "<div class='muted-block'>还没有产品，请先导入示例或新建型号。</div>"
         body = f"""
-<div class='toolbar'><div><h1>{'产品资料与发布' if lang == 'zh' else 'Products & publishing'}</h1><div class='muted'>企业：示例水泵企业（演示） · 当前操作员：管理员</div></div><div><form method='post' action='/admin/products/seed' class='inline'><button class='secondary'>导入两款示例水泵</button></form> <form method='post' action='/admin/products/seed-lowara' class='inline'><button class='secondary'>加载 Lowara 资料</button></form></div></div>
+<div class='toolbar'><div><h1>{'产品资料与发布' if lang == 'zh' else 'Products & publishing'}</h1><div class='muted'>企业：{esc(self.tenant_display_name())} · 当前操作员：管理员</div></div>{demo_actions}</div>
 {notice_html}
 <section class='card'><div class='panel-title'><h2>产品列表</h2><span class='muted'>选择产品后完成核对与发布</span></div><div class='simple-list'>{items_html}</div>
 <details class='detail-toggle'><summary>新建产品型号</summary><div><form method='post' action='/admin/products'><label>型号 *</label><input name='model' placeholder='例如 CB-80A' required><label>产品名称</label><input name='name' placeholder='买方页面显示名称'><label>主要用途</label><textarea name='use_case' placeholder='例如清水循环、化工介质输送'></textarea><p><button>创建草稿</button></p></form></div></details>
-<details class='detail-toggle'><summary>查看流程说明</summary><div class='muted-block'>产品资料登记 → 来源文件 → 字段候选值 → 人工核准 → 版本发布 → 固定买方页面。未核准字段不会进入公开页；重新编辑已发布字段会回到待核准状态。Lowara 数据仅用于内部 Demo，外部再发布授权待确认。</div></details></section>
+<details class='detail-toggle'><summary>查看流程说明</summary><div class='muted-block'>产品资料登记 → 来源文件 → 字段候选值 → 人工核准 → 版本发布 → 固定买方页面。未核准字段不会进入公开页；重新编辑已发布字段会回到待核准状态。对外发布前须确认资料归属与再发布授权；未确认授权的内容不会进入公开页。</div></details></section>
 """
         self.send_html(self.console_page("产品资料与发布", body, "products", lang=lang), 200)
 
@@ -5161,10 +5184,16 @@ class Handler(BaseHTTPRequestHandler):
         role_labels = {"admin": "管理员", "sales": "销售", "engineer": "工程师"}
         role_label = role_labels.get(self.user_role, self.user_role)
         demo_notice = ""
-        if query.get("notice", [""])[0] == "demo":
+        if self.demo_tools and query.get("notice", [""])[0] == "demo":
             demo_notice = f"<div class='notice'>演示数据已加载：新增 RFQ {esc(query.get('rfqs', ['0'])[0])} 条、人工任务 {esc(query.get('tasks', ['0'])[0])} 条；重复加载不会复制已有记录。</div>"
-        elif query.get("notice", [""])[0] == "lowara":
+        elif self.demo_tools and query.get("notice", [""])[0] == "lowara":
             demo_notice = f"<div class='notice'>Lowara 资料已加载：新增 {esc(query.get('products', ['0'])[0])} 个内部演示型号；来源文件只登记元数据，外部再发布授权仍待确认。</div>"
+        demo_actions = (
+            "<div><form method='post' action='/admin/demo/seed' class='inline'><button class='secondary'>加载演示数据</button></form>"
+            " <form method='post' action='/admin/lowara/seed' class='inline'><button class='secondary'>加载 Lowara 资料</button></form></div>"
+            if self.demo_tools
+            else ""
+        )
         cards = "".join(
             f"<div class='card'><div class='muted'>{label}</div><div class='metric'>{value}</div><div class='field-state'>{detail}</div></div>"
             for label, value, detail in (
@@ -5219,7 +5248,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         ai_section = ai_status_section(self.db, self.ai, self.tenant_id)
         body = f"""
-<div class='toolbar'><div><h1>管理概览</h1><div class='muted'>当前企业：示例水泵企业（演示） · 当前账号：{esc(self.actor)}（{role_label}）</div></div><div><form method='post' action='/admin/demo/seed' class='inline'><button class='secondary'>加载演示数据</button></form> <form method='post' action='/admin/lowara/seed' class='inline'><button class='secondary'>加载 Lowara 资料</button></form></div></div>
+<div class='toolbar'><div><h1>管理概览</h1><div class='muted'>当前企业：{esc(self.tenant_display_name())} · 当前账号：{esc(self.actor)}（{role_label}）</div></div>{demo_actions}</div>
 {demo_notice}
 {focus_html}
 <div class='grid'><section class='card'><div class='panel-title'><h2>待处理事项</h2><span class='muted'>只显示当前岗位需要行动的事项</span></div><div class='simple-list'>{todo_html}</div></section>
@@ -5428,7 +5457,7 @@ class Handler(BaseHTTPRequestHandler):
             )
         items_html = "".join(items) or "<div class='muted-block'>暂无销售线索。买方提交 RFQ 后会进入这里。</div>"
         body = f"""
-<div class='toolbar'><div><h1>销售工作台</h1><div class='muted'>统一查看 RFQ、需求、推荐、问答和人工任务；当前企业：示例水泵企业（演示）</div></div><a class='button secondary' href='/admin/rfqs'>RFQ 原始记录</a></div>
+<div class='toolbar'><div><h1>销售工作台</h1><div class='muted'>统一查看 RFQ、需求、推荐、问答和人工任务；当前企业：{esc(self.tenant_display_name())}</div></div><a class='button secondary' href='/admin/rfqs'>RFQ 原始记录</a></div>
 <section class='card'><div class='panel-title'><h2>线索列表</h2><span class='muted'>领取或接手的线索从这里打开处理</span></div><div class='simple-list'>{items_html}</div></section>
 """
         self.send_html(self.console_page("销售工作台", body, "sales"), 200)
@@ -5699,15 +5728,19 @@ def make_server(
     host: str = "127.0.0.1",
     port: int = 8000,
     ai_config: AIConfig | None = None,
+    demo_tools: bool = False,
 ) -> ThreadingHTTPServer:
     database = Database(db_path)
     # 模式显式：不传配置时读取环境变量（默认 rules）；deepseek 缺 Key 在这里明确失败。
     config = ai_config if ai_config is not None else AIConfig.from_env()
     ai_service = AIService(config)
+    # 演示工具（页面按钮 + seed 端点）为部署级开关：默认关闭；唯一开启方式 = tools/demo/start_demo.py 传入 demo_tools=True。
+    demo_enabled = bool(demo_tools)
 
     class AppHandler(Handler):
         db = database
         ai = ai_service
+        demo_tools = demo_enabled
 
     return ThreadingHTTPServer((host, port), AppHandler)
 

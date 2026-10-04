@@ -56,7 +56,8 @@ def main() -> None:
     if args.check:
         return
 
-    server = make_server(db_path, host=args.host, port=args.port)
+    # 演示工具（页面按钮与 seed 端点）唯一的开启入口：只有本脚本以演示模式启动服务。
+    server = make_server(db_path, host=args.host, port=args.port, demo_tools=True)
     if not args.no_open:
         webbrowser.open(admin_url)
         webbrowser.open(buyer_url)
