@@ -89,6 +89,8 @@ PRODUCT_PAGE_GROUPS = (
 # to this model (exact_model) or its series (series) may be approved for public
 # download; unfiled documents never appear on a public page.
 SOURCE_SCOPES = {"exact_model": "本型号", "series": "系列", "unknown": "归属待核对"}
+# V1-02 附件三级可见性：「可公开」＝归属已确认并通过公开下载许可（进入公开版本）；默认「仅内部」不上公开页；「禁止使用」的文件不得进入新买方页面、新回答引用与公开下载。
+SOURCE_USAGE_LEVELS = {"internal": "仅内部", "restricted": "禁止使用"}
 # 跨站会话交接（一次性交接码）：官网聊天（来源 A）与平台产品页（来源 B）不同来源时，
 # 由持有会话凭据的聊天方出具短时、一次性、绑定站点与型号的交接码；产品页在平台自身
 # 来源上用它换取同一会话的新凭据。码与凭据都只存摘要（SHA-256）；长期会话凭据绝不
@@ -334,6 +336,7 @@ class Database:
                 processing_status TEXT NOT NULL DEFAULT 'registered',
                 scope TEXT NOT NULL DEFAULT 'unknown',
                 scope_revision INTEGER NOT NULL DEFAULT 0,
+                usage TEXT NOT NULL DEFAULT 'internal',
                 extraction_json TEXT NOT NULL DEFAULT '[]',
                 extraction_note TEXT NOT NULL DEFAULT '',
                 processed_at TEXT,
@@ -636,6 +639,7 @@ class Database:
         for column, definition in (
             ("scope", "TEXT NOT NULL DEFAULT 'unknown'"),
             ("scope_revision", "INTEGER NOT NULL DEFAULT 0"),
+            ("usage", "TEXT NOT NULL DEFAULT 'internal'"),
             ("extraction_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("extraction_note", "TEXT NOT NULL DEFAULT ''"),
             ("processed_at", "TEXT"),
@@ -991,25 +995,33 @@ class Database:
         }
         allowed = self.public_source_ids(tenant_id, product_id)
         live_state = {
-            row["id"]: (row["scope"], row["scope_revision"])
+            row["id"]: (row["scope"], row["scope_revision"], row["usage"])
             for row in self.conn.execute(
-                "SELECT id, scope, scope_revision FROM source_documents WHERE tenant_id=? AND product_id=?",
+                "SELECT id, scope, scope_revision, usage FROM source_documents WHERE tenant_id=? AND product_id=?",
                 (tenant_id, product_id),
             )
         }
-        return {
-            source_id
-            for source_id, snapshot in snapshot_state.items()
-            if source_id in allowed and live_state.get(source_id) == snapshot
-        }
+        result = set()
+        for source_id, snapshot in snapshot_state.items():
+            live = live_state.get(source_id)
+            if (
+                source_id in allowed
+                and live is not None
+                and (live[0], live[1]) == snapshot
+                and live[2] != "restricted"
+            ):
+                result.add(source_id)
+        return result
 
     def allow_public_source(self, tenant_id: str, product_id: str, source_id: str, actor: str) -> None:
         source = self.conn.execute(
-            "SELECT id, storage_path, scope FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
+            "SELECT id, storage_path, scope, usage FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
             (tenant_id, product_id, source_id),
         ).fetchone()
         if not source or not source["storage_path"]:
             raise ValueError("需要已保存的来源文件才能开放下载")
+        if (source["usage"] or "internal") == "restricted":
+            raise ValueError("该文件已被标记禁止使用；先恢复可用后才能开放公开下载")
         if source["scope"] == "unknown":
             raise ValueError("请先确认文件归属（本型号或系列），再开放公开下载；归属未核对的文件不上公开页")
         self.conn.execute(
@@ -2514,6 +2526,45 @@ class Database:
         self.conn.commit()
         return {"changed": True, "public_permission_revoked": public_permission_revoked}
 
+    def set_source_usage(self, tenant_id: str, product_id: str, source_id: str, usage: str, actor: str = "demo-admin") -> dict[str, bool]:
+        """V1-02 附件三级可见性：在「仅内部（默认）」与「禁止使用」之间切换。
+
+        与归属修订同理：任何真实变更都推进 ``scope_revision``，旧快照的捕获值因此失配，
+        不会再对外提供该文件（重新公开需重新确认许可并发布新版本）。标记「禁止使用」
+        时立即撤销公开下载许可；恢复「仅内部」不自动恢复许可。
+        """
+        if usage not in SOURCE_USAGE_LEVELS:
+            raise ValueError("文件可见性层级无效")
+        source = self.conn.execute(
+            "SELECT * FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
+            (tenant_id, product_id, source_id),
+        ).fetchone()
+        if not source:
+            raise ValueError("来源文件不属于当前产品")
+        previous = source["usage"] or "internal"
+        if usage == previous:
+            return {"changed": False, "public_permission_revoked": False}
+        public_ids = self.public_source_ids(tenant_id, product_id)
+        public_permission_revoked = False
+        if usage == "restricted" and source_id in public_ids:
+            self.conn.execute(
+                "DELETE FROM public_source_permissions WHERE tenant_id=? AND product_id=? AND source_id=?",
+                (tenant_id, product_id, source_id),
+            )
+            public_permission_revoked = True
+            self._audit(
+                tenant_id, "source_document", source_id, "public_permission_revoked_on_usage_change",
+                actor, f"{previous} -> {usage}",
+            )
+        new_revision = int(source["scope_revision"] or 0) + 1
+        self.conn.execute(
+            "UPDATE source_documents SET usage=?, scope_revision=? WHERE id=?",
+            (usage, new_revision, source_id),
+        )
+        self._audit(tenant_id, "source_document", source_id, "usage_changed", actor, f"{previous} -> {usage} (可见性修订 r{new_revision})")
+        self.conn.commit()
+        return {"changed": True, "public_permission_revoked": public_permission_revoked}
+
     def rerun_source_extraction(self, tenant_id: str, product_id: str, source_id: str, actor: str = "demo-admin") -> None:
         source = self.conn.execute(
             "SELECT * FROM source_documents WHERE tenant_id=? AND product_id=? AND id=?",
@@ -2723,8 +2774,15 @@ class Database:
             raise ValueError("只有已核准产品才能发布")
         fields = self.get_fields(tenant_id, product_id)
         approved_fields = [field for field in fields if field["state"] == "approved" and field["value"].strip() and field["source_document_id"] and field["source_location"].strip()]
+        # V1-02：来源被标记「禁止使用」的已核准事实不得进入新发布版本（旧版本快照不受影响）。
+        restricted_ids = {
+            source["id"] for source in self.get_sources(tenant_id, product_id)
+            if (source["usage"] or "internal") == "restricted"
+        }
+        usage_blocked = [field for field in approved_fields if field["source_document_id"] in restricted_ids]
+        approved_fields = [field for field in approved_fields if field["source_document_id"] not in restricted_ids]
         if not approved_fields:
-            raise ValueError("没有可公开的已核准产品事实")
+            raise ValueError("没有可公开的已核准产品事实" if not usage_blocked else "已核准字段的来源均被禁止使用，无法发布")
         missing = [key for key in REQUIRED_FIELDS if not any(field["field_key"] == key for field in approved_fields)]
         previous = self.get_published_version(tenant_id, product_id)
         version = (previous["version"] if previous else 0) + 1
@@ -2742,6 +2800,7 @@ class Database:
             }
             for source in self.get_sources(tenant_id, product_id)
             if source["id"] in public_ids and source["storage_path"] and source["scope"] in ("exact_model", "series")
+            and (source["usage"] or "internal") != "restricted"
         ]
         snapshot = {
             "product": {"model": product["model"], "name": product["name"], "use_case": product["use_case"], "slug": product["slug"]},
@@ -2757,7 +2816,7 @@ class Database:
             (secrets.token_hex(12), tenant_id, product_id, version, json.dumps(snapshot, ensure_ascii=False), actor, now_iso(), snapshot["published_at"]),
         )
         self.conn.execute("UPDATE products SET status='published', updated_at=? WHERE tenant_id=? AND id=?", (now_iso(), tenant_id, product_id))
-        self._audit(tenant_id, "product", product_id, "published", actor, f"version={version}")
+        self._audit(tenant_id, "product", product_id, "published", actor, f"version={version}; usage_blocked={len(usage_blocked)}")
         self.conn.commit()
         return version
 
@@ -3244,6 +3303,20 @@ def guard_answer_field_selection(question: str, selected: str | None, available_
     return None
 
 
+RESTRICTED_SOURCE_ANSWER_REASON = "来源文件已被标记禁止使用；按现有规则不对外引用"
+
+
+def source_is_restricted(db: Database, tenant_id: str, field: dict) -> bool:
+    """该字段的来源文件是否已被标记「禁止使用」（据此后新回答不得引用其内容）。"""
+    source_id = field.get("source_document_id")
+    if not source_id:
+        return False
+    row = db.conn.execute(
+        "SELECT usage FROM source_documents WHERE tenant_id=? AND id=?", (tenant_id, source_id)
+    ).fetchone()
+    return bool(row) and (row["usage"] or "internal") == "restricted"
+
+
 def build_record_answer(
     db: Database,
     tenant_id: str,
@@ -3297,6 +3370,8 @@ def answer_from_approved_material(
             break
     if not selected_key or not fields.get(selected_key) or not str(fields[selected_key].get("value", "")).strip():
         return "needs_human", NO_APPROVED_BASIS_ANSWER, product_id, version["id"], [], "资料缺少对应字段或问题需要工程判断"
+    if source_is_restricted(db, tenant_id, fields[selected_key]):
+        return "needs_human", NO_APPROVED_BASIS_ANSWER, product_id, version["id"], [], RESTRICTED_SOURCE_ANSWER_REASON
 
     answer, citation = build_record_answer(db, tenant_id, selected_key, fields[selected_key], version)
     return "grounded", answer, product_id, version["id"], [citation], ""
@@ -3407,6 +3482,8 @@ def answer_question_with_mode(
     selected = guard_answer_field_selection(question, selected, {item["key"] for item in allowed})
     if not selected or not fields.get(selected) or not str(fields[selected].get("value", "")).strip():
         return "needs_human", NO_APPROVED_BASIS_ANSWER, product_id, version["id"], [], "资料缺少对应字段或问题需要工程判断"
+    if source_is_restricted(db, tenant_id, fields[selected]):
+        return "needs_human", NO_APPROVED_BASIS_ANSWER, product_id, version["id"], [], RESTRICTED_SOURCE_ANSWER_REASON
     answer, citation = build_record_answer(db, tenant_id, selected, fields[selected], version)
     return "grounded", answer, product_id, version["id"], [citation], ""
 
@@ -4193,6 +4270,7 @@ AUDIT_ACTION_LABELS = {
     "updated_candidate": "更新候选", "field_approved": "核准字段", "field_rejected": "驳回字段", "field_reopened": "回到候选",
     "review_finalized": "完成核对", "published": "发布版本", "withdrawn": "下架",
     "allowed_public_download": "开放下载", "revoked_public_download": "撤销下载",
+    "usage_changed": "更新文件可见性", "public_permission_revoked_on_usage_change": "可见性变更撤销公开",
     "public_download_blocked_hash_mismatch": "拦截下载（哈希不符）", "modules_updated": "模块授权",
     "exported": "导出数据", "completed": "完成", "sent": "记录发送", "discarded": "废弃",
     "milestone_completed": "节点完成", "milestone_reopened": "节点重开",
@@ -5676,7 +5754,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self.redirect(f"/admin/products/{product_id}?notice=source")
                 return
-            match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources/([a-f0-9]+)/(allow-public|revoke-public|scope|extract)", path)
+            match = re.fullmatch(r"/admin/products/([a-f0-9]+)/sources/([a-f0-9]+)/(allow-public|revoke-public|scope|extract|usage)", path)
             if match:
                 product_id, source_id, action = match.groups()
                 if action == "allow-public":
@@ -5687,6 +5765,12 @@ class Handler(BaseHTTPRequestHandler):
                     scope_result = self.db.set_source_scope(self.tenant_id, product_id, source_id, str(form.get("scope", "")), self.actor)
                     if scope_result.get("public_permission_revoked"):
                         action = "scope-revoked"
+                elif action == "usage":
+                    usage_result = self.db.set_source_usage(self.tenant_id, product_id, source_id, str(form.get("usage", "")), self.actor)
+                    if usage_result.get("public_permission_revoked"):
+                        action = "usage-revoked"
+                    elif not usage_result.get("changed"):
+                        action = "usage-unchanged"
                 else:
                     self.db.rerun_source_extraction(self.tenant_id, product_id, source_id, self.actor)
                 self.redirect(f"/admin/products/{product_id}?notice={action}")
@@ -5798,6 +5882,9 @@ class Handler(BaseHTTPRequestHandler):
             "source-permission": "文件公开权限已更新；新文件在下次发布后才会进入买方页。",
             "scope": "文件归属已更新。",
             "scope-revoked": "文件归属已更新；原公开许可已自动撤销，旧版本不再展示该文件。如需重新公开，请重新确认许可并发布新版本。",
+            "usage": "文件可见性已更新。",
+            "usage-revoked": "文件已标记禁止使用；原公开许可已自动撤销。新回答不再引用该文件，下次发布也不会包含其字段。",
+            "usage-unchanged": "文件可见性未变化。",
             "extract": "文件已按内容重新解析，结果在来源区显示。",
             "field": "字段已保存为候选值，需逐项核准或驳回后才能完成核对。",
             "field-approve": "字段已核准。",
@@ -5894,13 +5981,21 @@ class Handler(BaseHTTPRequestHandler):
                 f"<form method='post' action='/admin/products/{product_id}/sources/{source['id']}/scope' class='inline'>"
                 f"<select name='scope'>{scope_options}</select> <button class='secondary'>保存归属</button></form>"
             )
-            if source["storage_path"]:
+            source_usage = source["usage"] or "internal"
+            if source_usage == "restricted":
+                extract_button = ""
+                perm_html = (
+                    "<span class='field-state'>已标记禁止使用：不进入买方页、不参与新回答引用"
+                    + ("；当前公开版本中的该文件已停止提供" if source["id"] in published_source_ids else "")
+                    + "</span>"
+                )
+            elif source["storage_path"]:
                 extract_button = f"<form method='post' action='/admin/products/{product_id}/sources/{source['id']}/extract' class='inline'><button class='secondary'>按内容重新解析</button></form>"
                 if source["id"] in public_source_ids:
                     if source["id"] in servable_source_ids:
                         inclusion_html = " <span class='field-state'>已纳入当前公开版本</span>"
                     elif source["id"] in published_source_ids:
-                        inclusion_html = " <span class='field-state'>当前版本快照已失效（归属修正过）；重新公开需发布新版本</span>"
+                        inclusion_html = " <span class='field-state'>当前版本快照已失效（文件归属或可见性修正过）；重新公开需发布新版本</span>"
                     else:
                         inclusion_html = " <span class='field-state'>将在下次发布后收录</span>"
                     perm_html = (
@@ -5917,16 +6012,39 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 extract_button = ""
                 perm_html = "<span class='field-state'>无文件内容，仅登记元数据；参数请人工录入并标注位置</span>"
+            ref_rows = self.db.conn.execute(
+                "SELECT COUNT(*) AS total, SUM(CASE WHEN state='approved' THEN 1 ELSE 0 END) AS approved FROM product_fields WHERE tenant_id=? AND product_id=? AND source_document_id=?",
+                (self.tenant_id, product_id, source["id"]),
+            ).fetchone()
+            ref_total = int(ref_rows["total"] or 0)
+            ref_approved = int(ref_rows["approved"] or 0)
+            if source_usage == "restricted":
+                usage_badge = "<span class='badge danger'>禁止使用</span>"
+            elif source["id"] in public_source_ids:
+                usage_badge = "<span class='badge approved'>可公开</span>"
+            else:
+                usage_badge = "<span class='badge'>仅内部</span>"
+            if source_usage == "restricted":
+                usage_form = f"<form method='post' action='/admin/products/{product_id}/sources/{source['id']}/usage' class='inline'><input type='hidden' name='usage' value='internal'><button class='secondary'>恢复可用</button></form>"
+                restrict_hint = (
+                    f"<p class='field-state' style='margin:6px 0 0'>该文件当前为 {ref_total} 个字段的来源（其中已核准 {ref_approved} 个）；标记禁止使用后，新回答不再引用，下次发布不会包含这些字段。</p>"
+                    if ref_total else ""
+                )
+            else:
+                usage_form = f"<form method='post' action='/admin/products/{product_id}/sources/{source['id']}/usage' class='inline'><input type='hidden' name='usage' value='restricted'><button class='danger'>标记禁止使用</button></form>"
+                restrict_hint = ""
             source_blocks.append(
                 "<div class='source' style='display:block'><div style='display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap'>"
-                f"<span><b>{esc(source['filename'])}</b><br><span class='muted'>{esc(source['file_type'])} · {esc(source['source_location'])}</span></span>"
+                f"<span><b>{esc(source['filename'])}</b> {usage_badge}<br><span class='muted'>{esc(source['file_type'])} · {esc(source['source_location'])}</span></span>"
                 f"<span class='field-state'>{esc(processing_labels.get(source['processing_status'], source['processing_status']))} · 归属：{esc(SOURCE_SCOPES.get(source['scope'], source['scope']))}"
                 + (f" · 归属修订 r{source['scope_revision']}" if source["scope_revision"] else "")
+                + (f" · 引用字段 {ref_total}" if ref_total else "")
                 + (f" · 校验码 {esc((source['sha256'] or '')[:10])}…" if source["sha256"] else "")
                 + "</span></div>"
                 + (f"<p class='field-state' style='margin:6px 0 0'>{esc(source['extraction_note'])}</p>" if source["extraction_note"] else "")
                 + extraction_html
-                + f"<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>{scope_form}{extract_button}{perm_html}</div>"
+                + restrict_hint
+                + f"<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>{scope_form}{usage_form}{extract_button}{perm_html}</div>"
                 + "</div>"
             )
         source_rows = "".join(source_blocks) or "<p class='muted'>还没有来源资料。</p>"
@@ -5981,7 +6099,7 @@ class Handler(BaseHTTPRequestHandler):
 {missing_html}
 <section class='card' id='fields'><div class='panel-title'><h2>字段核对（逐项）</h2><span class='muted'>待处理 {pending_count} 项</span></div>{pending_html}<p class='muted'>候选字段需逐项核准或驳回；驳回保留原值并记录原因。已核准关键字段被修改后会回到待核对，需重新核准并发布新版本；缺项不会被推测值填充。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th><th>操作</th></tr></thead><tbody>{field_table}</tbody></table><details class='detail-toggle'><summary>手动补充 / 修改字段值</summary><div><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置 *</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></div></details></section>
 <section class='card' style='margin-top:18px'><div class='panel-title'><h2>发布与版本</h2><span class='muted'>{version_line}</span></div><div class='actions' style='display:flex;gap:8px;flex-wrap:wrap'>{action_buttons}</div><p class='muted'>发布将冻结当前已核准事实与已开放公开文件清单；撤回后买方页不可访问，已提交的询价保留原版本快照。</p></section>
-<section class='card' style='margin-top:18px' id='sources'><h2>登记来源资料</h2>{source_rows}<p class='muted'>文件默认不对外下载。上传后的文本/CSV 会按内容识别已知字段标签；PDF、图片、CAD 等不支持的格式会明确失败，请人工录入。开放公开下载前必须确认文件归属。</p><hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>MARKDOWN</option><option>TXT</option><option>IMAGE</option><option>DXF</option><option>STEP</option><option>OTHER</option></select></div><div><label>文件归属 *</label><select name='scope' required><option value=''>请选择文件归属</option><option value='exact_model'>本型号专属文件</option><option value='series'>系列级资料（非本型号专属）</option><option value='unknown'>归属待核对（不上公开页）</option></select></div><div class='full'><label>原文位置 *</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section>
+<section class='card' style='margin-top:18px' id='sources'><h2>登记来源资料</h2>{source_rows}<p class='muted'>文件默认仅内部使用、不对外下载；可见性分「仅内部 / 禁止使用」，禁止使用的文件不进入买方页、不参与新回答引用。上传后的文本/CSV 会按内容识别已知字段标签；PDF、图片、CAD 等不支持的格式会明确失败，请人工录入。开放公开下载前必须确认文件归属。</p><hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>MARKDOWN</option><option>TXT</option><option>IMAGE</option><option>DXF</option><option>STEP</option><option>OTHER</option></select></div><div><label>文件归属 *</label><select name='scope' required><option value=''>请选择文件归属</option><option value='exact_model'>本型号专属文件</option><option value='series'>系列级资料（非本型号专属）</option><option value='unknown'>归属待核对（不上公开页）</option></select></div><div class='full'><label>原文位置 *</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section>
 <details class='detail-toggle' style='margin-top:18px'><summary>查看产品基本信息</summary><div class='muted-block'><p><b>主要用途：</b>{esc(product['use_case']) or '未填写'}</p><p><b>固定买方链接：</b>{('/products/' + esc(product['slug'])) if published_version else '发布后生成'}</p><p>型号是产品通用事实；买方本次工况将在后续会话中单独保存，不写回这里。</p><p>核准动作按字段逐项执行；未被逐项核准或已被驳回的内容不会进入匹配、问答和公开页。</p></div></details>
 """
         self.send_html(self.console_page(f"{product['model']} · 字段核对", body, "products"), 200)
