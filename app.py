@@ -6298,9 +6298,9 @@ class Handler(BaseHTTPRequestHandler):
                 for filename in diff["files_removed"]:
                     detail_items += f"<li>公开文件移除：{esc(filename)}</li>"
                 for label in diff["missing_added"]:
-                    detail_items += f"<li>缺项新增：{esc(label)}</li>"
+                    detail_items += f"<li>缺项新增：{esc(FIELD_LABELS.get(label, label))}</li>"
                 for label in diff["missing_resolved"]:
-                    detail_items += f"<li>缺项补齐：{esc(label)}</li>"
+                    detail_items += f"<li>缺项补齐：{esc(FIELD_LABELS.get(label, label))}</li>"
                 detail = f"<details><summary>查看逐项变化</summary><ul style='margin:6px 0 0 18px;padding:0'>{detail_items}</ul></details>" if detail_items else ""
                 version_blocks.append(
                     f"<div class='source' style='display:block'><b>{header}</b><br><span class='field-state'>与上一版对比：{summary}</span>{detail}</div>"
