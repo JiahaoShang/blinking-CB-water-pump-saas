@@ -140,7 +140,7 @@ class NurtureLeadTests(unittest.TestCase):
         fields = {
             "contact_name": "王工", "company": "华东水务工程公司",
             "contact_email": "wang@huadong.example", "contact_phone": "",
-            "source": "expo", "note": "展会接触，Q4 招标",
+            "source": "expo", "note": "展会接触，Q4 招标", "consent_confirmed": "1",
         }
         fields.update(overrides)
         return form_request(self.server, "POST", "/admin/sales/nurture", fields, self.sales_cookie)
@@ -148,14 +148,14 @@ class NurtureLeadTests(unittest.TestCase):
     def test_create_nurture_validation_and_audit(self):
         # 校验：来源无效 / 无联系方式 / 无称呼公司
         with self.assertRaises(ValueError):
-            self.db.create_nurture_lead("demo-tenant", "x", "王工", "公司", "a@b.c", "", "bad-source", "")
+            self.db.create_nurture_lead("demo-tenant", "x", "王工", "公司", "a@b.c", "", "bad-source", "", consent_confirmed=True)
         with self.assertRaises(ValueError):
-            self.db.create_nurture_lead("demo-tenant", "x", "王工", "公司", "", "", "expo", "")
+            self.db.create_nurture_lead("demo-tenant", "x", "王工", "公司", "", "", "expo", "", consent_confirmed=True)
         with self.assertRaises(ValueError):
-            self.db.create_nurture_lead("demo-tenant", "x", "", "", "a@b.c", "", "expo", "")
+            self.db.create_nurture_lead("demo-tenant", "x", "", "", "a@b.c", "", "expo", "", consent_confirmed=True)
         lead_id = self.db.create_nurture_lead(
             "demo-tenant", "n-sales@example.invalid", "李工", "北方泵业", "", "+86 138 0000 0000", "phone", "电话询价"
-        )
+        , consent_confirmed=True)
         lead = self.db.get_lead("demo-tenant", lead_id)
         self.assertEqual((lead["kind"], lead["stage"], lead["owner"]), ("nurture", "new", "n-sales@example.invalid"))
         self.assertEqual(lead["rfq_id"], None)
@@ -238,7 +238,7 @@ class NurtureLeadTests(unittest.TestCase):
         )
         self.assertEqual(status, 403)
         # 员工（非管理员）不能分配
-        lead_id = self.db.create_nurture_lead("demo-tenant", "n-sales@example.invalid", "赵工", "南方装备", "z@s.example", "", "visit", "")
+        lead_id = self.db.create_nurture_lead("demo-tenant", "n-sales@example.invalid", "赵工", "南方装备", "z@s.example", "", "visit", "", consent_confirmed=True)
         status, _, _ = form_request(
             self.server, "POST", f"/admin/leads/{lead_id}/assign", {"owner_email": "n-sales@example.invalid"}, self.sales_cookie
         )
@@ -265,7 +265,7 @@ class NurtureLeadTests(unittest.TestCase):
         self.assertEqual(status, 303)
         self.assertIn(f"/admin/sales/{rfq_lead['rfq_id']}", headers["Location"])
         # 已合并的待培育线索不出现在列表
-        lead_id = self.db.create_nurture_lead("demo-tenant", "n-sales@example.invalid", "合并测试", "测试公司", "m@t.example", "", "other", "")
+        lead_id = self.db.create_nurture_lead("demo-tenant", "n-sales@example.invalid", "合并测试", "测试公司", "m@t.example", "", "other", "", consent_confirmed=True)
         self.db.conn.execute("UPDATE leads SET merged_into='primary-x', merged_at='2026-10-05' WHERE id=?", (lead_id,))
         self.db.conn.commit()
         self.assertNotIn(lead_id, [row["id"] for row in self.db.list_nurture_leads("demo-tenant")])
@@ -312,13 +312,13 @@ class DuplicateMergeTests(unittest.TestCase):
         # 同邮箱的待培育线索 → 双向提示
         nurture_id = self.db.create_nurture_lead(
             "demo-tenant", "m-sales@example.invalid", "疑似同一买家", "新公司", rfq["contact_email"], "", "expo", ""
-        )
+        , consent_confirmed=True)
         hints = self.db.find_duplicate_lead_hints("demo-tenant", nurture_id)
         self.assertEqual([(h["kind"], h["matched_by"]) for h in hints], [("rfq", ["同邮箱"])])
         reverse = self.db.find_duplicate_lead_hints("demo-tenant", rfq_lead["id"])
         self.assertTrue(any(h["id"] == nurture_id and h["matched_by"] == ["同邮箱"] for h in reverse))
         # 无重合 → 无提示；自身不出现
-        solo_id = self.db.create_nurture_lead("demo-tenant", "m-sales@example.invalid", "路人", "无关公司", "solo@x.example", "", "other", "")
+        solo_id = self.db.create_nurture_lead("demo-tenant", "m-sales@example.invalid", "路人", "无关公司", "solo@x.example", "", "other", "", consent_confirmed=True)
         self.assertEqual(self.db.find_duplicate_lead_hints("demo-tenant", solo_id), [])
         self.assertTrue(all(h["id"] != nurture_id for h in self.db.find_duplicate_lead_hints("demo-tenant", nurture_id)))
         # 区块渲染：管理员有合并表单；员工没有
@@ -329,8 +329,8 @@ class DuplicateMergeTests(unittest.TestCase):
         self.assertNotIn("确认合并", section_sales)
 
     def test_merge_flow_validation_and_audit(self):
-        primary = self.db.create_nurture_lead("demo-tenant", "m-sales@example.invalid", "主线索", "甲公司", "p@x.example", "", "expo", "")
-        secondary = self.db.create_nurture_lead("demo-tenant", "owner-2@example.invalid", "次级线索", "甲公司", "s@x.example", "", "expo", "")
+        primary = self.db.create_nurture_lead("demo-tenant", "m-sales@example.invalid", "主线索", "甲公司", "p@x.example", "", "expo", "", consent_confirmed=True)
+        secondary = self.db.create_nurture_lead("demo-tenant", "owner-2@example.invalid", "次级线索", "甲公司", "s@x.example", "", "expo", "", consent_confirmed=True)
         # 归属转移分支：主线索清空负责人 → 合并后继承次级的负责人
         self.db.conn.execute("UPDATE leads SET owner='' WHERE id=?", (primary,))
         self.db.conn.commit()
@@ -355,7 +355,7 @@ class DuplicateMergeTests(unittest.TestCase):
         # 边界：重复合并 / 自合并 / 同询价 / 跨租户
         with self.assertRaises(ValueError):
             self.db.merge_leads("demo-tenant", primary, secondary, "demo-admin@example.invalid")
-        third = self.db.create_nurture_lead("demo-tenant", "m-sales@example.invalid", "第三条", "乙公司", "t@x.example", "", "other", "")
+        third = self.db.create_nurture_lead("demo-tenant", "m-sales@example.invalid", "第三条", "乙公司", "t@x.example", "", "other", "", consent_confirmed=True)
         with self.assertRaises(ValueError):
             self.db.merge_leads("demo-tenant", third, third, "demo-admin@example.invalid")
         rfq_lead = self._rfq_lead()
@@ -370,7 +370,7 @@ class DuplicateMergeTests(unittest.TestCase):
         rfq = self.db.conn.execute("SELECT * FROM rfqs WHERE id=?", (rfq_lead["rfq_id"],)).fetchone()
         nurture_id = self.db.create_nurture_lead(
             "demo-tenant", "m-sales@example.invalid", "网页合并演示", "演示公司", rfq["contact_email"], "", "visit", ""
-        )
+        , consent_confirmed=True)
         # 员工不能合并
         status, _, _ = form_request(
             self.server, "POST", f"/admin/leads/{rfq_lead['id']}/merge", {"secondary_lead_id": nurture_id}, self.sales_cookie
@@ -548,6 +548,76 @@ class CategoryRfqFieldsTests(unittest.TestCase):
         self.assertIn("notice=rfq-category", headers["Location"])
         # 清除后与该租户全局配置完全一致（回到继承）
         self.assertEqual(self.db.get_rfq_field_config("demo-tenant", "螺杆泵"), self.db.get_rfq_field_config("demo-tenant"))
+
+
+class ContactConsentTests(unittest.TestCase):
+    """联系同意与来源：RFQ 入口来源/时间落库并展示；待培育登记必须确认同意。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
+        cls.sales_id = cls.db.create_user(
+            "demo-tenant", "c-sales@example.invalid", "同意销售", "employee", "strong-pass", "demo-admin"
+        )
+        cls.db.set_user_modules("demo-tenant", cls.sales_id, ["sales"], "demo-admin@example.invalid")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin_cookie = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        cls.sales_cookie = login(cls.server, "c-sales@example.invalid", "strong-pass")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.db.conn.close()
+        cls.thread.join()
+        cls.temp_dir.cleanup()
+
+    def test_rfq_consent_recorded_and_displayed(self):
+        conv = self.db.create_conversation("demo-tenant", "website_api", "en")
+        contact = {"contact_name": "M", "company": "C", "contact_email": "m@x.example", "contact_phone": "+1", "quantity": "2", "region": "Berlin", "delivery": "8w"}
+        rfq_chat, _ = self.db.create_rfq("demo-tenant", conv, "cc1", contact, "", entry_surface="chat")
+        rfq_pp, _ = self.db.create_rfq("demo-tenant", conv, "cc2", contact, "", entry_surface="product_page")
+        row = self.db.get_rfq("demo-tenant", rfq_chat)
+        self.assertEqual(row["contact_consent_source"], "chat")
+        self.assertTrue(row["contact_consent_at"])
+        self.assertEqual(self.db.get_rfq("demo-tenant", rfq_pp)["contact_consent_source"], "product_page")
+        _s, _, page = form_request(self.server, "GET", f"/admin/sales/{rfq_chat}", cookie=self.admin_cookie)
+        self.assertIn("联系同意：", page)
+        self.assertIn("买方通过「官网聊天窗」提交询价", page)
+        _s, _, page = form_request(self.server, "GET", f"/admin/sales/{rfq_pp}", cookie=self.admin_cookie)
+        self.assertIn("买方通过「产品详情页」提交询价", page)
+
+    def test_nurture_consent_required_http_and_display(self):
+        base = {
+            "contact_name": "同意测试", "company": "测试公司", "contact_email": "consent@x.example",
+            "contact_phone": "", "source": "expo", "note": "",
+        }
+        # 未勾选同意 → 400 且不落任何数据
+        status, _, body = form_request(self.server, "POST", "/admin/sales/nurture", base, self.sales_cookie)
+        self.assertEqual(status, 400)
+        self.assertIn("确认对方同意", body)
+        self.assertEqual(
+            self.db.conn.execute("SELECT COUNT(*) FROM leads WHERE contact_email='consent@x.example'").fetchone()[0], 0
+        )
+        # 勾选后登记成功，落 offline 来源与时间
+        status, headers, _ = form_request(
+            self.server, "POST", "/admin/sales/nurture", dict(base, consent_confirmed="1"), self.sales_cookie
+        )
+        self.assertEqual(status, 303)
+        lead_id = headers["Location"].split("/admin/leads/")[1].split("?")[0]
+        lead = self.db.get_lead("demo-tenant", lead_id)
+        self.assertEqual(lead["consent_source"], "offline")
+        self.assertTrue(lead["consent_at"])
+        _s, _, page = form_request(self.server, "GET", f"/admin/leads/{lead_id}", cookie=self.sales_cookie)
+        self.assertIn("联系同意：", page)
+        self.assertIn("线下登记（销售已确认）", page)
 
 
 if __name__ == "__main__":

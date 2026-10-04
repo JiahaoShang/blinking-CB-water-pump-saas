@@ -108,6 +108,13 @@ NURTURE_SOURCE_OPTIONS = (
     ("other", "其他"),
 )
 NURTURE_SOURCE_LABELS = dict(NURTURE_SOURCE_OPTIONS)
+# V1-08 联系同意来源（记录买方/销售在何处确认可按该联系方式联系）。
+CONTACT_CONSENT_SOURCE_LABELS = {
+    "chat": "官网聊天窗",
+    "product_page": "产品详情页",
+    "inquiry": "旧询价页",
+    "offline": "线下登记（销售已确认）",
+}
 # 跨站会话交接（一次性交接码）：官网聊天（来源 A）与平台产品页（来源 B）不同来源时，
 # 由持有会话凭据的聊天方出具短时、一次性、绑定站点与型号的交接码；产品页在平台自身
 # 来源上用它换取同一会话的新凭据。码与凭据都只存摘要（SHA-256）；长期会话凭据绝不
@@ -598,6 +605,8 @@ class Database:
                 requested_delivery TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 requested_model TEXT NOT NULL DEFAULT '',
+                contact_consent_source TEXT NOT NULL DEFAULT '',
+                contact_consent_at TEXT,
                 missing_json TEXT NOT NULL DEFAULT '[]',
                 status TEXT NOT NULL DEFAULT 'needs_info',
                 snapshot_json TEXT NOT NULL,
@@ -636,6 +645,8 @@ class Database:
                 closed_at TEXT,
                 merged_into TEXT,
                 merged_at TEXT,
+                consent_source TEXT NOT NULL DEFAULT '',
+                consent_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE (tenant_id, rfq_id)
@@ -664,8 +675,17 @@ class Database:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN current_revision INTEGER NOT NULL DEFAULT 1")
         if "requested_model" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN requested_model TEXT NOT NULL DEFAULT ''")
+        if "contact_consent_source" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
+            self.conn.execute("ALTER TABLE rfqs ADD COLUMN contact_consent_source TEXT NOT NULL DEFAULT ''")
+        if "contact_consent_at" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
+            self.conn.execute("ALTER TABLE rfqs ADD COLUMN contact_consent_at TEXT")
         lead_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(leads)")}
-        for column, definition in (("close_reason", "TEXT NOT NULL DEFAULT ''"), ("closed_at", "TEXT")):
+        for column, definition in (
+            ("close_reason", "TEXT NOT NULL DEFAULT ''"),
+            ("closed_at", "TEXT"),
+            ("consent_source", "TEXT NOT NULL DEFAULT ''"),
+            ("consent_at", "TEXT"),
+        ):
             if column not in lead_columns:
                 self.conn.execute(f"ALTER TABLE leads ADD COLUMN {column} {definition}")
         if "kind" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(leads)")}:
@@ -694,6 +714,8 @@ class Database:
                     closed_at TEXT,
                     merged_into TEXT,
                     merged_at TEXT,
+                    consent_source TEXT NOT NULL DEFAULT '',
+                    consent_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE (tenant_id, rfq_id)
@@ -1794,8 +1816,8 @@ class Database:
         rfq_id = secrets.token_hex(12)
         timestamp = now_iso()
         self.conn.execute(
-            "INSERT INTO rfqs(id, tenant_id, conversation_id, requirement_revision_id, recommendation_id, product_id, product_version_id, submission_key, request_hash, contact_name, company, contact_email, contact_phone, quantity, destination, requested_delivery, notes, requested_model, missing_json, status, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (rfq_id, tenant_id, conversation_id, revision["id"] if revision else None, recommendation["id"] if recommendation else None, product_id, product_version_id, submission_key, request_hash, normalized_contact["contact_name"], normalized_contact["company"], normalized_contact["contact_email"], normalized_contact["contact_phone"], normalized_contact["quantity"], normalized_contact["region"], normalized_contact["delivery"], notes.strip(), requested_model, json.dumps(missing, ensure_ascii=False), status, json.dumps(snapshot, ensure_ascii=False), timestamp),
+            "INSERT INTO rfqs(id, tenant_id, conversation_id, requirement_revision_id, recommendation_id, product_id, product_version_id, submission_key, request_hash, contact_name, company, contact_email, contact_phone, quantity, destination, requested_delivery, notes, requested_model, missing_json, status, snapshot_json, created_at, contact_consent_source, contact_consent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (rfq_id, tenant_id, conversation_id, revision["id"] if revision else None, recommendation["id"] if recommendation else None, product_id, product_version_id, submission_key, request_hash, normalized_contact["contact_name"], normalized_contact["company"], normalized_contact["contact_email"], normalized_contact["contact_phone"], normalized_contact["quantity"], normalized_contact["region"], normalized_contact["delivery"], notes.strip(), requested_model, json.dumps(missing, ensure_ascii=False), status, json.dumps(snapshot, ensure_ascii=False), timestamp, entry_surface or "chat", timestamp),
         )
         initial = self.get_rfq(tenant_id, rfq_id)
         self.conn.execute(
@@ -2007,9 +2029,12 @@ class Database:
         contact_phone: str,
         source: str,
         note: str,
+        consent_confirmed: bool = False,
     ) -> str:
         if source not in NURTURE_SOURCE_LABELS:
             raise ValueError("来源渠道无效")
+        if not consent_confirmed:
+            raise ValueError("登记前需要确认对方同意后续联系（线下登记也不能跳过）")
         email = contact_email.strip()
         phone = contact_phone.strip()
         if not email and not phone:
@@ -2021,9 +2046,9 @@ class Database:
         with self.conn:
             self.conn.execute(
                 "INSERT INTO leads(id, tenant_id, rfq_id, conversation_id, kind, source, contact_name, company, contact_email, contact_phone, "
-                "stage, owner, next_follow_up, note, created_at, updated_at) "
-                "VALUES (?, ?, NULL, NULL, 'nurture', ?, ?, ?, ?, ?, 'new', ?, NULL, ?, ?, ?)",
-                (lead_id, tenant_id, source, contact_name.strip(), company.strip(), email, phone, actor, note.strip(), timestamp, timestamp),
+                "stage, owner, next_follow_up, note, consent_source, consent_at, created_at, updated_at) "
+                "VALUES (?, ?, NULL, NULL, 'nurture', ?, ?, ?, ?, ?, 'new', ?, NULL, ?, 'offline', ?, ?, ?)",
+                (lead_id, tenant_id, source, contact_name.strip(), company.strip(), email, phone, actor, note.strip(), timestamp, timestamp, timestamp),
             )
             self._audit(
                 tenant_id, "lead", lead_id, "nurture_created", actor,
@@ -6276,6 +6301,7 @@ class Handler(BaseHTTPRequestHandler):
                     str(form.get("contact_name", "")), str(form.get("company", "")),
                     str(form.get("contact_email", "")), str(form.get("contact_phone", "")),
                     str(form.get("source", "")), str(form.get("note", "")),
+                    consent_confirmed=str(form.get("consent_confirmed", "")) == "1",
                 )
                 self.redirect(f"/admin/leads/{lead_id}?notice=nurture-created")
                 return
@@ -7889,7 +7915,8 @@ class Handler(BaseHTTPRequestHandler):
             "<div><label>电话</label><input name='contact_phone' placeholder='+86 …'></div>"
             f"<div><label>来源渠道 *</label><select name='source' required>{nurture_source_options}</select></div>"
             "<div class='full'><label>需求摘要 / 备注</label><textarea name='note' placeholder='例如：展会接触，正在做新建项目选型，预计 Q4 招标'></textarea></div>"
-            "</div><p class='muted'>邮箱与电话至少填写一种；登记后负责人默认为登记人，可在线索详情中调整。</p>"
+            "<label class='full'><input type='checkbox' name='consent_confirmed' value='1' required style='width:auto'> 已确认对方同意后续联系（线下实际已获得同意）</label>"
+            "</div><p class='muted'>邮箱与电话至少填写一种；同意确认是登记的必选前提；登记后负责人默认为登记人，可在线索详情中调整。</p>"
             "<p><button>登记待培育线索</button></p></form></div></details></section>"
         )
         body = f"""
@@ -7986,7 +8013,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class='summary-strip'><span>来源：{esc(source_label)}</span><span>负责人：{esc(lead['owner'] or '未分配')}</span><span>跟进：{esc(lead['next_follow_up'] or '未安排')}</span><span>登记：{esc(lead['created_at'])}</span></div>
 {duplicates_section}
 <div class='grid'><section class='card' id='lead-update'><h2>线索处理</h2>{closed_info}{assign_action}<form method='post' action='/admin/leads/{lead_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}'><label>销售备注</label><textarea name='note'>{esc(lead['note'])}</textarea><label>关闭原因（阶段设为「已关闭」时必填）</label><input name='close_reason' value='{esc(lead['close_reason'] or '')}' placeholder='例如：客户取消项目 / 已转向其他方案'><p><button>保存跟进状态</button></p></form></section>
-<section class='card'><h2>联系人与来源</h2><p><b>联系人：</b>{esc(lead['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(lead['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(lead['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(lead['contact_phone']) or '未提供'}</p><p><b>来源渠道：</b>{esc(source_label)}</p><p><b>需求摘要：</b>{esc(lead['note']) or '无'}</p><p class='field-state'>待培育线索尚未形成 RFQ；客户在官网提交询价后，销售可核对是否为同一采购需求（人工合并，系统不会自动合并）。</p></section></div>
+<section class='card'><h2>联系人与来源</h2><p><b>联系人：</b>{esc(lead['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(lead['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(lead['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(lead['contact_phone']) or '未提供'}</p><p><b>来源渠道：</b>{esc(source_label)}</p><p><b>联系同意：</b>{esc(CONTACT_CONSENT_SOURCE_LABELS.get(lead['consent_source'], '未记录'))}· {esc(lead['consent_at'] or '')}</p><p><b>需求摘要：</b>{esc(lead['note']) or '无'}</p><p class='field-state'>待培育线索尚未形成 RFQ；客户在官网提交询价后，销售可核对是否为同一采购需求（人工合并，系统不会自动合并）。</p></section></div>
 <section class='card' style='margin-top:18px' id='milestones'><div class='panel-title'><h2>跟进节点</h2><span class='muted'>技术确认 / 样品准备 / 报价准备</span></div><div class='simple-list'>{"".join(milestone_rows)}</div></section>
 <details class='detail-toggle' style='margin-top:18px'><summary>操作历史（最近 20 条）</summary><div class='muted-block'>{timeline_html}</div></details>
 """
@@ -8123,7 +8150,7 @@ class Handler(BaseHTTPRequestHandler):
 {change_banner}
 {duplicates_section}
 {focus_html}
-<div class='grid'><section class='card' id='lead-update'><h2>线索处理</h2><p><b>会话负责人：</b>{esc(lead['owner'] or '未领取')}</p>{closed_info}{assign_action if lead['owner'] else ''}<form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}' {followup_disabled}><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><label>关闭原因（阶段设为「已关闭」时必填）</label><input name='close_reason' value='{esc(lead['close_reason'] or '')}' placeholder='例如：客户取消项目 / 已转向其他方案'><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
+<div class='grid'><section class='card' id='lead-update'><h2>线索处理</h2><p><b>会话负责人：</b>{esc(lead['owner'] or '未领取')}</p>{closed_info}{assign_action if lead['owner'] else ''}<form method='post' action='/admin/sales/{rfq_id}/update'><label>阶段</label><select name='stage'>{stage_options}</select><label>下一步跟进日期</label><input type='date' name='next_follow_up' value='{esc(lead['next_follow_up'] or '')}' {followup_disabled}><label>销售备注</label><textarea name='note' placeholder='记录下一步和客户背景'>{esc(lead['note'])}</textarea><label>关闭原因（阶段设为「已关闭」时必填）</label><input name='close_reason' value='{esc(lead['close_reason'] or '')}' placeholder='例如：客户取消项目 / 已转向其他方案'><p><button>保存跟进状态</button></p></form></section><section class='card'><h2>联系人与询价</h2><p><b>联系人：</b>{esc(rfq['contact_name']) or '未提供'}</p><p><b>公司：</b>{esc(rfq['company']) or '未提供'}</p><p><b>邮箱：</b>{esc(rfq['contact_email']) or '未提供'}</p><p><b>电话：</b>{esc(rfq['contact_phone']) or '未提供'}</p><p><b>型号：</b>{esc(rfq['model'] or '未指定')}</p><p><b>数量：</b>{esc(rfq['quantity']) or '待补充'} · <b>目的地：</b>{esc(rfq['destination']) or '待补充'} · <b>交期：</b>{esc(rfq['requested_delivery']) or '待补充'}</p><p><b>备注：</b>{esc(rfq['notes']) or '无'}</p><p><b>联系同意：</b>买方通过「{esc(CONTACT_CONSENT_SOURCE_LABELS.get(rfq['contact_consent_source'], '未记录'))}」提交询价，同意就本次询价联系 · {esc(rfq['contact_consent_at'] or '')}</p><p><a href='/admin/rfqs/{rfq_id}'>查看初次提交与历次修改（当前 v{rfq['current_revision']}）</a></p></section></div>
 {stop_form}
 {followup_cards}
 <section class='card' style='margin-top:18px'><h2>已确认需求快照</h2><table><thead><tr><th>字段</th><th>值</th><th>状态</th></tr></thead><tbody>{requirement_rows}</tbody></table></section>
