@@ -1641,7 +1641,9 @@ class Database:
             raise ConflictError("询价已更新，请刷新后再修改")
         current = self.rfq_current_content(rfq)
         # V1-01 步骤②：隐藏字段不接受买家改动（保留现值）；必填字段修改后不可为空。
-        field_config = self.get_rfq_field_config(tenant_id)
+        # V1-08：按品类配置——询价已绑定产品时按其「已核准品类」解析字段配置。
+        revise_category = self.get_approved_category(tenant_id, rfq["product_id"]) if rfq["product_id"] else ""
+        field_config = self.get_rfq_field_config(tenant_id, revise_category)
         hidden_content_keys = {RFQ_FIELD_CONTENT_KEYS[key] for key, state in field_config.items() if state == "hidden"}
         editable = ("contact_name", "company", "contact_email", "contact_phone", "quantity", "destination", "requested_delivery", "notes", "requested_model")
         for key in editable:
@@ -1704,7 +1706,11 @@ class Database:
         requested_model = str(requested_model or "").strip()
         # V1-01 步骤②：按企业设置归一化（隐藏=不收集；不修改调用方传参）。
         contact = dict(contact)
-        field_config = self.get_rfq_field_config(tenant_id)
+        # V1-08：按品类配置——先按明确产品/型号/会话语境解析品类，再取合并后的字段配置。
+        field_config = self.get_rfq_field_config(
+            tenant_id,
+            self.rfq_category_hint(tenant_id, conversation_id, selected_product_id, requested_model),
+        )
         for field_key, field_state in field_config.items():
             if field_key != "notes" and field_state == "hidden":
                 contact[RFQ_FIELD_INPUT_KEYS[field_key]] = ""
@@ -2362,16 +2368,93 @@ class Database:
             return [dict(stage) for stage in DEFAULT_LEAD_STAGES]
         return stages
 
-    def get_rfq_field_config(self, tenant_id: str) -> dict[str, str]:
-        """RFQ 字段三态配置；非法值回退默认；邮箱与电话不可同时隐藏（损坏数据兜底：电话回落选填）。"""
+    def get_rfq_field_config(self, tenant_id: str, category: str | None = None) -> dict[str, str]:
+        """RFQ 字段三态配置；可按已核准品类叠加覆盖（未覆盖字段继承全局）。
+
+        非法值回退默认；邮箱与电话不可同时隐藏（损坏数据兜底：电话回落选填）。
+        品类为空或没有覆盖时，行为与纯全局配置完全一致。
+        """
         stored, _ = self.get_tenant_setting(tenant_id, SETTING_RFQ_FIELDS)
         config: dict[str, str] = {}
         for key in RFQ_FIELD_ORDER:
             value = stored.get(key) if isinstance(stored, dict) else None
             config[key] = value if value in RFQ_FIELD_STATES else DEFAULT_RFQ_FIELDS[key]
+        category = (category or "").strip()
+        if category:
+            by_category, _ = self.get_tenant_setting(tenant_id, SETTING_RFQ_FIELDS_BY_CATEGORY)
+            overrides = by_category.get(category) if isinstance(by_category, dict) else None
+            if isinstance(overrides, dict):
+                for key in RFQ_FIELD_ORDER:
+                    value = overrides.get(key)
+                    if value in RFQ_FIELD_STATES:
+                        config[key] = value
         if config["email"] == "hidden" and config["phone"] == "hidden":
             config["phone"] = "optional"
         return config
+
+    def approved_categories(self, tenant_id: str) -> list[str]:
+        """已核准品类清单（来自产品页核准动作；用于按品类配置与工作流）。"""
+        rows = self.conn.execute(
+            "SELECT DISTINCT category FROM products WHERE tenant_id=? AND TRIM(category) != '' ORDER BY category",
+            (tenant_id,),
+        ).fetchall()
+        return [row["category"] for row in rows]
+
+    def set_rfq_fields_for_category(self, tenant_id: str, category: str, overrides: dict[str, str], actor: str) -> None:
+        """保存某品类的 RFQ 字段覆盖（空 dict = 清除覆盖）；只能用于已核准品类。"""
+        category = category.strip()
+        if category not in self.approved_categories(tenant_id):
+            raise ValueError("只能为已核准的品类配置询价字段；请先在产品页核准品类")
+        effective = self.get_rfq_field_config(tenant_id)
+        cleaned: dict[str, str] = {}
+        for key, state in (overrides or {}).items():
+            if key not in RFQ_FIELD_ORDER or state not in RFQ_FIELD_STATES:
+                raise ValueError("按品类询价字段配置无效")
+            cleaned[key] = state
+            effective[key] = state
+        if effective["email"] == "hidden" and effective["phone"] == "hidden":
+            raise ValueError("邮箱与电话不能同时隐藏（含继承全局后的结果）")
+        stored, _ = self.get_tenant_setting(tenant_id, SETTING_RFQ_FIELDS_BY_CATEGORY)
+        data = dict(stored) if isinstance(stored, dict) else {}
+        if cleaned:
+            data[category] = cleaned
+        else:
+            data.pop(category, None)
+        self.set_tenant_setting(tenant_id, SETTING_RFQ_FIELDS_BY_CATEGORY, data, actor)
+
+    def conversation_category_hint(self, tenant_id: str, conversation_id: str) -> str:
+        """会话语境提示：取最新有效推荐中首个可绑定产品的「已核准品类」（否则空串）。"""
+        recommendation = self.latest_active_recommendation(tenant_id, conversation_id)
+        if not recommendation:
+            return ""
+        for result in json.loads(recommendation["results_json"]):
+            product_id = result.get("product_id")
+            if product_id:
+                category = self.get_approved_category(tenant_id, product_id)
+                if category:
+                    return category
+        return ""
+
+    def rfq_category_hint(
+        self, tenant_id: str, conversation_id: str, selected_product_id: str | None, requested_model: str
+    ) -> str:
+        """创建 RFQ 时解析按品类覆盖：明确产品 ＞ 明确型号文字 ＞ 会话推荐语境；都没有则空。"""
+        if selected_product_id:
+            category = self.get_approved_category(tenant_id, selected_product_id)
+            if category:
+                return category
+        wanted = str(requested_model or "").strip().lower()
+        if wanted:
+            row = self.conn.execute(
+                "SELECT id FROM products WHERE tenant_id=? AND LOWER(model)=? LIMIT 1", (tenant_id, wanted)
+            ).fetchone()
+            if row:
+                category = self.get_approved_category(tenant_id, row["id"])
+                if category:
+                    return category
+        if conversation_id:
+            return self.conversation_category_hint(tenant_id, conversation_id)
+        return ""
 
     def get_notify_recipients(self, tenant_id: str) -> list[str]:
         """通知接收人（仅登记；渠道未接入）。返回去重后的合法邮箱列表（最多 20 个）。"""
@@ -4692,6 +4775,7 @@ LEGACY_ROLE_MODULES = {"sales": ("rfqs", "sales"), "engineer": ("tasks", "rfqs",
 # ── V1-01 步骤② 企业设置：线索阶段 / RFQ 表单字段 / 通知接收人 ──────────────────
 SETTING_LEAD_STAGES = "lead_stages"
 SETTING_RFQ_FIELDS = "rfq_fields"
+SETTING_RFQ_FIELDS_BY_CATEGORY = "rfq_fields_by_category"
 SETTING_NOTIFY_RECIPIENTS = "notify_recipients"
 
 # 阶段 KEY 集合首版固定（仅支持改名/排序/终态；增删已登记为暂缓项 F-15）。
@@ -5158,7 +5242,7 @@ class Handler(BaseHTTPRequestHandler):
                     **recommendation_flags(stored_results, latest_recommendation["status"]),
                 }
             self.send_json(
-                {"conversation_id": conversation["id"], "status": conversation["status"], "locale": conversation["locale"], "contact_preference": {"stop_proactive_contact": bool(conversation["stop_proactive_contact"]), "reason": conversation["stop_reason"], "source": conversation["stop_source"], "stopped_at": conversation["stopped_at"]}, "messages": messages, "requirement": requirement, "recommendation": recommendation, "answers": answers, "human_tasks": human_tasks, "rfqs": rfqs, "rfq_fields": self.db.get_rfq_field_config(site["tenant_id"])},
+                {"conversation_id": conversation["id"], "status": conversation["status"], "locale": conversation["locale"], "contact_preference": {"stop_proactive_contact": bool(conversation["stop_proactive_contact"]), "reason": conversation["stop_reason"], "source": conversation["stop_source"], "stopped_at": conversation["stopped_at"]}, "messages": messages, "requirement": requirement, "recommendation": recommendation, "answers": answers, "human_tasks": human_tasks, "rfqs": rfqs, "rfq_fields": self.db.get_rfq_field_config(site["tenant_id"], self.db.conversation_category_hint(site["tenant_id"], conversation["id"]))},
                 allowed_origin=site["allowed_origin"] if self.headers.get("Origin") else None,
             )
             return
@@ -6268,6 +6352,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/admin/settings/rfq-fields":
                 self.admin_settings_save_rfq_fields(form)
                 return
+            if path == "/admin/settings/rfq-fields-category":
+                self.admin_settings_save_rfq_fields_category(form)
+                return
             if path == "/admin/settings/notify":
                 self.admin_settings_save_notify(form)
                 return
@@ -6861,7 +6948,7 @@ class Handler(BaseHTTPRequestHandler):
                     candidate_options += f"<option value='{esc(result['product_id'])}'>{esc(result['model'])} · v{esc(result['product_version'])}</option>"
         prefill = {key: values.get(key, {}).get("value", "") for key in ("quantity", "region", "delivery")}
         # V1-01 步骤②：RFQ 字段三态（必填/选填/隐藏）——三个买方入口与服务端校验同口径。
-        rfq_field_config = self.db.get_rfq_field_config(self.tenant_id)
+        rfq_field_config = self.db.get_rfq_field_config(self.tenant_id, self.db.conversation_category_hint(self.tenant_id, conversation_id))
 
         def rfq_visible(field_key: str) -> bool:
             return rfq_field_config[field_key] != "hidden"
@@ -7060,6 +7147,8 @@ class Handler(BaseHTTPRequestHandler):
             "fields_invalid": "<div class='error'>字段设置未保存：存在无效的收集方式，请重新选择。</div>",
             "fields_both_hidden": "<div class='error'>字段设置未保存：邮箱与电话不能同时设为「隐藏」（至少保留一种可回复方式）。</div>",
             "notify_invalid": "<div class='error'>接收人未保存：请检查邮箱格式（每行一个或用逗号分隔，最多 20 个）。</div>",
+            "rfq-category": "<div class='notice'>按品类询价字段已保存：仅对已核准品类的产品生效。</div>",
+            "rfq_category_invalid": "<div class='error'>按品类字段未保存：品类必须已核准，且邮箱与电话不能同时隐藏。</div>",
         }.get(notice, "")
         stage_rows = "".join(
             f"<div class='stage-row'><code class='chip-key'>{esc(stage['key'])}</code>"
@@ -7089,6 +7178,45 @@ class Handler(BaseHTTPRequestHandler):
             f"<tr><td><b>{esc(RFQ_FIELD_LABELS[field_key])}</b><br><span class='field-state'>{esc(field_hints[field_key])}</span></td><td>{field_select(field_key)}</td></tr>"
             for field_key in RFQ_FIELD_ORDER
         )
+        approved_categories = self.db.approved_categories(self.tenant_id)
+        by_category_raw, _ = self.db.get_tenant_setting(self.tenant_id, SETTING_RFQ_FIELDS_BY_CATEGORY)
+        by_category = by_category_raw if isinstance(by_category_raw, dict) else {}
+        category_blocks = []
+        for category in approved_categories:
+            overrides = by_category.get(category) if isinstance(by_category.get(category), dict) else {}
+            summary_bits = [
+                f"{RFQ_FIELD_LABELS[field_key]}={state_labels[overrides[field_key]]}"
+                for field_key in RFQ_FIELD_ORDER
+                if overrides.get(field_key) in RFQ_FIELD_STATES
+            ]
+            summary = "；".join(summary_bits) or "未设置覆盖（全部继承全局）"
+
+            def category_select(field_key: str, overrides: dict = overrides) -> str:
+                parts = [
+                    f"<option value=''{'' if overrides.get(field_key) else ' selected'}>继承全局（{state_labels[field_config[field_key]]}）</option>"
+                ]
+                for state in RFQ_FIELD_STATES:
+                    parts.append(f"<option value='{state}'{' selected' if overrides.get(field_key) == state else ''}>{state_labels[state]}</option>")
+                return f"<select name='field_{esc(field_key)}'>" + "".join(parts) + "</select>"
+
+            rows = "".join(
+                f"<div><label>{esc(RFQ_FIELD_LABELS[field_key])}</label>{category_select(field_key)}</div>"
+                for field_key in RFQ_FIELD_ORDER
+            )
+            category_blocks.append(
+                f"<details class='detail-toggle'><summary>{esc(category)} · {esc(summary)}</summary><div>"
+                f"<form method='post' action='/admin/settings/rfq-fields-category'><input type='hidden' name='category' value='{esc(category)}'>"
+                f"<div class='form-grid'>{rows}</div><p><button>保存该品类覆盖</button></p></form>"
+                f"<form method='post' action='/admin/settings/rfq-fields-category'><input type='hidden' name='category' value='{esc(category)}'>"
+                f"<input type='hidden' name='clear' value='1'><button class='secondary'>清除该品类覆盖</button></form>"
+                f"</div></details>"
+            )
+        category_section = (
+            "<section class='card'><div class='panel-title'><h2>按品类询价字段（可选）</h2><span class='field-state'>只对已核准品类生效</span></div>"
+            "<p class='muted'>为不同品类覆盖 RFQ 字段的收集方式；未覆盖的字段继承上方全局设置。品类需先在产品页核准；未核准的品类不会应用任何覆盖，产品页与会话表单按解析到的已核准品类取值。</p>"
+            + ("".join(category_blocks) if approved_categories else "<div class='muted-block'>还没有已核准的品类。先到「产品管理」核准产品品类后，可在这里按品类细分询价字段。</div>")
+            + "</section>"
+        )
         recipients_value = esc("\n".join(recipients))
         body = f"""
 <div class='toolbar'><div><h1>企业设置</h1><div class='muted'>影响全企业买家表单与跟进流程的配置；保存后立即生效。</div></div></div>
@@ -7101,6 +7229,7 @@ class Handler(BaseHTTPRequestHandler):
 <p class='muted'>三个买方入口（聊天窗 / 产品详情页 / 旧询价页）与后台校验同口径。隐藏只影响买家表单展示与新提交，历史数据保留；邮箱与电话不可同时隐藏。</p>
 <form method='post' action='/admin/settings/rfq-fields'><table><thead><tr><th>字段</th><th>收集方式</th></tr></thead><tbody>{field_rows}</tbody></table><p><button>保存字段设置</button></p></form>
 </section>
+{category_section}
 <section class='card'><div class='panel-title'><h2>通知接收人</h2><span class='field-state'>上次修改：{esc(notify_updated or '未登记')}</span></div>
 <p class='muted'>渠道未接入、暂不发送：当前版本还没有邮件/短信等通知通道；此处仅登记接收人名单，功能接入后才会按此发送。</p>
 <form method='post' action='/admin/settings/notify'><label>接收人邮箱（每行一个）</label><textarea name='recipients' rows='4' placeholder='ops@company.example'>{recipients_value}</textarea><p><button>保存接收人</button></p></form>
@@ -7150,6 +7279,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.db.set_tenant_setting(self.tenant_id, SETTING_RFQ_FIELDS, wanted, self.actor)
         self.redirect("/admin/settings?notice=fields")
+
+    def admin_settings_save_rfq_fields_category(self, form: dict[str, str | bytes]) -> None:
+        category = str(form.get("category", "")).strip()
+        try:
+            if str(form.get("clear", "")).strip() == "1":
+                overrides: dict[str, str] = {}
+            else:
+                overrides = {}
+                for field_key in RFQ_FIELD_ORDER:
+                    state = str(form.get(f"field_{field_key}", "")).strip()
+                    if state:
+                        overrides[field_key] = state
+            self.db.set_rfq_fields_for_category(self.tenant_id, category, overrides, self.actor)
+        except ValueError:
+            self.redirect("/admin/settings?notice=rfq_category_invalid")
+            return
+        self.redirect("/admin/settings?notice=rfq-category")
 
     def admin_settings_save_notify(self, form: dict[str, str | bytes]) -> None:
         raw = str(form.get("recipients", ""))
@@ -8121,7 +8267,7 @@ class Handler(BaseHTTPRequestHandler):
 <form id="message-form" class="message-form"><label for="message">Your message</label><div><textarea id="message" rows="2"></textarea><button type="submit">Send</button></div></form>
 </aside>
 <script src='/reference-client/app.js' defer></script>"""
-        product_field_config = self.db.get_rfq_field_config(tenant_id)
+        product_field_config = self.db.get_rfq_field_config(tenant_id, self.db.get_approved_category(tenant_id, product["id"]))
 
         def product_input(field_key: str, name: str, label_html: str, attrs: str = "") -> str:
             if product_field_config[field_key] == "hidden":

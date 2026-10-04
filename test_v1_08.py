@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlencode
 
-from app import Database, make_server
+from app import Database, SETTING_RFQ_FIELDS, make_server
 
 
 def form_request(server, method, path, fields=None, cookie=None):
@@ -391,6 +391,163 @@ class DuplicateMergeTests(unittest.TestCase):
         _s, _, page = form_request(self.server, "GET", f"/admin/leads/{nurture_id}", cookie=self.admin_cookie)
         self.assertIn("该线索已并入", page)
         self.assertIn(f"/admin/sales/{rfq_lead['rfq_id']}", page)
+
+
+class CategoryRfqFieldsTests(unittest.TestCase):
+    """按品类询价字段：覆盖解析/校验、创建与修订执行、会话语境、产品页注入与设置页编辑。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
+        cls.db.register_buyer_site("demo-tenant", "demo-site-key", "http://127.0.0.1:8139")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin_cookie = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.db.conn.close()
+        cls.thread.join()
+        cls.temp_dir.cleanup()
+
+    def _make_product(self, model, category="", publish=True):
+        pid = self.db.create_product("demo-tenant", model, f"{model} 泵", "测试", "demo-admin")
+        sid = self.db.add_source(
+            "demo-tenant", pid, f"{model}-a.txt", "TXT", "p1", "流量范围: 20-80 m³/h\n".encode(),
+            "demo-admin", scope="exact_model",
+        )
+        self.db.approve_field("demo-tenant", pid, "flow_range")
+        self.db.finalize_product_review("demo-tenant", pid)
+        if category:
+            self.db.set_category_candidate("demo-tenant", pid, category, "manual", "demo-admin")
+            self.db.approve_category("demo-tenant", pid, "demo-admin")
+        if publish:
+            self.db.allow_public_source("demo-tenant", pid, sid, "demo-admin")
+            self.db.publish_product("demo-tenant", pid)
+        return pid
+
+    def test_config_resolution_validation_and_clear(self):
+        # 全局：目的地隐藏；品类「离心泵」覆盖：目的地必填、备注隐藏
+        self.db.set_tenant_setting(
+            "demo-tenant", SETTING_RFQ_FIELDS,
+            {"email": "required", "phone": "required", "quantity": "required", "destination": "hidden", "notes": "optional"},
+            "demo-admin",
+        )
+        self._make_product("CFG-1", category="离心泵")
+        self.db.set_rfq_fields_for_category("demo-tenant", "离心泵", {"destination": "required", "notes": "hidden"}, "demo-admin")
+        global_cfg = self.db.get_rfq_field_config("demo-tenant")
+        self.assertEqual(global_cfg["destination"], "hidden")
+        self.assertEqual(global_cfg["notes"], "optional")
+        category_cfg = self.db.get_rfq_field_config("demo-tenant", "离心泵")
+        self.assertEqual((category_cfg["destination"], category_cfg["notes"]), ("required", "hidden"))
+        self.assertEqual(category_cfg["email"], "required")  # 未覆盖字段继承全局
+        # 未核准品类：拒绝保存；读取时回退全局
+        with self.assertRaises(ValueError):
+            self.db.set_rfq_fields_for_category("demo-tenant", "未登记品类", {"notes": "hidden"}, "demo-admin")
+        self.assertEqual(self.db.get_rfq_field_config("demo-tenant", "未登记品类")["destination"], "hidden")
+        # 非法状态与双隐藏（含继承结果）
+        with self.assertRaises(ValueError):
+            self.db.set_rfq_fields_for_category("demo-tenant", "离心泵", {"notes": "maybe"}, "demo-admin")
+        with self.assertRaises(ValueError):
+            self.db.set_rfq_fields_for_category("demo-tenant", "离心泵", {"email": "hidden", "phone": "hidden"}, "demo-admin")
+        # 清除覆盖 → 回到全局
+        self.db.set_rfq_fields_for_category("demo-tenant", "离心泵", {}, "demo-admin")
+        self.assertEqual(self.db.get_rfq_field_config("demo-tenant", "离心泵")["destination"], "hidden")
+
+    def test_create_and_revise_enforcement_by_category(self):
+        self.db.set_tenant_setting(
+            "demo-tenant", SETTING_RFQ_FIELDS,
+            {"email": "required", "phone": "required", "quantity": "required", "destination": "hidden", "notes": "optional"},
+            "demo-admin",
+        )
+        pid = self._make_product("ENF-1", category="离心泵")
+        pid2 = self._make_product("ENF-2", category="")
+        self.db.set_rfq_fields_for_category("demo-tenant", "离心泵", {"destination": "required", "notes": "hidden"}, "demo-admin")
+        conv = self.db.create_conversation("demo-tenant", "website_api", "en")
+        contact = {"contact_name": "M", "company": "C", "contact_email": "m@x.example", "contact_phone": "+1", "quantity": "2", "region": "", "delivery": "8w"}
+        # 品类产品缺目的地 → 拒（全局该字段为隐藏，说明按品类覆盖生效）
+        with self.assertRaises(ValueError):
+            self.db.create_rfq("demo-tenant", conv, "e1", contact, "", selected_product_id=pid)
+        # 无品类产品同缺目的地 → 通过（继承全局隐藏）
+        rfq_plain, created = self.db.create_rfq("demo-tenant", conv, "e2", contact, "", selected_product_id=pid2)
+        self.assertTrue(created)
+        # 品类产品带目的地 → 通过；备注（覆盖隐藏）不被收集
+        rfq_cat, _ = self.db.create_rfq("demo-tenant", conv, "e3", dict(contact, region="Berlin"), "会被清空", selected_product_id=pid)
+        row = self.db.get_rfq("demo-tenant", rfq_cat)
+        self.assertEqual(row["destination"], "Berlin")
+        self.assertEqual(row["notes"], "")
+        # 修订：品类询价清空目的地 → 拒；非品类询价清空 → 通过（字段为隐藏态，不受必填约束）
+        with self.assertRaises(ValueError):
+            self.db.revise_rfq("demo-tenant", conv, rfq_cat, 1, {"destination": ""}, "r1")
+        self.db.revise_rfq("demo-tenant", conv, rfq_plain, 1, {"destination": ""}, "r2")
+
+    def test_conversation_hint_and_product_page_injection(self):
+        self.db.set_tenant_setting(
+            "demo-tenant", SETTING_RFQ_FIELDS,
+            {"email": "required", "phone": "required", "quantity": "required", "destination": "hidden", "notes": "optional"},
+            "demo-admin",
+        )
+        pid = self._make_product("HNT-1", category="离心泵")
+        pid2 = self._make_product("HNT-2", category="")
+        self.db.set_rfq_fields_for_category("demo-tenant", "离心泵", {"destination": "required"}, "demo-admin")
+        # 会话推荐语境
+        conv = self.db.create_conversation("demo-tenant", "website_api", "en")
+        self.assertEqual(self.db.conversation_category_hint("demo-tenant", conv), "")
+        revision = self.db.create_requirement_revision("demo-tenant", conv, {"flow": {"value": "30", "state": "confirmed"}}, status="confirmed")
+        self.db.save_recommendation("demo-tenant", conv, revision, "candidate", [{"product_id": pid, "model": "HNT-1", "status": "candidate"}])
+        self.assertEqual(self.db.conversation_category_hint("demo-tenant", conv), "离心泵")
+        self.assertEqual(self.db.rfq_category_hint("demo-tenant", conv, None, "hnt-1"), "离心泵")
+        self.assertEqual(self.db.rfq_category_hint("demo-tenant", "no-conv", "ghost", ""), "")
+        # 产品页注入：品类页按覆盖（目的地必填）；无品类页按全局（隐藏）
+        import json as _json
+        import re as _re
+        for model, slug_pid, expect in (("HNT-1", pid, "required"), ("HNT-2", pid2, "hidden")):
+            slug = self.db.get_product("demo-tenant", slug_pid)["slug"]
+            _s, _, page = form_request(self.server, "GET", f"/s/demo-site-key/products/{slug}")
+            match = _re.search(r"window\.RFQ_FIELD_CONFIG=(\{.*?\});", page)
+            self.assertIsNotNone(match, model)
+            config = _json.loads(match.group(1))
+            self.assertEqual(config["destination"], expect, model)
+
+    def test_settings_category_editor_http(self):
+        self._make_product("SET-1", category="螺杆泵")
+        # 保存覆盖
+        status, headers, _ = form_request(
+            self.server, "POST", "/admin/settings/rfq-fields-category",
+            {"category": "螺杆泵", "field_destination": "required", "field_notes": "hidden"}, self.admin_cookie,
+        )
+        self.assertEqual(status, 303)
+        self.assertIn("notice=rfq-category", headers["Location"])
+        config = self.db.get_rfq_field_config("demo-tenant", "螺杆泵")
+        self.assertEqual((config["destination"], config["notes"]), ("required", "hidden"))
+        _s, _, page = form_request(self.server, "GET", "/admin/settings", cookie=self.admin_cookie)
+        self.assertIn("按品类询价字段", page)
+        self.assertIn("螺杆泵", page)
+        self.assertIn("目的地=必填", page)
+        # 未核准品类 → 友好错误
+        status, headers, _ = form_request(
+            self.server, "POST", "/admin/settings/rfq-fields-category",
+            {"category": "没这个品类", "field_destination": "required"}, self.admin_cookie,
+        )
+        self.assertEqual(status, 303)
+        self.assertIn("notice=rfq_category_invalid", headers["Location"])
+        # 清除覆盖
+        status, headers, _ = form_request(
+            self.server, "POST", "/admin/settings/rfq-fields-category",
+            {"category": "螺杆泵", "clear": "1"}, self.admin_cookie,
+        )
+        self.assertEqual(status, 303)
+        self.assertIn("notice=rfq-category", headers["Location"])
+        # 清除后与该租户全局配置完全一致（回到继承）
+        self.assertEqual(self.db.get_rfq_field_config("demo-tenant", "螺杆泵"), self.db.get_rfq_field_config("demo-tenant"))
 
 
 if __name__ == "__main__":
