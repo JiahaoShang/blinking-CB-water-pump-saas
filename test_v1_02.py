@@ -249,5 +249,152 @@ class SourceUsageTests(unittest.TestCase):
             self.db.set_source_usage("other-tenant", pid, sid_a, "restricted", "setup")
 
 
+class CategoryApprovalTests(unittest.TestCase):
+    """品类候选与核准：候选 ≠ 已核准；授权成员核准生效；未核准不进入对外内容与派生行为。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.db.ensure_tenant("demo-tenant", "示例水泵企业（演示）")
+        # 授权成员（持 products 模块）与零权限员工
+        cls.member_id = cls.db.create_user(
+            "demo-tenant", "cat-member@example.invalid", "产品同事", "employee", "strong-pass", "demo-admin"
+        )
+        cls.db.set_user_modules("demo-tenant", cls.member_id, ["products"], "demo-admin@example.invalid")
+        cls.nobody_id = cls.db.create_user(
+            "demo-tenant", "cat-nobody@example.invalid", "无权限同事", "employee", "strong-pass", "demo-admin"
+        )
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin_cookie = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        cls.member_cookie = login(cls.server, "cat-member@example.invalid", "strong-pass")
+        cls.nobody_cookie = login(cls.server, "cat-nobody@example.invalid", "strong-pass")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.db.conn.close()
+        cls.thread.join()
+        cls.temp_dir.cleanup()
+
+    def _make_product(self, model):
+        pid = self.db.create_product("demo-tenant", model, f"{model} 测试泵", "测试用途", "demo-admin")
+        self.db.add_source(
+            "demo-tenant", pid, f"{model}-手册.txt", "TXT", "第1页：参数表",
+            "流量范围: 20-80 m³/h\n".encode(), "demo-admin", scope="exact_model",
+        )
+        self.db.approve_field("demo-tenant", pid, "flow_range")
+        self.db.finalize_product_review("demo-tenant", pid)
+        return pid
+
+    def test_candidate_approve_replace_flow_and_audit(self):
+        pid = self._make_product("SLICE-C1")
+        self.assertEqual(self.db.get_approved_category("demo-tenant", pid), "")
+        # 候选不生效
+        self.db.set_category_candidate("demo-tenant", pid, " 离心泵 ", "doc", "demo-admin")
+        self.assertEqual(self.db.get_approved_category("demo-tenant", pid), "")
+        row = self.db.conn.execute("SELECT category_candidate, category_candidate_source FROM products WHERE id=?", (pid,)).fetchone()
+        self.assertEqual((row["category_candidate"], row["category_candidate_source"]), ("离心泵", "doc"))
+        # 核准生效（授权成员）
+        self.assertEqual(self.db.approve_category("demo-tenant", pid, "cat-member@example.invalid"), "离心泵")
+        row = self.db.conn.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+        self.assertEqual(row["category"], "离心泵")
+        self.assertEqual(row["category_approved_by"], "cat-member@example.invalid")
+        self.assertTrue(row["category_approved_at"])
+        self.assertEqual(row["category_candidate"], "")
+        self.assertIsNone(row["category_candidate_at"])
+        # 替换流程：新候选 → 再核准（审计 before→after）
+        self.db.set_category_candidate("demo-tenant", pid, "混流泵", "manual", "demo-admin")
+        self.assertEqual(self.db.approve_category("demo-tenant", pid, "demo-admin"), "混流泵")
+        audits = self.db.conn.execute(
+            "SELECT details FROM audit_log WHERE entity_id=? AND action='category_approved' ORDER BY id", (pid,)
+        ).fetchall()
+        self.assertEqual(len(audits), 2)
+        self.assertIn("（未设置） -> 离心泵", audits[0]["details"])
+        self.assertIn("离心泵 -> 混流泵", audits[1]["details"])
+        # 无候选时核准被拒
+        with self.assertRaises(ValueError):
+            self.db.approve_category("demo-tenant", pid, "demo-admin")
+
+    def test_candidate_never_leaks_to_snapshot_or_gate(self):
+        pid = self._make_product("SLICE-C2")
+        # 快照：无已核准品类 → 空串；仅候选 → 仍空串；核准后发布 → 生效
+        self.db.publish_product("demo-tenant", pid)
+        import json as _json
+        snap = _json.loads(self.db.get_published_version("demo-tenant", pid)["snapshot_json"])
+        self.assertEqual(snap["product"]["category"], "")
+        self.db.set_category_candidate("demo-tenant", pid, "离心泵", "model", "demo-admin")
+        self.db.publish_product("demo-tenant", pid)
+        snap = _json.loads(self.db.get_published_version("demo-tenant", pid)["snapshot_json"])
+        self.assertEqual(snap["product"]["category"], "")
+        self.assertEqual(self.db.get_approved_category("demo-tenant", pid), "")
+        self.db.approve_category("demo-tenant", pid, "demo-admin")
+        self.db.publish_product("demo-tenant", pid)
+        snap = _json.loads(self.db.get_published_version("demo-tenant", pid)["snapshot_json"])
+        self.assertEqual(snap["product"]["category"], "离心泵")
+
+    def test_validation_cross_tenant_and_clear(self):
+        pid = self._make_product("SLICE-C3")
+        with self.assertRaises(ValueError):
+            self.db.set_category_candidate("demo-tenant", pid, "   ", "manual", "demo-admin")
+        with self.assertRaises(ValueError):
+            self.db.set_category_candidate("demo-tenant", pid, "泵" * 41, "manual", "demo-admin")
+        with self.assertRaises(ValueError):
+            self.db.set_category_candidate("demo-tenant", pid, "离心泵", "guess", "demo-admin")
+        # 清除候选
+        self.db.set_category_candidate("demo-tenant", pid, "离心泵", "manual", "demo-admin")
+        self.db.clear_category_candidate("demo-tenant", pid, "demo-admin")
+        row = self.db.conn.execute("SELECT category_candidate FROM products WHERE id=?", (pid,)).fetchone()
+        self.assertEqual(row["category_candidate"], "")
+        with self.assertRaises(ValueError):
+            self.db.clear_category_candidate("demo-tenant", pid, "demo-admin")
+        # 跨租户：视为不存在
+        self.db.ensure_tenant("other-tenant", "另一家企业")
+        with self.assertRaises(ValueError):
+            self.db.set_category_candidate("other-tenant", pid, "离心泵", "manual", "setup")
+        with self.assertRaises(ValueError):
+            self.db.approve_category("other-tenant", pid, "setup")
+
+    def test_http_flow_page_rendering_and_module_gate(self):
+        pid = self._make_product("SLICE-C4")
+        # 零权限员工 → 403（含所属模块提示）
+        status, _, _ = form_request(
+            self.server, "POST", f"/admin/products/{pid}/category/candidate",
+            {"category": "离心泵", "source": "manual"}, self.nobody_cookie,
+        )
+        self.assertEqual(status, 403)
+        # 授权成员登记候选 → 303 + notice；页面渲染候选与核准入口
+        status, headers, _ = form_request(
+            self.server, "POST", f"/admin/products/{pid}/category/candidate",
+            {"category": "离心泵", "source": "manual"}, self.member_cookie,
+        )
+        self.assertEqual(status, 303)
+        self.assertIn("notice=category-candidate", headers["Location"])
+        _s, _, page = form_request(self.server, "GET", f"/admin/products/{pid}", cookie=self.member_cookie)
+        self.assertIn("品类（候选与核准）", page)
+        self.assertIn("当前候选：<b>离心泵</b>", page)
+        self.assertIn("核准为正式品类", page)
+        # 授权成员核准 → 303 + notice；页面显示已核准（操作者+时间）
+        status, headers, _ = form_request(
+            self.server, "POST", f"/admin/products/{pid}/category/approve", {}, self.member_cookie
+        )
+        self.assertEqual(status, 303)
+        self.assertIn("notice=category-approve", headers["Location"])
+        _s, _, page = form_request(self.server, "GET", f"/admin/products/{pid}", cookie=self.admin_cookie)
+        self.assertIn("已核准：离心泵", page)
+        self.assertIn("cat-member@example.invalid", page)
+        # 无候选核准 → 400
+        status, _, _ = form_request(
+            self.server, "POST", f"/admin/products/{pid}/category/approve", {}, self.admin_cookie
+        )
+        self.assertEqual(status, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

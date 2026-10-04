@@ -91,6 +91,11 @@ PRODUCT_PAGE_GROUPS = (
 SOURCE_SCOPES = {"exact_model": "本型号", "series": "系列", "unknown": "归属待核对"}
 # V1-02 附件三级可见性：「可公开」＝归属已确认并通过公开下载许可（进入公开版本）；默认「仅内部」不上公开页；「禁止使用」的文件不得进入新买方页面、新回答引用与公开下载。
 SOURCE_USAGE_LEVELS = {"internal": "仅内部", "restricted": "禁止使用"}
+# V1-02 品类核准：品类候选可由资料/模型/人工提出，必须以授权成员核准为准；
+# 未核准的候选不进入买方页、不用于任何按品类派生行为（get_approved_category 只返回已核准值）。
+CATEGORY_SOURCE_OPTIONS = (("doc", "资料建议"), ("model", "模型建议"), ("manual", "人工录入"))
+CATEGORY_SOURCE_LABELS = dict(CATEGORY_SOURCE_OPTIONS)
+CATEGORY_MAX_LENGTH = 40
 # 跨站会话交接（一次性交接码）：官网聊天（来源 A）与平台产品页（来源 B）不同来源时，
 # 由持有会话凭据的聊天方出具短时、一次性、绑定站点与型号的交接码；产品页在平台自身
 # 来源上用它换取同一会话的新凭据。码与凭据都只存摘要（SHA-256）；长期会话凭据绝不
@@ -319,6 +324,12 @@ class Database:
                 use_case TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'draft',
                 slug TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT '',
+                category_candidate TEXT NOT NULL DEFAULT '',
+                category_candidate_source TEXT NOT NULL DEFAULT '',
+                category_candidate_at TEXT,
+                category_approved_by TEXT NOT NULL DEFAULT '',
+                category_approved_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE (tenant_id, model),
@@ -635,6 +646,17 @@ class Database:
         for column, definition in (("close_reason", "TEXT NOT NULL DEFAULT ''"), ("closed_at", "TEXT")):
             if column not in lead_columns:
                 self.conn.execute(f"ALTER TABLE leads ADD COLUMN {column} {definition}")
+        product_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(products)")}
+        for column, definition in (
+            ("category", "TEXT NOT NULL DEFAULT ''"),
+            ("category_candidate", "TEXT NOT NULL DEFAULT ''"),
+            ("category_candidate_source", "TEXT NOT NULL DEFAULT ''"),
+            ("category_candidate_at", "TEXT"),
+            ("category_approved_by", "TEXT NOT NULL DEFAULT ''"),
+            ("category_approved_at", "TEXT"),
+        ):
+            if column not in product_columns:
+                self.conn.execute(f"ALTER TABLE products ADD COLUMN {column} {definition}")
         source_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(source_documents)")}
         for column, definition in (
             ("scope", "TEXT NOT NULL DEFAULT 'unknown'"),
@@ -2766,6 +2788,61 @@ class Database:
                 self.approve_field(tenant_id, product_id, field["field_key"], actor)
         self.finalize_product_review(tenant_id, product_id, actor)
 
+    def set_category_candidate(self, tenant_id: str, product_id: str, value: str, source: str, actor: str = "demo-admin") -> None:
+        """登记/替换品类候选（资料建议 / 模型建议 / 人工录入）。候选不等于已核准品类。"""
+        if not self.get_product(tenant_id, product_id):
+            raise ValueError("产品不存在")
+        value = value.strip()
+        if not value:
+            raise ValueError("候选品类不能为空")
+        if len(value) > CATEGORY_MAX_LENGTH:
+            raise ValueError(f"候选品类过长（最多 {CATEGORY_MAX_LENGTH} 字）")
+        if source not in CATEGORY_SOURCE_LABELS:
+            raise ValueError("候选来源无效")
+        timestamp = now_iso()
+        self.conn.execute(
+            "UPDATE products SET category_candidate=?, category_candidate_source=?, category_candidate_at=?, updated_at=? WHERE tenant_id=? AND id=?",
+            (value, source, timestamp, timestamp, tenant_id, product_id),
+        )
+        self._audit(tenant_id, "product", product_id, "category_candidate_set", actor, f"候选={value}；来源={CATEGORY_SOURCE_LABELS[source]}")
+        self.conn.commit()
+
+    def approve_category(self, tenant_id: str, product_id: str, actor: str = "demo-admin") -> str:
+        """授权成员核准品类：候选 → 正式品类；审计记录 before→after，候选清空。"""
+        product = self.get_product(tenant_id, product_id)
+        if not product:
+            raise ValueError("产品不存在")
+        candidate = (product["category_candidate"] or "").strip()
+        if not candidate:
+            raise ValueError("没有待核准的品类候选")
+        previous = product["category"] or ""
+        timestamp = now_iso()
+        self.conn.execute(
+            "UPDATE products SET category=?, category_approved_by=?, category_approved_at=?, category_candidate='', category_candidate_source='', category_candidate_at=NULL, updated_at=? WHERE tenant_id=? AND id=?",
+            (candidate, actor, timestamp, timestamp, tenant_id, product_id),
+        )
+        self._audit(tenant_id, "product", product_id, "category_approved", actor, f"{previous or '（未设置）'} -> {candidate}")
+        self.conn.commit()
+        return candidate
+
+    def clear_category_candidate(self, tenant_id: str, product_id: str, actor: str = "demo-admin") -> None:
+        product = self.get_product(tenant_id, product_id)
+        if not product:
+            raise ValueError("产品不存在")
+        if not (product["category_candidate"] or "").strip():
+            raise ValueError("没有待处理的品类候选")
+        self.conn.execute(
+            "UPDATE products SET category_candidate='', category_candidate_source='', category_candidate_at=NULL, updated_at=? WHERE tenant_id=? AND id=?",
+            (now_iso(), tenant_id, product_id),
+        )
+        self._audit(tenant_id, "product", product_id, "category_candidate_cleared", actor, product["category_candidate"] or "")
+        self.conn.commit()
+
+    def get_approved_category(self, tenant_id: str, product_id: str) -> str:
+        """只返回已核准品类（空串＝尚未核准）；候选值绝不从这里流出。"""
+        product = self.get_product(tenant_id, product_id)
+        return (product["category"] or "").strip() if product else ""
+
     def publish_product(self, tenant_id: str, product_id: str, actor: str = "demo-admin") -> int:
         product = self.get_product(tenant_id, product_id)
         if not product:
@@ -2803,7 +2880,7 @@ class Database:
             and (source["usage"] or "internal") != "restricted"
         ]
         snapshot = {
-            "product": {"model": product["model"], "name": product["name"], "use_case": product["use_case"], "slug": product["slug"]},
+            "product": {"model": product["model"], "name": product["name"], "use_case": product["use_case"], "slug": product["slug"], "category": (product["category"] or "")},
             "fields": [dict(field) for field in approved_fields],
             "missing_fields": missing,
             "public_sources": public_files,
@@ -4271,6 +4348,7 @@ AUDIT_ACTION_LABELS = {
     "review_finalized": "完成核对", "published": "发布版本", "withdrawn": "下架",
     "allowed_public_download": "开放下载", "revoked_public_download": "撤销下载",
     "usage_changed": "更新文件可见性", "public_permission_revoked_on_usage_change": "可见性变更撤销公开",
+    "category_candidate_set": "登记品类候选", "category_approved": "核准品类", "category_candidate_cleared": "清除品类候选",
     "public_download_blocked_hash_mismatch": "拦截下载（哈希不符）", "modules_updated": "模块授权",
     "exported": "导出数据", "completed": "完成", "sent": "记录发送", "discarded": "废弃",
     "milestone_completed": "节点完成", "milestone_reopened": "节点重开",
@@ -5792,6 +5870,19 @@ class Handler(BaseHTTPRequestHandler):
                     self.db.reopen_field(self.tenant_id, product_id, field_key, self.actor)
                 self.redirect(f"/admin/products/{product_id}?notice=field-{action}")
                 return
+            match = re.fullmatch(r"/admin/products/([a-f0-9]+)/category/(candidate|approve|clear)", path)
+            if match:
+                product_id, action = match.groups()
+                if action == "candidate":
+                    self.db.set_category_candidate(
+                        self.tenant_id, product_id, str(form.get("category", "")), str(form.get("source", "manual")), self.actor
+                    )
+                elif action == "approve":
+                    self.db.approve_category(self.tenant_id, product_id, self.actor)
+                else:
+                    self.db.clear_category_candidate(self.tenant_id, product_id, self.actor)
+                self.redirect(f"/admin/products/{product_id}?notice=category-{action}")
+                return
             match = re.fullmatch(r"/admin/products/([a-f0-9]+)/(approve|finalize-review|publish|withdraw)", path)
             if match:
                 product_id, action = match.groups()
@@ -5885,6 +5976,9 @@ class Handler(BaseHTTPRequestHandler):
             "usage": "文件可见性已更新。",
             "usage-revoked": "文件已标记禁止使用；原公开许可已自动撤销。新回答不再引用该文件，下次发布也不会包含其字段。",
             "usage-unchanged": "文件可见性未变化。",
+            "category-candidate": "品类候选已登记；候选不等于已核准，需由授权成员核准后才能生效。",
+            "category-approve": "品类已核准。",
+            "category-clear": "品类候选已清除。",
             "extract": "文件已按内容重新解析，结果在来源区显示。",
             "field": "字段已保存为候选值，需逐项核准或驳回后才能完成核对。",
             "field-approve": "字段已核准。",
@@ -6091,12 +6185,45 @@ class Handler(BaseHTTPRequestHandler):
             f"<a class='button secondary' href='/products/{esc(product['slug'])}' target='_blank'>查看买方页 ↗</a>"
             if published_version and product["status"] != "withdrawn" else ""
         )
+        category = (product["category"] or "").strip()
+        category_candidate = (product["category_candidate"] or "").strip()
+        category_source_label = CATEGORY_SOURCE_LABELS.get(product["category_candidate_source"], "")
+        if category:
+            category_status_span = (
+                f"已核准：{esc(category)}（{esc(product['category_approved_by'] or '')} · {esc(product['category_approved_at'] or '')}）"
+            )
+        else:
+            category_status_span = "尚未核准品类"
+        candidate_html = (
+            f"<p class='field-state'>当前候选：<b>{esc(category_candidate)}</b>（{esc(category_source_label)} · {esc(product['category_candidate_at'] or '')}）——候选不等于已核准。</p>"
+            if category_candidate else "<p class='field-state'>暂无待核准候选。</p>"
+        )
+        category_source_options = "".join(
+            f"<option value='{key}'>{label}</option>" for key, label in CATEGORY_SOURCE_OPTIONS
+        )
+        category_actions = (
+            f"<form method='post' action='/admin/products/{product_id}/category/candidate' class='inline'>"
+            f"<input name='category' placeholder='例如 离心泵' style='width:160px'><select name='source'>{category_source_options}</select> "
+            f"<button class='secondary'>登记候选</button></form>"
+        )
+        if category_candidate:
+            category_actions += (
+                f"<form method='post' action='/admin/products/{product_id}/category/approve' class='inline'><button>核准为正式品类</button></form>"
+                f"<form method='post' action='/admin/products/{product_id}/category/clear' class='inline'><button class='danger'>清除候选</button></form>"
+            )
+        category_section = (
+            f"<section class='card' style='margin-top:18px' id='category'><div class='panel-title'><h2>品类（候选与核准）</h2>"
+            f"<span class='muted'>{category_status_span}</span></div>{candidate_html}"
+            "<p class='muted'>品类可由资料、模型或人工提出候选，但必须由授权成员核准后才生效；未核准的候选不进入买方页、不用于按品类配置与工作流。核准动作全程审计。</p>"
+            f"<div style='display:flex;gap:8px;flex-wrap:wrap;align-items:center'>{category_actions}</div></section>"
+        )
         body = f"""
 <div class='toolbar'><div><a href='/admin/products'>← 返回产品列表</a><h1>{esc(product['model'])}</h1><div class='muted'>{esc(product['name'])} · {status_badge(product['status'])}</div></div><div>{view_page_link}</div></div>
 {notice_banner}
 {focus_html}
 {summary_strip}
 {missing_html}
+{category_section}
 <section class='card' id='fields'><div class='panel-title'><h2>字段核对（逐项）</h2><span class='muted'>待处理 {pending_count} 项</span></div>{pending_html}<p class='muted'>候选字段需逐项核准或驳回；驳回保留原值并记录原因。已核准关键字段被修改后会回到待核对，需重新核准并发布新版本；缺项不会被推测值填充。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th><th>操作</th></tr></thead><tbody>{field_table}</tbody></table><details class='detail-toggle'><summary>手动补充 / 修改字段值</summary><div><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置 *</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></div></details></section>
 <section class='card' style='margin-top:18px'><div class='panel-title'><h2>发布与版本</h2><span class='muted'>{version_line}</span></div><div class='actions' style='display:flex;gap:8px;flex-wrap:wrap'>{action_buttons}</div><p class='muted'>发布将冻结当前已核准事实与已开放公开文件清单；撤回后买方页不可访问，已提交的询价保留原版本快照。</p></section>
 <section class='card' style='margin-top:18px' id='sources'><h2>登记来源资料</h2>{source_rows}<p class='muted'>文件默认仅内部使用、不对外下载；可见性分「仅内部 / 禁止使用」，禁止使用的文件不进入买方页、不参与新回答引用。上传后的文本/CSV 会按内容识别已知字段标签；PDF、图片、CAD 等不支持的格式会明确失败，请人工录入。开放公开下载前必须确认文件归属。</p><hr><form method='post' action='/admin/products/{product_id}/sources' enctype='multipart/form-data'><label>文件（可选）</label><input type='file' name='source_file'><label>或资料文件名</label><input name='filename' placeholder='产品手册.pdf'><div class='form-grid'><div><label>类型</label><select name='file_type'><option>PDF</option><option>XLSX</option><option>MARKDOWN</option><option>TXT</option><option>IMAGE</option><option>DXF</option><option>STEP</option><option>OTHER</option></select></div><div><label>文件归属 *</label><select name='scope' required><option value=''>请选择文件归属</option><option value='exact_model'>本型号专属文件</option><option value='series'>系列级资料（非本型号专属）</option><option value='unknown'>归属待核对（不上公开页）</option></select></div><div class='full'><label>原文位置 *</label><input name='source_location' placeholder='第 1 页：规格参数表' required></div></div><p><button class='secondary'>保存来源</button></p></form></section>
