@@ -724,7 +724,215 @@ class PreviewTests(unittest.TestCase):
         self.assertIn("满意，去应用", page)
         self.assertIn("PV-100", page)
         self.assertIn("fs on'>看效果", page)
-        self.assertEqual(page.count("class='flowbar"), 1)
+        self.assertEqual(page.count("class='flowbar'"), 1)
+
+
+class PublishFlowTests(unittest.TestCase):
+    """产品页联动：提交/确认上线/撤回、产品发布冻结引用、公开页按引用渲染（回归锁）。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.db.ensure_tenant("other-tenant", "另一家企业")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        cls.db.create_user("demo-tenant", "v103s6-emp@example.invalid", "联动员工", "employee", "pass-publish-1", "demo-admin@example.invalid")
+        emp_row = cls.db.conn.execute("SELECT id FROM users WHERE email=?", ("v103s6-emp@example.invalid",)).fetchone()
+        cls.db.set_user_modules("demo-tenant", emp_row["id"], ["creative"], "demo-admin@example.invalid")
+        cls.emp = login(cls.server, "v103s6-emp@example.invalid", "pass-publish-1")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.temp_dir.cleanup()
+
+    # ── 工具 ──────────────────────────────────────────────────────────────
+    def _make_product(self, model, category):
+        pid = self.db.create_product("demo-tenant", model, f"{model} 测试机", "测试用途", "demo-admin@example.invalid")
+        self.db.set_category_candidate("demo-tenant", pid, category, "manual", "demo-admin@example.invalid")
+        self.db.approve_category("demo-tenant", pid, "demo-admin@example.invalid")
+        self.db.add_source("demo-tenant", pid, f"{model}-手册.txt", "TXT", "第1页：参数表", "流量范围: 20-80 m³/h\n".encode(), "demo-admin@example.invalid", scope="exact_model")
+        self.db.approve_field("demo-tenant", pid, "flow_range")
+        self.db.finalize_product_review("demo-tenant", pid)
+        return pid
+
+    def _make_template(self, category, specs_title_zh="联动规格"):
+        tid = self.db.create_template("demo-tenant", category, "demo-admin@example.invalid")
+        draft = json.loads(self.db.get_template("demo-tenant", tid)["draft_json"])
+        for block in draft["blocks"]:
+            if block["key"] == "specs":
+                block["title_zh"] = specs_title_zh
+                block["title_en"] = "Linked specs"
+            if block["key"] == "faq":
+                block["enabled"] = False
+        self.db.save_template_draft("demo-tenant", tid, draft, "demo-admin@example.invalid")
+        return tid
+
+    def _get_public(self, model, lang="zh"):
+        status, _, page = form_request(self.server, "GET", f"/products/{model.lower()}?lang={lang}")
+        self.assertEqual(status, 200)
+        return page
+
+    def _audit_actions(self):
+        rows = self.db.conn.execute("SELECT action FROM audit_log WHERE tenant_id='demo-tenant'").fetchall()
+        return [row["action"] for row in rows]
+
+    # ── 用例 ──────────────────────────────────────────────────────────────
+    def test_submit_confirm_withdraw_permissions(self):
+        tid = self._make_template("权限品类")
+        # 员工提交给管理员
+        status, headers, _ = form_request(self.server, "POST", f"/admin/creative/{tid}/publish/submit", {}, self.emp)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=submitted", headers.get("Location", ""))
+        self.assertEqual(self.db.get_template("demo-tenant", tid)["status"], "submitted")
+        # 员工不能确认上线 / 撤回
+        status, _, body = form_request(self.server, "POST", f"/admin/creative/{tid}/publish/confirm", {}, self.emp)
+        self.assertEqual(status, 403)
+        self.assertIn("只对管理员开放", body)
+        status, _, _ = form_request(self.server, "POST", f"/admin/creative/{tid}/publish/withdraw", {}, self.emp)
+        self.assertEqual(status, 403)
+        self.assertEqual(self.db.get_template("demo-tenant", tid)["published_version"] or 0, 0)
+        # 管理员视角可见「已提交，待确认」
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}?step=publish", cookie=self.admin)
+        self.assertIn("已提交，待确认", page)
+        # 管理员确认上线 → v1 冻结
+        status, headers, _ = form_request(self.server, "POST", f"/admin/creative/{tid}/publish/confirm", {}, self.admin)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=published", headers.get("Location", ""))
+        self.assertIn("v=1", headers.get("Location", ""))
+        template = self.db.get_template("demo-tenant", tid)
+        self.assertEqual(template["published_version"], 1)
+        self.assertEqual(template["status"], "published")
+        versions = self.db.list_template_versions("demo-tenant", tid)
+        self.assertEqual(len(versions), 1)
+        self.assertEqual(versions[0]["approved_by"], "demo-admin@example.invalid")
+        # 管理员撤回
+        status, headers, _ = form_request(self.server, "POST", f"/admin/creative/{tid}/publish/withdraw", {}, self.admin)
+        self.assertEqual(status, 303)
+        self.assertEqual(self.db.get_template("demo-tenant", tid)["status"], "withdrawn")
+        # 三个动作都有审计
+        actions = self._audit_actions()
+        self.assertIn("template_submitted", actions)
+        self.assertIn("template_published", actions)
+        self.assertIn("template_withdrawn", actions)
+
+    def test_withdraw_without_version_rejected(self):
+        tid = self._make_template("空撤回品类")
+        status, _, body = form_request(self.server, "POST", f"/admin/creative/{tid}/publish/withdraw", {}, self.admin)
+        self.assertEqual(status, 400)
+        self.assertIn("还没有上线版本", body)
+
+    def test_publish_binds_version_and_frozen_render(self):
+        pid = self._make_product("XJ-100", "联动品类")
+        tid = self._make_template("联动品类", "联动规格")
+        self.db.publish_template_version("demo-tenant", tid, "demo-admin@example.invalid")  # v1
+        self.db.publish_product("demo-tenant", pid, "demo-admin@example.invalid")
+        snapshot = json.loads(self.db.get_published_version("demo-tenant", pid)["snapshot_json"])
+        self.assertEqual(snapshot["template"]["version"], 1)
+        self.assertEqual(snapshot["template"]["template_id"], tid)
+        page = self._get_public("XJ-100")
+        self.assertIn("联动规格", page)
+        self.assertNotIn("常见问题", page)  # FAQ 板块被关闭
+        self.assertNotIn("首页 › 产品 › 水泵", page)  # 审定去行业词：面包屑
+        self.assertIn("首页 › 产品", page)
+        self.assertIn("| Product", page)  # 页面标题品牌后缀
+        # 草稿改新标题并确认 v2 → 公开页仍显示 v1 内容（发布即冻结）
+        draft = json.loads(self.db.get_template("demo-tenant", tid)["draft_json"])
+        for block in draft["blocks"]:
+            if block["key"] == "specs":
+                block["title_zh"] = "第二版规格"
+        self.db.save_template_draft("demo-tenant", tid, draft, "demo-admin@example.invalid")
+        self.db.publish_template_version("demo-tenant", tid, "demo-admin@example.invalid")  # v2
+        page = self._get_public("XJ-100")
+        self.assertIn("联动规格", page)
+        self.assertNotIn("第二版规格", page)
+        # 产品重新发布 → 应用 v2
+        self.db.publish_product("demo-tenant", pid, "demo-admin@example.invalid")
+        page = self._get_public("XJ-100")
+        self.assertIn("第二版规格", page)
+
+    def test_withdraw_stops_new_references(self):
+        pid1 = self._make_product("XJ-200", "撤回品类")
+        tid = self._make_template("撤回品类", "撤回规格")
+        self.db.publish_template_version("demo-tenant", tid, "demo-admin@example.invalid")
+        self.db.publish_product("demo-tenant", pid1, "demo-admin@example.invalid")
+        self.db.withdraw_template("demo-tenant", tid, "demo-admin@example.invalid")
+        # 已发布产品维持之前发布的版本
+        self.assertIn("撤回规格", self._get_public("XJ-200"))
+        # 撤回后新产品发布不再引用 → 平台标准样式
+        pid2 = self._make_product("XJ-201", "撤回品类")
+        self.db.publish_product("demo-tenant", pid2, "demo-admin@example.invalid")
+        snapshot2 = json.loads(self.db.get_published_version("demo-tenant", pid2)["snapshot_json"])
+        self.assertNotIn("template", snapshot2)
+        page2 = self._get_public("XJ-201")
+        self.assertNotIn("撤回规格", page2)
+        self.assertIn("技术参数", page2)
+        # 老产品重新发布 → 也停止引用，回退标准样式
+        self.db.publish_product("demo-tenant", pid1, "demo-admin@example.invalid")
+        self.assertNotIn("撤回规格", self._get_public("XJ-200"))
+
+    def test_publish_step_ui_and_relink_hint(self):
+        pid = self._make_product("XJ-300", "提示品类")
+        tid = self._make_template("提示品类", "提示规格")
+        self.db.publish_product("demo-tenant", pid, "demo-admin@example.invalid")
+        # 管理员视角：有确认按钮、无撤回按钮；关联产品等待上线
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}?step=publish", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("publish/confirm", page)
+        self.assertNotIn("publish/submit", page)
+        self.assertNotIn("撤回（停止新引用）", page)
+        self.assertIn("会用到这份展示页的产品", page)
+        self.assertIn("XJ-300", page)
+        self.assertIn("确认上线后，重新发布该产品即可应用", page)
+        # 确认上线 v1 → 出现撤回按钮；产品提示「需要重新发布」
+        self.db.publish_template_version("demo-tenant", tid, "demo-admin@example.invalid")
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}?step=publish", cookie=self.admin)
+        self.assertIn("撤回（停止新引用）", page)
+        self.assertIn("需要「重新发布」才生效", page)
+        self.assertIn("最近上线：v1", page)
+        # 产品重新发布 → 已应用 v1
+        self.db.publish_product("demo-tenant", pid, "demo-admin@example.invalid")
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}?step=publish", cookie=self.admin)
+        self.assertIn("已应用 v1", page)
+        # 员工视角：只有提交按钮，没有确认/撤回
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}?step=publish", cookie=self.emp)
+        self.assertEqual(status, 200)
+        self.assertIn("publish/submit", page)
+        self.assertNotIn("publish/confirm", page)
+        self.assertNotIn("publish/withdraw", page)
+
+    def test_unpublished_changes_badges(self):
+        tid = self._make_template("徽标品类")
+        self.db.publish_template_version("demo-tenant", tid, "demo-admin@example.invalid")
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}", cookie=self.admin)
+        self.assertIn("已上线 v1", page)
+        self.assertNotIn("有改动还没发布", page)
+        # 改草稿 → 出现「有改动还没发布」
+        draft = json.loads(self.db.get_template("demo-tenant", tid)["draft_json"])
+        for block in draft["blocks"]:
+            if block["key"] == "specs":
+                block["title_zh"] = "改后又改"
+        self.db.save_template_draft("demo-tenant", tid, draft, "demo-admin@example.invalid")
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}", cookie=self.admin)
+        self.assertIn("已上线 v1", page)
+        self.assertIn("有改动还没发布", page)
+        # 再确认上线 → 徽标消失
+        self.db.publish_template_version("demo-tenant", tid, "demo-admin@example.invalid")
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}", cookie=self.admin)
+        self.assertIn("已上线 v2", page)
+        self.assertNotIn("有改动还没发布", page)
+
+    def test_publish_action_cross_tenant(self):
+        foreign = self.db.create_template("other-tenant", "别家品类", "setup")
+        status, _, body = form_request(self.server, "POST", f"/admin/creative/{foreign}/publish/confirm", {}, self.admin)
+        self.assertEqual(status, 400)
+        self.assertIn("展示页不存在", body)
 
 
 if __name__ == "__main__":

@@ -3309,6 +3309,78 @@ class Database:
             "SELECT * FROM template_versions WHERE tenant_id=? AND template_id=? ORDER BY version DESC", (tenant_id, template_id)
         ).fetchall()
 
+    def get_template_version(self, tenant_id: str, version_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM template_versions WHERE tenant_id=? AND id=?", (tenant_id, version_id)
+        ).fetchone()
+
+    def template_has_unpublished_changes(self, tenant_id: str, template: sqlite3.Row) -> bool:
+        """草稿与最近上线版本是否不一致（还没有上线版本＝有未发布内容）。"""
+        if not template["published_version"]:
+            return True
+        row = self.conn.execute(
+            "SELECT content_json FROM template_versions WHERE tenant_id=? AND template_id=? AND version=?",
+            (tenant_id, template["id"], template["published_version"]),
+        ).fetchone()
+        if not row:
+            return True
+        return (template["draft_json"] or "") != (row["content_json"] or "")
+
+    def submit_template(self, tenant_id: str, template_id: str, actor: str = "demo-admin") -> None:
+        """员工提交给管理员确认（不改变任何对外内容）。"""
+        if not self.get_template(tenant_id, template_id):
+            raise ValueError("展示页不存在")
+        self.conn.execute(
+            "UPDATE templates SET status='submitted', updated_at=? WHERE tenant_id=? AND id=?",
+            (now_iso(), tenant_id, template_id),
+        )
+        self._audit(tenant_id, "template", template_id, "template_submitted", actor, "")
+        self.conn.commit()
+
+    def publish_template_version(self, tenant_id: str, template_id: str, actor: str = "demo-admin") -> int:
+        """确认上线：把当前草稿冻结为下一个版本（仅管理员；界面层已做权限拦截）。"""
+        template = self.get_template(tenant_id, template_id)
+        if not template:
+            raise ValueError("展示页不存在")
+        version = (template["published_version"] or 0) + 1
+        now = now_iso()
+        self.conn.execute(
+            "INSERT INTO template_versions(id, tenant_id, template_id, version, content_json, status, approved_by, approved_at, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'published', ?, ?, ?, ?)",
+            (secrets.token_hex(12), tenant_id, template_id, version, template["draft_json"], actor, now, actor, now),
+        )
+        self.conn.execute(
+            "UPDATE templates SET published_version=?, status='published', updated_at=? WHERE tenant_id=? AND id=?",
+            (version, now, tenant_id, template_id),
+        )
+        self._audit(tenant_id, "template", template_id, "template_published", actor, f"version={version}")
+        self.conn.commit()
+        return version
+
+    def withdraw_template(self, tenant_id: str, template_id: str, actor: str = "demo-admin") -> None:
+        """撤回＝停止新引用：之后产品重新发布不再引用此展示页；已发布版本不受影响。"""
+        if not self.get_template(tenant_id, template_id):
+            raise ValueError("展示页不存在")
+        self.conn.execute(
+            "UPDATE templates SET status='withdrawn', updated_at=? WHERE tenant_id=? AND id=?",
+            (now_iso(), tenant_id, template_id),
+        )
+        self._audit(tenant_id, "template", template_id, "template_withdrawn", actor, "")
+        self.conn.commit()
+
+    def resolve_template_for_category(self, tenant_id: str, category: str) -> sqlite3.Row | None:
+        """该品类当前可被产品发布引用的展示页版本行（已上线且未撤回）；无则 None。"""
+        category = (category or "").strip()
+        if not category:
+            return None
+        template = self.get_template_for_category(tenant_id, category)
+        if not template or template["status"] != "published" or not template["published_version"]:
+            return None
+        return self.conn.execute(
+            "SELECT * FROM template_versions WHERE tenant_id=? AND template_id=? AND version=?",
+            (tenant_id, template["id"], template["published_version"]),
+        ).fetchone()
+
     def creative_home_rows(self, tenant_id: str) -> dict:
         """创意中心首页数据：按品类聚合（覆盖产品 + 对应展示页），并统计未核准品类的产品数。"""
         products = self.conn.execute(
@@ -3372,6 +3444,9 @@ class Database:
             if source["id"] in public_ids and source["storage_path"] and source["scope"] in ("exact_model", "series")
             and (source["usage"] or "internal") != "restricted"
         ]
+        # V1-03：产品发布时按「已核准品类」引用当前已上线的展示页版本（发布即冻结；
+        # 无引用＝平台标准模板；撤回＝停止新引用）。
+        template_version = self.resolve_template_for_category(tenant_id, self.get_approved_category(tenant_id, product_id))
         snapshot = {
             "product": {"model": product["model"], "name": product["name"], "use_case": product["use_case"], "slug": product["slug"], "category": (product["category"] or "")},
             "fields": [dict(field) for field in approved_fields],
@@ -3379,6 +3454,12 @@ class Database:
             "public_sources": public_files,
             "published_at": now_iso(),
         }
+        if template_version:
+            snapshot["template"] = {
+                "template_id": template_version["template_id"],
+                "template_version_id": template_version["id"],
+                "version": template_version["version"],
+            }
         if previous:
             self.conn.execute("UPDATE product_versions SET status='withdrawn' WHERE id=?", (previous["id"],))
         self.conn.execute(
@@ -5194,6 +5275,22 @@ def resolved_template_blocks(draft: dict) -> list[dict]:
     return result
 
 
+def template_status_badges(db: Database, template: sqlite3.Row) -> str:
+    """展示页状态徽标（首页行与编辑区共用）：已上线 vN / 有改动还没发布 / 已撤回 / 已提交待确认。"""
+    badges = []
+    if template["status"] == "withdrawn":
+        badges.append("<span class='badge withdrawn'>已撤回</span>")
+    elif template["published_version"]:
+        badges.append(f"<span class='badge approved'>已上线 v{template['published_version']}</span>")
+        if db.template_has_unpublished_changes(template["tenant_id"], template):
+            badges.append("<span class='badge pending_review'>有改动还没发布</span>")
+    else:
+        badges.append("<span class='badge pending_review'>有改动还没发布</span>")
+    if template["status"] == "submitted":
+        badges.append("<span class='badge info'>已提交，待确认</span>")
+    return " ".join(badges)
+
+
 def enabled_render_blocks(blocks: list | None) -> list[dict]:
     """渲染用：给定 blocks 配置返回启用项（按列表顺序）；缺省 = 标准模板默认组合。"""
     items = [b for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else []
@@ -5360,6 +5457,7 @@ AUDIT_ACTION_LABELS = {
     "exported": "导出数据", "completed": "完成", "sent": "记录发送", "discarded": "废弃",
     "milestone_completed": "节点完成", "milestone_reopened": "节点重开",
     "template_created": "创建展示页", "template_draft_saved": "保存展示页改动",
+    "template_submitted": "提交展示页给管理员", "template_published": "确认上线展示页", "template_withdrawn": "撤回展示页",
 }
 
 
@@ -6927,6 +7025,10 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 self.admin_creative_blocks_action(match.group(1), match.group(2), form)
                 return
+            match = re.fullmatch(r"/admin/creative/([a-f0-9]+)/publish/(submit|confirm|withdraw)", path)
+            if match:
+                self.admin_creative_publish_action(match.group(1), match.group(2))
+                return
             if path == "/admin/settings/stages":
                 self.admin_settings_save_stages(form)
                 return
@@ -8179,10 +8281,7 @@ class Handler(BaseHTTPRequestHandler):
                 for product in row["products"]
             ) or "（暂无产品）"
             if template:
-                if template["published_version"]:
-                    badge = f"<span class='badge approved'>已上线 v{template['published_version']}</span>"
-                else:
-                    badge = "<span class='badge pending_review'>有改动还没发布</span>"
+                badge = template_status_badges(self.db, template)
                 updated = (template["draft_updated_at"] or template["created_at"])[:16].replace("T", " ")
                 meta = f"更新：{esc(template['draft_updated_by'] or template['created_by'])} · {esc(updated)}"
                 actions = (
@@ -8257,17 +8356,24 @@ class Handler(BaseHTTPRequestHandler):
         step = query.get("step", ["params"])[0]
         if step not in {key for key, _label in CREATIVE_STEPS}:
             step = "params"
-        label = dict(CREATIVE_STEPS)[step]
-        if template["published_version"]:
-            badge = f"<span class='badge approved'>已上线 v{template['published_version']}</span>"
+        badge = template_status_badges(self.db, template)
+        if template["status"] == "withdrawn":
+            line = "已停止新引用；重新确认上线后，产品重新发布时会再次应用这一版。"
+        elif template["published_version"]:
             line = f"线上版本 v{template['published_version']}；改动只在确认上线并由产品重新发布后才对买家生效。"
         else:
-            badge = "<span class='badge pending_review'>有改动还没发布</span>"
             line = "这个展示页还没有上线；买家目前看到平台标准样式。"
         notices = {
             "created": "<div class='notice'>展示页已创建。建议顺序：选参数 → 排内容 → 看效果。</div>",
             "existing": "<div class='notice'>该品类已有展示页，已直接打开现有页。</div>",
+            "submitted": "<div class='notice'>已提交给管理员，等待确认上线。</div>",
         }
+        notice_key = query.get("notice", [""])[0]
+        notice_html = notices.get(notice_key, "")
+        if notice_key == "published":
+            notice_html = f"<div class='notice'>已确认上线 v{esc(query.get('v', [''])[0])}。到对应产品上「重新发布」后，买家就能看到这一版。</div>"
+        elif notice_key == "withdrawn":
+            notice_html = "<div class='notice'>已撤回：之后重新发布的产品会回到平台标准样式；已发布产品维持之前发布时的版本。</div>"
         saved_line = ""
         if template["draft_updated_at"]:
             saved_line = f" · 已自动保存 {template['draft_updated_at'][5:16].replace('T', ' ')}"
@@ -8278,11 +8384,11 @@ class Handler(BaseHTTPRequestHandler):
         elif step == "preview":
             content = self.creative_preview_step(template_id, template)
         else:
-            content = f"<section class='card'><div class='panel-title'><h2>{label}</h2></div><p class='muted-block'>「{label}」编辑器正在建设中，即将可用。</p></section>"
+            content = self.creative_publish_step(template)
         body = f"""
 <div class='toolbar'><div><h1>{esc(template['category'])} · 产品展示页 {badge}</h1>
 <div class='muted'>{line}{saved_line}</div></div></div>
-{notices.get(query.get("notice", [""])[0], "")}
+{notice_html}
 {creative_flowbar(step, template_id=template_id)}
 {content}
 <script>{CREATIVE_PARAMS_JS}</script>
@@ -8378,6 +8484,118 @@ class Handler(BaseHTTPRequestHandler):
         else:
             page = toolbar + page
         self.send_html(page, 200)
+
+    def creative_publish_step(self, template: sqlite3.Row) -> str:
+        """「产品页联动」步骤：提交/确认上线/撤回 + 关联产品与重新发布提示。"""
+        template_id = template["id"]
+        is_admin = self.user_role == "admin"
+        published_version = template["published_version"] or 0
+        is_withdrawn = template["status"] == "withdrawn"
+        dirty = self.db.template_has_unpublished_changes(self.tenant_id, template)
+        head = """
+<div class='panel-title'><h2>产品页联动</h2><span class='muted'>这一版如何发布、哪些产品会用到</span></div>"""
+        if is_withdrawn:
+            state = "<span class='badge withdrawn'>已撤回</span>"
+            state_text = "已停止新引用：之后重新发布的产品会回到平台标准样式；已发布产品维持之前发布时的版本，重新确认上线后可再次应用。"
+        elif published_version and not dirty:
+            state = f"<span class='badge approved'>已上线 v{published_version}</span>"
+            state_text = "当前编辑内容和线上版本一致，买家看到的就是这一版。"
+        elif published_version:
+            state = f"<span class='badge approved'>已上线 v{published_version}</span> <span class='badge pending_review'>有改动还没发布</span>"
+            state_text = "最近有改动还没上线；确认上线并在产品上重新发布后，买家才能看到新版本。"
+        else:
+            state = "<span class='badge pending_review'>尚未上线</span>"
+            state_text = "买家目前看到平台标准样式。确认上线后，再把产品重新发布一次即可应用。"
+        if template["status"] == "submitted":
+            state += " <span class='badge info'>已提交，待确认</span>"
+        versions = self.db.list_template_versions(self.tenant_id, template_id)
+        latest = versions[0] if versions else None
+        version_line = (
+            f"最近上线：v{latest['version']} · {esc(latest['approved_by'] or latest['created_by'])} · {esc((latest['approved_at'] or latest['created_at'] or '')[:16].replace('T', ' '))}"
+            if latest else "还没有确认上线的版本——确认上线后会在这里留下版本记录。"
+        )
+        if is_admin:
+            actions = (
+                f"<form class='inline' method='post' action='/admin/creative/{esc(template_id)}/publish/confirm'>"
+                f"<button>确认上线 · 发布为 v{published_version + 1}</button></form>"
+            )
+            if published_version and not is_withdrawn:
+                actions += (
+                    f"<form class='inline' method='post' action='/admin/creative/{esc(template_id)}/publish/withdraw'>"
+                    f"<button class='warn'>撤回（停止新引用）</button></form>"
+                )
+            guide = "你是管理员：确认上线后，还需要到对应产品上「重新发布」，买家才会看到新版本；在此之前线上完全不受影响。"
+        else:
+            actions = (
+                f"<form class='inline' method='post' action='/admin/creative/{esc(template_id)}/publish/submit'>"
+                f"<button>提交给管理员</button></form>"
+            )
+            guide = "你提交后由管理员确认上线；确认后需要到产品上重新发布才会生效。"
+        products = [
+            item for item in self.db.list_products(self.tenant_id)
+            if self.db.get_approved_category(self.tenant_id, item["id"]) == template["category"]
+        ]
+        rows = []
+        for item in products:
+            version_row = self.db.get_published_version(self.tenant_id, item["id"])
+            ref_version = None
+            if version_row:
+                snapshot = json.loads(version_row["snapshot_json"])
+                ref = snapshot.get("template") if isinstance(snapshot, dict) else None
+                if isinstance(ref, dict) and ref.get("template_id") == template_id:
+                    ref_version = ref.get("version")
+            if not version_row:
+                state_cell = "<span class='badge pending_review'>尚未发布</span> 发布该产品时会自动用上最新已上线版本"
+            elif is_withdrawn:
+                state_cell = (
+                    f"<span class='badge withdrawn'>仍沿用 v{ref_version}</span> 撤回只停止新引用" if ref_version
+                    else "未引用（展示页已撤回）"
+                )
+            elif not published_version:
+                state_cell = "确认上线后，重新发布该产品即可应用"
+            elif ref_version == published_version:
+                state_cell = f"<span class='badge approved'>已应用 v{ref_version}</span>"
+            else:
+                state_cell = "<span class='badge pending_review'>需要「重新发布」才生效</span>"
+            rows.append(
+                f"<div class='simple-item'><div><strong>{esc(item['model'])} · {esc(item['name'])}</strong>"
+                f"<small>{state_cell}</small></div>"
+                f"<div class='actions'><a class='button secondary' href='/admin/products/{esc(item['id'])}'>去产品页</a></div></div>"
+            )
+        products_html = "".join(rows) or "<div class='muted-block'>这个品类下暂时没有产品——先到「产品管理」添加。</div>"
+        return f"""<section class='card'>{head}
+<p style='margin:0 0 10px'>{state} {state_text}</p>
+<p class='muted' style='margin:0 0 14px'>{version_line}</p>
+<div class='actions' style='display:flex;gap:10px;flex-wrap:wrap'>{actions}</div>
+<p class='guide'>{guide}</p>
+<p class='guide'>上线后的版本会被冻结保存：以后继续修改草稿，不会影响买家看到的版本。</p>
+</section>
+<section class='card' style='margin-top:16px'><div class='panel-title'><h2>会用到这份展示页的产品</h2><span class='muted'>发布或重新发布后自动应用</span></div>
+<div class='simple-list'>{products_html}</div></section>"""
+
+    def admin_creative_publish_action(self, template_id: str, action: str) -> None:
+        """产品页联动动作：提交给管理员（员工）/ 确认上线、撤回（仅管理员）。"""
+        template = self.db.get_template(self.tenant_id, template_id)
+        if not template:
+            raise ValueError("展示页不存在")
+        if action == "submit":
+            self.db.submit_template(self.tenant_id, template_id, self.actor)
+            self.redirect(f"/admin/creative/{template_id}?step=publish&notice=submitted")
+            return
+        if self.user_role != "admin":
+            self.send_html(self.console_page("无权操作", permission_notice("确认上线或撤回产品展示页", "员工", "管理员", "确认上线或撤回展示页只对管理员开放；员工可以先「提交给管理员」。"), "creative"), 403)
+            return
+        if action == "confirm":
+            version = self.db.publish_template_version(self.tenant_id, template_id, self.actor)
+            self.redirect(f"/admin/creative/{template_id}?step=publish&notice=published&v={version}")
+            return
+        if action == "withdraw":
+            if not (template["published_version"] or 0):
+                raise ValueError("还没有上线版本，无法撤回")
+            self.db.withdraw_template(self.tenant_id, template_id, self.actor)
+            self.redirect(f"/admin/creative/{template_id}?step=publish&notice=withdrawn")
+            return
+        raise ValueError("未知操作")
 
     def admin_creative_params_action(self, template_id: str, action: str, form: dict) -> None:
         """选参数改动（自动保存）：推荐池/自定义新增、开关、排序、行内编辑、删除。"""
@@ -9070,6 +9288,17 @@ class Handler(BaseHTTPRequestHandler):
         preview = 买家视角预览：不记录公开事件（且 site=None 时天然不含询价表单与聊天窗）。
         """
         snapshot = json.loads(version["snapshot_json"])
+        # V1-03：产品发布时冻结的展示页引用（无引用＝平台标准模板，输出与现状一致）。
+        if blocks is None and params is None:
+            template_ref = snapshot.get("template") if isinstance(snapshot, dict) else None
+            if isinstance(template_ref, dict) and template_ref.get("template_version_id"):
+                ref_row = self.db.get_template_version(tenant_id, str(template_ref["template_version_id"]))
+                if ref_row:
+                    ref_content = json.loads(ref_row["content_json"])
+                    if isinstance(ref_content.get("blocks"), list):
+                        blocks = ref_content["blocks"]
+                    if isinstance(ref_content.get("params"), list):
+                        params = ref_content["params"]
         sources = self.db.get_sources(tenant_id, product["id"])
         allowed_source_ids = self.db.public_downloadable_ids(tenant_id, product["id"])
         db_source_rows = {source["id"]: source for source in sources}
@@ -9221,7 +9450,7 @@ class Handler(BaseHTTPRequestHandler):
         comparison_header = "".join(f"<th>{esc(item['model'])}</th>" for item, _ in comparison_snapshots)
         comparison_rows = "".join(f"<tr><th>{esc(field_label(key))}</th>" + "".join(f"<td>{esc(fields[key]['value'])} {esc(fields[key]['unit'])}</td>" if fields.get(key) else f"<td class='page-missing'>{t('Not provided', '资料未提供')}</td>" for _, fields in comparison_snapshots) + "</tr>" for key in comparison_keys)
         comparison_links = "".join(f"<li><a href='{source_prefix}/products/{esc(item['slug'])}'>{esc(item['model'])}</a></li>" for item, _ in comparison_snapshots)
-        title = f"{product['model']} | Industrial Pump"
+        title = f"{product['model']} | Product"
         inquiry_link = "<a class='button' href='#product-rfq'>Request a quote / 发起询价</a>" if site else "<p class='muted'>Open the seller's website link to request a quote.</p>"
         chat_html = ""
         if site:
@@ -9265,7 +9494,7 @@ class Handler(BaseHTTPRequestHandler):
 <script src='/reference-client/product-page.js' defer></script>""" if site else ""
         public_path = f"/s/{quote(site['site_key'])}/products/{esc(product['slug'])}" if site else f"/products/{esc(product['slug'])}"
         mobile_cta_html = f"<a class='page-mobile-cta' href='#product-rfq'>{t('Request a quote', '发起询价')}</a>" if site else ""
-        breadcrumb_html = f"<nav class='page-breadcrumb' aria-label='Breadcrumb'>{t('Home › Products › Pump', '首页 › 产品 › 水泵')} › {esc(product['model'])}</nav>"
+        breadcrumb_html = f"<nav class='page-breadcrumb' aria-label='Breadcrumb'>{t('Home › Products', '首页 › 产品')} › {esc(product['model'])}</nav>"
         hero_action_parts = [inquiry_link]
         if "downloads" in enabled_set:
             hero_action_parts.append(f"<a class='button secondary' href='#downloads'>{t('View documents', '查看资料')}</a>")
