@@ -63,7 +63,8 @@
   .item .s{color:var(--muted); font-size:12.5px; margin-top:2px}
   .item .s b{color:#3D3D66; font-weight:600}
   .row-flex{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
-  .newcard{border:1px dashed #B9B2F0; background:#FBFAFF; border-radius:12px; padding:14px 16px; margin-bottom:14px}
+  .newcard{display:none; border:1px dashed #B9B2F0; background:#FBFAFF; border-radius:12px; padding:14px 16px; margin-bottom:14px}
+  .newcard.open{display:block}
   .newcard .step-t{font-size:11px; letter-spacing:.08em; color:var(--accent); font-weight:700}
   .newcard .line{display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:8px}
   input[type=text], select, textarea{border:1px solid var(--line); border-radius:8px; padding:7px 9px; font:inherit; font-size:13px; background:#fff}
@@ -126,7 +127,7 @@
     <nav class="nav"><a href="#"><span class="lft"><span class="dot"></span>企业设置</span></a><a href="#"><span class="lft"><span class="dot"></span>操作记录</span></a></nav>
   </aside>
   <main class="main">
-    <div class="demo-note">线框稿 <b>v0.3b</b>（示例数据）——顶部模块条＝产品内<b>唯一</b>导航（已去重：不再有第二排；它也是本线框的切换入口，点一下就能切换五屏）。首页＝产品视角列表；四步用连线递进、无编号；发布动作在「产品页联动」步。</div>
+    <div class="demo-note">线框稿 <b>v0.3b</b>（示例数据）——顶部模块条＝产品内<b>唯一</b>导航（已去重：不再有第二排；它也是本线框的切换入口，点一下就能切换五屏）。首页＝产品视角列表；点右上「＋ 新建展示页」展开「选择产品」卡片（<b>默认隐藏，再点收起</b>）；四步用连线递进、无编号；发布动作在「产品页联动」步。</div>
 
     <!-- ══ 唯一的顶部模块条（点击切换五屏）══ -->
     <div class="flowbar ghost" id="flowbar">
@@ -143,11 +144,11 @@
     <section class="screen on" id="s1">
       <div class="toolbar">
         <div><h1>产品展示页</h1><div class="sub">买家点开产品后看到的页面，都在这里管理。改完发布后，买家才会看到新版本。</div></div>
-        <div class="row-flex"><button class="btn">＋ 新建展示页</button></div>
+        <div class="row-flex"><button class="btn" id="btnNew">＋ 新建展示页</button></div>
       </div>
       <div class="coach">第一次设置？每一类产品做一份：选参数 → 排内容 → 看效果，大约 5 分钟。</div>
 
-      <div class="newcard">
+      <div class="newcard" id="newCard">
         <span class="step-t">新建展示页 · 第一步：选择产品</span>
         <div class="line">
           <select style="min-width:330px">
@@ -356,6 +357,9 @@
   }
   bar.querySelectorAll('[data-s]').forEach(b => b.addEventListener('click', () => render(b.dataset.s)));
   document.querySelectorAll('[data-goto]').forEach(b => b.addEventListener('click', () => render(b.dataset.goto)));
+  const btnNew = document.getElementById('btnNew');
+  const newCard = document.getElementById('newCard');
+  btnNew.addEventListener('click', () => newCard.classList.toggle('open'));
 </script>
 </body>
 </html>
