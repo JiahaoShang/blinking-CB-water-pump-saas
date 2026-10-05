@@ -8185,7 +8185,10 @@ class Handler(BaseHTTPRequestHandler):
                     badge = "<span class='badge pending_review'>有改动还没发布</span>"
                 updated = (template["draft_updated_at"] or template["created_at"])[:16].replace("T", " ")
                 meta = f"更新：{esc(template['draft_updated_by'] or template['created_by'])} · {esc(updated)}"
-                actions = f"<a class='button secondary' href='/admin/creative/{esc(template['id'])}'>继续编辑</a>"
+                actions = (
+                    f"<a class='button secondary' href='/admin/creative/{esc(template['id'])}/preview'>看效果</a>"
+                    f"<a class='button secondary' href='/admin/creative/{esc(template['id'])}'>继续编辑</a>"
+                )
             else:
                 badge = "<span class='badge'>尚未设置</span>"
                 meta = "买家目前看到平台标准样式"

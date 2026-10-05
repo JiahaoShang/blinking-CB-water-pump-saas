@@ -308,6 +308,7 @@ class CreativeHomeTests(unittest.TestCase):
         self.assertIn("工业输送设备 · 产品展示页", home)
         self.assertIn("有改动还没发布", home)
         self.assertIn("继续编辑", home)
+        self.assertIn("看效果", home)
         self.assertIn(f"/admin/products/{self.p1}", home)
         self.assertIn(f"/admin/products/{self.p2}", home)
         self.assertIn("另有 1 个产品还没有已核准的品类", home)
