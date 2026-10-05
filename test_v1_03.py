@@ -462,10 +462,143 @@ class ParamsEditorTests(unittest.TestCase):
         bar = page.split("class='flowbar", 1)[1].split("</div>", 1)[0]
         for digit in ("①", "②", "③", "④", "⑤"):
             self.assertNotIn(digit, bar)
-        # 其他步骤仍为占位（切片 4 上线）
+        # 相邻步骤：排内容已是真实编辑器（切片 4），看效果仍为占位（切片 5）
         status, _, blocks_page = form_request(self.server, "GET", f"/admin/creative/{self.template_id}?step=blocks", cookie=self.admin)
         self.assertEqual(status, 200)
-        self.assertIn("正在建设中", blocks_page)
+        self.assertIn("页面由哪些部分组成？", blocks_page)
+
+
+class BlocksEditorTests(unittest.TestCase):
+    """排内容编辑器：板块开关/排序/改标题、板块库、进阶折叠（AI 助手/分组名/版本记录）、自动保存。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.db.ensure_tenant("other-tenant", "另一家企业")
+        cls.template_id = cls.db.create_template("demo-tenant", "工业输送设备", "demo-admin@example.invalid")
+        cls.db.create_user("demo-tenant", "v103s4-nomod@example.invalid", "无权员工", "employee", "pass-blocks-1", "demo-admin@example.invalid")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        cls.nomod = login(cls.server, "v103s4-nomod@example.invalid", "pass-blocks-1")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.db.conn.close()
+        cls.thread.join()
+        cls.temp_dir.cleanup()
+
+    def _draft(self):
+        return json.loads(self.db.get_template("demo-tenant", self.template_id)["draft_json"])
+
+    def _blocks(self):
+        return self._draft()["blocks"]
+
+    def _keys(self):
+        return [b["key"] for b in self._blocks()]
+
+    def _find(self, key):
+        return next(b for b in self._blocks() if b["key"] == key)
+
+    def _post(self, action, fields):
+        return form_request(self.server, "POST", f"/admin/creative/{self.template_id}/blocks/{action}", fields, self.admin)
+
+    def test_blocks_actions_journey(self):
+        # 初始：12 板块、顺序=库顺序、hero 固定开启、图库默认关闭
+        self.assertEqual(self._keys(), [item["key"] for item in TEMPLATE_BLOCK_LIBRARY])
+        self.assertTrue(self._find("hero")["enabled"])
+        self.assertFalse(self._find("gallery")["enabled"])
+        # 开关：打开图库 → 关闭（回到初始）
+        status, headers, _ = self._post("toggle", {"block_key": "gallery"})
+        self.assertEqual(status, 303)
+        self.assertEqual(headers.get("Location", ""), f"/admin/creative/{self.template_id}?step=blocks")
+        self.assertTrue(self._find("gallery")["enabled"])
+        self._post("toggle", {"block_key": "gallery"})
+        self.assertFalse(self._find("gallery")["enabled"])
+        # 首屏固定：不可关闭
+        status, _, body = self._post("toggle", {"block_key": "hero"})
+        self.assertEqual(status, 400)
+        self.assertIn("固定", body)
+        # 排序：specs 上移一格；首位上移 = 不变
+        before = self._keys()
+        self._post("move", {"block_key": "specs", "dir": "up"})
+        after = self._keys()
+        self.assertEqual(after.index("specs"), before.index("specs") - 1)
+        self._post("move", {"block_key": after[0], "dir": "up"})
+        self.assertEqual(self._keys(), after)
+        # 改标题：设置 → 清空 → 再设置（供渲染用例断言）
+        self._post("update", {"block_key": "specs", "title_zh": "核心规格", "title_en": "Core specs"})
+        self.assertEqual(self._find("specs")["title_zh"], "核心规格")
+        self._post("update", {"block_key": "specs", "title_zh": "", "title_en": ""})
+        self.assertEqual(self._find("specs")["title_zh"], "")
+        self._post("update", {"block_key": "specs", "title_zh": "核心规格", "title_en": "Core specs"})
+        # 未知板块 → 400
+        status, _, body = self._post("toggle", {"block_key": "ghost"})
+        self.assertEqual(status, 400)
+        self.assertIn("板块不存在", body)
+        # 进阶：AI 助手偏好保存
+        self._post("advanced", {"ai_extract": "优先提取性能相关参数", "ai_locate": ""})
+        self.assertEqual(self._draft()["advanced"]["ai_prompts"]["extract"], "优先提取性能相关参数")
+        # 进阶：分组名保存 / 空名回退默认
+        self._post("group", {"group_zh": "性能参数", "group_en": "Performance"})
+        self.assertEqual(self._draft()["groups"][0]["label_zh"], "性能参数")
+        self._post("group", {"group_zh": "  ", "group_en": ""})
+        self.assertEqual(self._draft()["groups"][0]["label_zh"], "规格参数")
+        # 自动保存痕迹 + 审计累计（每次生效改动一条）
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{self.template_id}?step=blocks", cookie=self.admin)
+        self.assertIn("已自动保存", page)
+        saves = self.db.conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE entity_type='template' AND entity_id=? AND action='template_draft_saved'",
+            (self.template_id,),
+        ).fetchone()[0]
+        self.assertGreaterEqual(saves, 9)
+
+    def test_blocks_cross_tenant_and_unauthorized(self):
+        status, _, _ = form_request(
+            self.server, "POST", f"/admin/creative/{self.template_id}/blocks/toggle", {"block_key": "gallery"}, self.nomod
+        )
+        self.assertEqual(status, 403)
+        foreign = self.db.create_template("other-tenant", "别家品类", "setup")
+        status, _, body = form_request(
+            self.server, "POST", f"/admin/creative/{foreign}/blocks/toggle", {"block_key": "gallery"}, self.admin
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("展示页不存在", body)
+
+    def test_blocks_step_renders_and_no_jargon(self):
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{self.template_id}?step=blocks", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("页面由哪些部分组成？", page)
+        self.assertIn("从板块库添加", page)
+        self.assertIn("下一步 · 看效果", page)
+        self.assertIn("固定显示", page)
+        self.assertIn("改标题", page)
+        for item in TEMPLATE_BLOCK_LIBRARY:
+            self.assertIn(item["label_zh"], page)
+        # 关闭中的板块：注记 + 一键打开 chip；标题注记（旅程设置）
+        self.assertIn("已关闭：买家看不到这部分", page)
+        self.assertIn("＋ 图片与图库", page)
+        self.assertIn("标题：核心规格", page)
+        # 进阶折叠
+        self.assertIn("AI 助手设置（进阶）", page)
+        self.assertIn("分组名称（进阶）", page)
+        self.assertIn("版本记录", page)
+        self.assertIn("还没有发布历史", page)
+        # 模块条：唯一 + 当前步高亮 + 相邻步骤可达
+        self.assertEqual(page.count("class='flowbar"), 1)
+        self.assertIn("fs on'>排内容", page)
+        self.assertIn(f"href='/admin/creative/{self.template_id}?step=params'", page)
+        self.assertIn(f"href='/admin/creative/{self.template_id}?step=preview'", page)
+        # 术语：正文（去样式/脚本）不含「字段」
+        stripped = re.sub(r"<style>.*?</style>|<script>.*?</script>", "", page, flags=re.S)
+        self.assertNotIn("字段", stripped)
 
 
 if __name__ == "__main__":

@@ -3304,6 +3304,11 @@ class Database:
         self._audit(tenant_id, "template", template_id, "template_draft_saved", actor, "")
         self.conn.commit()
 
+    def list_template_versions(self, tenant_id: str, template_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM template_versions WHERE tenant_id=? AND template_id=? ORDER BY version DESC", (tenant_id, template_id)
+        ).fetchall()
+
     def creative_home_rows(self, tenant_id: str) -> dict:
         """创意中心首页数据：按品类聚合（覆盖产品 + 对应展示页），并统计未核准品类的产品数。"""
         products = self.conn.execute(
@@ -4480,6 +4485,21 @@ h1{font-size:21px}
 .console .pnew form{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .console .pnew input{max-width:220px}
 .console .step-cta{text-align:center;margin:18px 0 4px}
+/* ── 排内容：板块卡补充 + 进阶折叠卡 ── */
+.console .pcard .lock{font-size:11px;color:var(--text-3);border:1px solid var(--border);border-radius:var(--r-full);padding:2px 9px;white-space:nowrap}
+.console .pcard .title-note{color:var(--text-3);font-size:12px;margin-left:6px}
+.console .pcard .bnote{color:var(--text-3);font-size:12px;margin-top:6px}
+.console .pcard .editrow input[name='title_zh']{max-width:240px}
+.console details.card{padding:13px 16px}
+.console details.card>summary{cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:10px;font-weight:600;font-size:13px;color:var(--text-1)}
+.console details.card>summary::-webkit-details-marker{display:none}
+.console details.card>summary::after{content:"＋";color:var(--text-3);font-weight:500}
+.console details.card[open]>summary::after{content:"－"}
+.console details.card .inner{padding-top:12px}
+.console details.card .inner form{display:block}
+.console details.card .inner label{margin-top:0}
+.console details.card .inner textarea{margin-top:2px;min-height:56px}
+.console details.card + details.card{margin-top:8px}
 """
 
 
@@ -5155,6 +5175,115 @@ def creative_params_step(template: sqlite3.Row) -> str:
 </section>
 <div class='step-cta'><a class='button' href='/admin/creative/{template_id}?step=blocks'>下一步 · 排内容 →</a></div>
 """
+
+
+def resolved_template_blocks(draft: dict) -> list[dict]:
+    """按板块库补全 draft.blocks：保留既有顺序与设置，缺失项按库默认补齐，未知键剔除。"""
+    raw = draft.get("blocks")
+    items = [b for b in raw if isinstance(b, dict)] if isinstance(raw, list) else []
+    known = {item["key"] for item in TEMPLATE_BLOCK_LIBRARY}
+    result = [b for b in items if str(b.get("key")) in known]
+    have = {str(b.get("key")) for b in result}
+    for item in TEMPLATE_BLOCK_LIBRARY:
+        if item["key"] not in have:
+            result.append({"key": item["key"], "enabled": bool(item["fixed"]), "title_zh": "", "title_en": ""})
+    return result
+
+
+def creative_blocks_step(template: sqlite3.Row, versions: list[sqlite3.Row]) -> str:
+    """「排内容」步骤：板块卡片（开关/排序/改标题）+ 板块库 + 进阶折叠；全部自动保存。"""
+    template_id = esc(template["id"])
+    draft = json.loads(template["draft_json"])
+    blocks = resolved_template_blocks(draft)
+    library = {item["key"]: item for item in TEMPLATE_BLOCK_LIBRARY}
+    cards = []
+    for block in blocks:
+        key = esc(str(block.get("key")))
+        meta = library[str(block.get("key"))]
+        enabled = bool(block.get("enabled"))
+        fixed = bool(meta["fixed"])
+        title_zh = esc(str(block.get("title_zh", "")))
+        title_en = esc(str(block.get("title_en", "")))
+        title_note = f"<span class='title-note'>标题：{title_zh}</span>" if title_zh else ""
+        card_id = f"bk-{key}"
+        if fixed:
+            tools = "<span class='lock'>固定显示</span>"
+            note = "<div class='bnote'>产品大图 + 关键参数，固定显示。</div>"
+        else:
+            tools = (
+                f"<form method='post' action='/admin/creative/{template_id}/blocks/toggle' class='inline'><input type='hidden' name='block_key' value='{key}'><button class='ptoggle{' on' if enabled else ''}' title='点击关闭或显示这个板块' aria-label='显示或隐藏'></button></form>"
+                f"<form method='post' action='/admin/creative/{template_id}/blocks/move' class='inline'><input type='hidden' name='block_key' value='{key}'><input type='hidden' name='dir' value='up'><button class='mini' title='上移'>↑</button></form>"
+                f"<form method='post' action='/admin/creative/{template_id}/blocks/move' class='inline'><input type='hidden' name='block_key' value='{key}'><input type='hidden' name='dir' value='down'><button class='mini' title='下移'>↓</button></form>"
+                f"<button class='mini link' type='button' data-edit='{card_id}'>改标题</button>"
+            )
+            note = "" if enabled else "<div class='bnote'>已关闭：买家看不到这部分。</div>"
+        edit_row = "" if fixed else f"""
+<div class='editrow'><form method='post' action='/admin/creative/{template_id}/blocks/update'>
+<input name='title_zh' value='{title_zh}' placeholder='标题（留空 = 默认：{esc(meta['label_zh'])}）'>
+<input name='title_en' value='{title_en}' placeholder='英文标题（可选）'>
+<input type='hidden' name='block_key' value='{key}'>
+<button class='secondary'>完成</button>
+</form></div>"""
+        cards.append(
+            f"""
+<div class='pcard{' disabled' if not enabled and not fixed else ''}' id='{card_id}'>
+<div class='top'><span class='nm'>{esc(meta['label_zh'])} <small>{esc(meta['label_en'])}</small>{title_note}</span>
+<span class='tools'>{tools}</span></div>{note}{edit_row}
+</div>"""
+        )
+    off_blocks = [b for b in blocks if not b.get("enabled") and not library[str(b.get("key"))]["fixed"]]
+    chips = "".join(
+        f"<form method='post' action='/admin/creative/{template_id}/blocks/toggle' class='inline'>"
+        f"<input type='hidden' name='block_key' value='{esc(str(b.get('key')))}'>"
+        f"<button class='pchip'>＋ {esc(library[str(b.get('key'))]['label_zh'])}</button></form>"
+        for b in off_blocks
+    )
+    library_row = (
+        f"<div class='muted' style='margin-top:12px'>从板块库添加（点一下打开）：</div><div class='pchips'>{chips}</div>"
+        if chips
+        else "<p class='guide'>板块库里的板块都已打开。</p>"
+    )
+    advanced = draft.get("advanced") if isinstance(draft.get("advanced"), dict) else {}
+    ai_prompts = advanced.get("ai_prompts") if isinstance(advanced.get("ai_prompts"), dict) else {}
+    groups = draft.get("groups") if isinstance(draft.get("groups"), list) else []
+    group_zh = "规格参数"
+    group_en = "Specifications"
+    if groups and isinstance(groups[0], dict):
+        group_zh = str(groups[0].get("label_zh") or "规格参数")
+        group_en = str(groups[0].get("label_en") or "")
+    if versions:
+        version_rows = "".join(
+            f"<div class='source'><span>v{row['version']} · {esc(row['approved_by'] or row['created_by'] or '')}</span>"
+            f"<span class='muted'>{esc((row['approved_at'] or row['created_at'] or '')[:16].replace('T', ' '))}</span></div>"
+            for row in versions
+        )
+    else:
+        version_rows = "<p class='muted'>还没有发布历史——第一次「确认上线」后会在这里留档。</p>"
+    return f"""
+<section class='card'>
+<div class='panel-title'><h2>页面由哪些部分组成？</h2><span class='muted'>开关决定显示，上下箭头调顺序</span></div>
+<p class='muted' style='margin:0 0 12px'>不想要的可以关掉；想加的从下面「板块库」里挑。板块标题不想改就留空，系统会用默认文字。</p>
+{''.join(cards)}
+{library_row}
+</section>
+<details class='card'><summary>AI 助手设置（进阶）— 不改也完全能用</summary><div class='inner'>
+<p class='muted' style='margin:0 0 8px'>只有当你的企业启用了 AI 助手时才用得上；设置会保存在这里，启用后生效。</p>
+<form method='post' action='/admin/creative/{template_id}/blocks/advanced'>
+<label>需求抽取偏好（留空 = 平台默认）<textarea name='ai_extract' placeholder='例如：优先提取性能相关参数'>{esc(str(ai_prompts.get('extract', '')))}</textarea></label>
+<label>提问定位偏好（留空 = 平台默认）<textarea name='ai_locate' placeholder='例如：回答时优先引用手册第 3 章'>{esc(str(ai_prompts.get('locate', '')))}</textarea></label>
+<p style='margin-top:10px'><button class='secondary'>保存设置</button></p>
+</form></div></details>
+<details class='card'><summary>分组名称（进阶）— 默认一个「规格参数」组</summary><div class='inner'>
+<p class='muted' style='margin:0 0 8px'>给参数分组的名字；多数情况不需要改（进阶分组编辑将在后续版本提供）。</p>
+<form method='post' action='/admin/creative/{template_id}/blocks/group'>
+<label>分组名称<input name='group_zh' value='{esc(group_zh)}' placeholder='规格参数'></label>
+<label>英文名称<input name='group_en' value='{esc(group_en)}' placeholder='Specifications'></label>
+<p style='margin-top:10px'><button class='secondary'>保存</button></p>
+</form></div></details>
+<details class='card'><summary>版本记录 — 每次「确认上线」都会留档</summary><div class='inner'>{version_rows}</div></details>
+<div class='step-cta'><a class='button' href='/admin/creative/{template_id}?step=preview'>下一步 · 看效果 →</a></div>
+"""
+
 
 # ── V1-01 步骤② 企业设置：线索阶段 / RFQ 表单字段 / 通知接收人 ──────────────────
 SETTING_LEAD_STAGES = "lead_stages"
@@ -6767,6 +6896,10 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 self.admin_creative_params_action(match.group(1), match.group(2), form)
                 return
+            match = re.fullmatch(r"/admin/creative/([a-f0-9]+)/blocks/(toggle|move|update|advanced|group)", path)
+            if match:
+                self.admin_creative_blocks_action(match.group(1), match.group(2), form)
+                return
             if path == "/admin/settings/stages":
                 self.admin_settings_save_stages(form)
                 return
@@ -8110,6 +8243,8 @@ class Handler(BaseHTTPRequestHandler):
             saved_line = f" · 已自动保存 {template['draft_updated_at'][5:16].replace('T', ' ')}"
         if step == "params":
             content = creative_params_step(template)
+        elif step == "blocks":
+            content = creative_blocks_step(template, self.db.list_template_versions(self.tenant_id, template_id))
         else:
             content = f"<section class='card'><div class='panel-title'><h2>{label}</h2></div><p class='muted-block'>「{label}」编辑器正在建设中，即将可用。</p></section>"
         body = f"""
@@ -8178,6 +8313,52 @@ class Handler(BaseHTTPRequestHandler):
         draft["params"] = params
         self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor)
         self.redirect(f"/admin/creative/{template_id}?step=params")
+
+    def admin_creative_blocks_action(self, template_id: str, action: str, form: dict) -> None:
+        """排内容改动（自动保存）：板块开关/排序/改标题 + 进阶设置（AI 助手偏好 / 分组名）。"""
+        template = self.db.get_template(self.tenant_id, template_id)
+        if not template:
+            raise ValueError("展示页不存在")
+        draft = json.loads(template["draft_json"])
+        if action == "advanced":
+            advanced = draft.get("advanced") if isinstance(draft.get("advanced"), dict) else {}
+            ai_prompts = advanced.get("ai_prompts") if isinstance(advanced.get("ai_prompts"), dict) else {}
+            ai_prompts["extract"] = str(form.get("ai_extract", "")).strip()[:500]
+            ai_prompts["locate"] = str(form.get("ai_locate", "")).strip()[:500]
+            advanced["ai_prompts"] = ai_prompts
+            draft["advanced"] = advanced
+            self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor)
+            self.redirect(f"/admin/creative/{template_id}?step=blocks")
+            return
+        if action == "group":
+            group_zh = str(form.get("group_zh", "")).strip()[:40] or "规格参数"
+            group_en = str(form.get("group_en", "")).strip()[:60]
+            draft["groups"] = [{"key": "default", "label_zh": group_zh, "label_en": group_en}]
+            self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor)
+            self.redirect(f"/admin/creative/{template_id}?step=blocks")
+            return
+        blocks = resolved_template_blocks(draft)
+        key = str(form.get("block_key", "")).strip()
+        index = next((i for i, b in enumerate(blocks) if str(b.get("key")) == key), -1)
+        if index < 0:
+            raise ValueError("板块不存在")
+        meta = next((item for item in TEMPLATE_BLOCK_LIBRARY if item["key"] == key), None)
+        if action == "toggle":
+            if meta and meta["fixed"]:
+                raise ValueError("首屏固定显示，不能关闭")
+            blocks[index]["enabled"] = not bool(blocks[index].get("enabled"))
+        elif action == "move":
+            target = index - 1 if str(form.get("dir", "")) == "up" else index + 1
+            if not (0 <= target < len(blocks)):
+                self.redirect(f"/admin/creative/{template_id}?step=blocks")
+                return
+            blocks[index], blocks[target] = blocks[target], blocks[index]
+        elif action == "update":
+            blocks[index]["title_zh"] = str(form.get("title_zh", "")).strip()[:40]
+            blocks[index]["title_en"] = str(form.get("title_en", "")).strip()[:60]
+        draft["blocks"] = blocks
+        self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor)
+        self.redirect(f"/admin/creative/{template_id}?step=blocks")
 
     def admin_users(self, query: dict[str, list[str]]) -> None:
         users = self.db.list_users(self.tenant_id)
