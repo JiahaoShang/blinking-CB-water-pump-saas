@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>V1-03 详情展示页设计器 · 线框稿 v0.2（示例数据）</title>
+<title>V1-03 产品展示页设计器 · 线框稿 v0.3（示例数据）</title>
 <style>
   :root{
     --bg-app:#F4F5F9; --card:#FFFFFF; --line:#E5E7EF; --ink:#191C24; --muted:#6B7180;
-    --accent:#4A38F5; --focus-border:#DCD8FC;
+    --accent:#4A38F5; --focus-border:#DCD8FC; --conn:#C9CDEA;
     --ok:#0E9F6E; --ok-soft:#E6F6F0; --warn:#B45309; --warn-soft:#FDF3E3;
     --info:#1D4ED8; --info-soft:#E9EEFE; --gray-soft:#EEF0F4;
   }
@@ -30,8 +30,19 @@
   .tabs button.on{background:var(--accent); border-color:var(--accent); color:#fff}
   .screen{display:none; max-width:1040px; margin:0 auto}
   .screen.on{display:block}
+  /* ── 顶部模块条（无数字 · 递进连线）── */
+  .flowbar{display:flex; align-items:center; gap:12px; margin:4px 0 14px; flex-wrap:wrap}
+  .fh{padding:8px 16px; border:1px solid var(--line); border-radius:10px; background:#fff; font-weight:600; font-size:13.5px; cursor:pointer}
+  .fh.on{background:var(--accent); border-color:var(--accent); color:#fff}
+  .chain{display:flex; align-items:center}
+  .fs{padding:8px 14px; border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--ink); font-size:13.5px; cursor:pointer}
+  .fs.on{border-color:var(--accent); color:var(--accent); background:#FBFAFF; font-weight:600}
+  .fs.done{color:var(--muted)}
+  .conn{width:26px; height:2px; background:var(--conn); position:relative; margin:0 7px}
+  .conn::after{content:""; position:absolute; right:-1px; top:-3.5px; border-left:7px solid var(--conn); border-top:4.5px solid transparent; border-bottom:4.5px solid transparent}
+  .flowbar.ghost .fs, .flowbar.ghost .conn{opacity:.45}
   .toolbar{display:flex; justify-content:space-between; align-items:flex-start; gap:14px; margin-bottom:12px}
-  .toolbar h1{font-size:21px; letter-spacing:-.01em}
+  .toolbar h1{font-size:20px; letter-spacing:-.01em}
   .toolbar .sub{color:var(--muted); font-size:12.5px; margin-top:3px}
   .btn{border:0; border-radius:9px; padding:8px 14px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer}
   .btn.big{padding:11px 20px; font-size:14.5px}
@@ -42,13 +53,8 @@
   .card h2{font-size:15.5px}
   .muted{color:var(--muted); font-size:12.5px}
   .lead{color:var(--muted); font-size:13px; margin-bottom:12px}
-  .focus{background:linear-gradient(135deg,#F7F6FF,#FFFFFF); border:1px solid var(--focus-border); border-radius:14px; padding:16px 20px; margin-bottom:14px}
-  .focus .lab{font-size:11px; letter-spacing:.08em; color:var(--accent); font-weight:700}
-  .focus strong{display:block; font-size:16px; margin:3px 0 4px}
-  .steps3{display:flex; gap:10px; margin:12px 0 4px}
-  .step3{flex:1; border:1px dashed #C9CDEA; border-radius:12px; padding:11px 13px; background:#FBFAFF}
-  .step3 b{display:block; font-size:13.5px}
-  .step3 span{color:var(--muted); font-size:12px}
+  .coach{border:1px solid #CFE0FF; background:#F2F7FF; color:#274B8F; border-radius:10px; padding:9px 13px; font-size:12.5px; margin-bottom:12px}
+  .notice{border:1px solid #F0DCB4; background:var(--warn-soft); color:#7A5110; border-radius:10px; padding:9px 13px; font-size:12.5px; margin-bottom:12px}
   .badge{display:inline-flex; align-items:center; border-radius:999px; padding:2px 10px; font-size:12px; font-weight:600; border:1px solid}
   .b-run{background:var(--ok-soft); border-color:#BFE8D8; color:var(--ok)}
   .b-mid{background:var(--warn-soft); border-color:#F0DCB4; color:var(--warn)}
@@ -56,22 +62,13 @@
   .b-none{background:var(--gray-soft); border-color:var(--line); color:var(--muted)}
   .item{display:flex; justify-content:space-between; gap:14px; align-items:center; padding:13px 2px; border-bottom:1px solid var(--line)}
   .item:last-child{border-bottom:0}
-  .item .t{font-weight:600}
+  .item .t{font-weight:600; font-size:14.5px}
   .item .s{color:var(--muted); font-size:12.5px; margin-top:2px}
+  .item .s b{color:#3D3D66; font-weight:600}
   .row-flex{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
-  .stepbar{display:flex; gap:6px; margin:0 0 14px}
-  .stepbar .st{flex:1; display:flex; align-items:center; gap:8px; padding:9px 12px; border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--muted); font-size:13px}
-  .stepbar .st b{display:inline-flex; width:20px; height:20px; border-radius:50%; background:var(--gray-soft); color:var(--muted); align-items:center; justify-content:center; font-size:11.5px}
-  .stepbar .st.on{border-color:var(--accent); color:var(--ink); font-weight:600; background:#FBFAFF}
-  .stepbar .st.on b{background:var(--accent); color:#fff}
-  .coach{border:1px solid #CFE0FF; background:#F2F7FF; color:#274B8F; border-radius:10px; padding:9px 13px; font-size:12.5px; margin-bottom:12px}
-  .notice{border:1px solid #F0DCB4; background:var(--warn-soft); color:#7A5110; border-radius:10px; padding:9px 13px; font-size:12.5px; margin-bottom:12px}
-  .pcard{border:1px solid var(--line); border-radius:12px; padding:11px 14px; margin-bottom:8px; background:#fff}
-  .pcard .top{display:flex; justify-content:space-between; gap:10px; align-items:center}
-  .pcard .nm{font-weight:600}
-  .pcard .nm small{color:var(--muted); font-weight:400; margin-left:6px}
-  .pcard .unit{color:var(--muted); font-size:12px; margin-left:8px}
-  .pcard .editrow{display:flex; gap:8px; margin-top:10px; align-items:center; flex-wrap:wrap}
+  .newcard{border:1px dashed #B9B2F0; background:#FBFAFF; border-radius:12px; padding:14px 16px; margin-bottom:14px}
+  .newcard .step-t{font-size:11px; letter-spacing:.08em; color:var(--accent); font-weight:700}
+  .newcard .line{display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:8px}
   input[type=text], select, textarea{border:1px solid var(--line); border-radius:8px; padding:7px 9px; font:inherit; font-size:13px; background:#fff}
   .sw{width:34px; height:19px; border-radius:999px; background:#D6DAE4; position:relative; display:inline-block; vertical-align:middle; cursor:pointer}
   .sw::after{content:""; position:absolute; top:2px; left:2px; width:15px; height:15px; border-radius:50%; background:#fff}
@@ -88,6 +85,12 @@
   details.fold summary::after{content:" ＋"; color:var(--muted)}
   details.fold[open] summary::after{content:" －"}
   details.fold .inner{padding-top:10px}
+  .pcard{border:1px solid var(--line); border-radius:12px; padding:11px 14px; margin-bottom:8px; background:#fff}
+  .pcard .top{display:flex; justify-content:space-between; gap:10px; align-items:center}
+  .pcard .nm{font-weight:600}
+  .pcard .nm small{color:var(--muted); font-weight:400; margin-left:6px}
+  .pcard .unit{color:var(--muted); font-size:12px; margin-left:8px}
+  .pcard .editrow{display:flex; gap:8px; margin-top:10px; align-items:center; flex-wrap:wrap}
   .bcard{border:1px solid var(--line); border-radius:12px; padding:11px 14px; margin-bottom:8px; display:flex; justify-content:space-between; gap:10px; align-items:center; background:#fff}
   .bcard .thumb{width:44px;height:32px;border-radius:7px;background:linear-gradient(135deg,#EEF0F6,#DDE1EC); flex:none; display:inline-block}
   .bcard .nm{font-weight:600} .bcard .nm small{display:block; color:var(--muted); font-weight:400; font-size:12px; margin-top:1px}
@@ -103,7 +106,11 @@
   .kv{display:grid; grid-template-columns:repeat(3,1fr); gap:8px}
   .kv div{border:1px solid var(--line); border-radius:9px; padding:8px 10px; font-size:12.5px}
   .chatbub{position:relative; float:right; margin:10px 16px; background:var(--accent); color:#fff; border-radius:16px 16px 4px 16px; padding:8px 13px; font-size:12.5px}
-  @media (max-width:900px){ .side{display:none} .main{padding:16px 12px 50px} .steps3{flex-direction:column} }
+  table{width:100%; border-collapse:collapse}
+  th,td{text-align:left; padding:9px 8px; border-bottom:1px solid var(--line); font-size:13px}
+  th{font-size:11.5px; color:var(--muted); letter-spacing:.05em}
+  .center-btn{text-align:center; margin:18px 0}
+  @media (max-width:900px){ .side{display:none} .main{padding:16px 12px 50px} .chain{flex-wrap:wrap; gap:6px} .kv{grid-template-columns:1fr} }
 </style>
 </head>
 <body>
@@ -117,73 +124,95 @@
     <div class="grp">产品经营</div>
     <nav class="nav"><a href="#"><span class="lft"><span class="dot"></span>产品管理</span></a></nav>
     <div class="grp">创意中心</div>
-    <nav class="nav"><a class="sel" href="#"><span class="lft"><span class="dot"></span>详情展示页</span></a></nav>
+    <nav class="nav"><a class="sel" href="#"><span class="lft"><span class="dot"></span>产品展示页</span></a></nav>
     <div class="grp">设置与治理</div>
     <nav class="nav"><a href="#"><span class="lft"><span class="dot"></span>企业设置</span></a><a href="#"><span class="lft"><span class="dot"></span>操作记录</span></a></nav>
   </aside>
   <main class="main">
-    <div class="demo-note">线框稿 <b>v0.2</b>（示例数据，非最终视觉）——本轮三点变化：<b>①归位「创意中心」› 详情展示页 ②行业通用（参数自定义，不绑水泵） ③三步引导 + 大白话 + 自动保存</b>。五个标签页可切换；灰蓝注解为设计说明。</div>
+    <div class="demo-note">线框稿 <b>v0.3</b>（示例数据）——<b>命名：创意中心 › 产品展示页</b>；首页＝产品视角列表（覆盖产品可见）；<b>顶部模块条去数字、四步用连线递进</b>；发布动作收进「产品页联动」。下方标签页与产品内的模块一一对应。</div>
     <div class="tabs">
-      <button class="on" data-s="s1">① 首页（列表与引导）</button>
-      <button data-s="s2">② ①选参数</button>
-      <button data-s="s3">③ ②排内容</button>
-      <button data-s="s4">④ 看效果（预览）</button>
-      <button data-s="s5">⑤ 产品页联动</button>
+      <button class="on" data-s="s1">首页</button>
+      <button data-s="s2">选参数</button>
+      <button data-s="s3">排内容</button>
+      <button data-s="s4">看效果</button>
+      <button data-s="s5">产品页联动</button>
     </div>
 
-    <!-- ① 首页 -->
+    <!-- 首页 -->
     <section class="screen on" id="s1">
       <div class="toolbar">
-        <div><h1>详情展示页</h1><div class="sub">买家点开你的产品后看到的页面，就在这里设置。改完记得“发布”，买家才会看到新版本。</div></div>
-        <div class="row-flex"><button class="btn sec">看一份示例展示页</button></div>
+        <div><h1>产品展示页</h1><div class="sub">买家点开产品后看到的页面，都在这里管理。改完发布后，买家才会看到新版本。</div></div>
+        <div class="row-flex"><button class="btn">＋ 新建展示页</button></div>
       </div>
-      <div class="focus">
-        <div style="flex:1">
-          <span class="lab">三步就能完成 · 大约 5 分钟</span>
-          <strong>为你的产品做一张“买家详情页”</strong>
-          <div class="steps3">
-            <div class="step3"><b>① 选参数</b><span>页面上展示哪些规格（材质、尺寸、功率…由你定）</span></div>
-            <div class="step3"><b>② 排内容</b><span>页面有哪几部分、谁在上面</span></div>
-            <div class="step3"><b>③ 看效果</b><span>像买家一样预览，满意后发布</span></div>
-          </div>
+
+      <div class="flowbar ghost">
+        <button class="fh on">首页</button>
+        <span class="chain">
+          <button class="fs">选参数</button><span class="conn"></span>
+          <button class="fs">排内容</button><span class="conn"></span>
+          <button class="fs">看效果</button><span class="conn"></span>
+          <button class="fs">产品页联动</button>
+        </span>
+      </div>
+
+      <div class="coach">第一次设置？每一类产品做一份：选参数 → 排内容 → 看效果，大约 5 分钟。</div>
+
+      <div class="newcard">
+        <span class="step-t">新建展示页 · 第一步：选择产品</span>
+        <div class="line">
+          <select style="min-width:330px">
+            <option>AX-500 · 智能输送设备（工业输送设备）</option>
+            <option>AX-300 · 输送设备（工业输送设备）</option>
+            <option>V-100 · 灌溉阀门（灌溉阀门）</option>
+            <option>DM-200 · 减速电机（减速电机）</option>
+          </select>
+          <button class="btn">继续 →</button>
+          <span class="muted">将归入「工业输送设备」· 该品类已有展示页 → 将直接打开现有页</span>
         </div>
+        <p class="muted" style="margin-top:8px">只能为本企业产品库中的产品建页；产品列表里没有你要的产品？先去「产品经营 › 产品管理」添加。</p>
       </div>
+
       <div class="card">
-        <div class="pt"><h2>你的展示页</h2><span class="muted">每类产品一份 · 名称默认用产品类别名，可以改</span></div>
+        <div class="pt"><h2>产品 × 展示页</h2><span class="muted">每类产品一份 · 同类下所有产品共用</span></div>
         <div class="item">
-          <div><div class="t">工业输送设备 · 展示页 <span class="badge b-run">已上线 v2</span></div>
+          <div><div class="t">工业输送设备 · 产品展示页 <span class="badge b-run">已上线 v2</span></div>
+            <div class="s">覆盖产品（2）：<b>AX-500</b> · <b>AX-300</b></div>
             <div class="s">有改动还没发布（线上仍是 10-02 的版本）· 更新：张工</div></div>
           <div class="row-flex"><button class="btn sec">看效果</button><button class="btn">继续编辑</button></div>
         </div>
         <div class="item">
-          <div><div class="t">灌溉阀门 · 展示页 <span class="badge b-mid">有改动还没发布</span></div>
+          <div><div class="t">灌溉阀门 · 产品展示页 <span class="badge b-mid">有改动还没发布</span></div>
+            <div class="s">覆盖产品（3）：<b>V-100</b> · <b>V-200</b> · <b>V-300</b></div>
             <div class="s">线上仍是 09-28 的版本 · 更新：李工</div></div>
-          <div class="row-flex"><button class="btn">继续编辑</button></div>
+          <div class="row-flex"><button class="btn sec">看效果</button><button class="btn">继续编辑</button></div>
         </div>
         <div class="item">
-          <div><div class="t">减速电机 · 展示页 <span class="badge b-none">尚未设置</span></div>
-            <div class="s">这类产品还没有展示页，买家暂时看到的是平台标准样式</div></div>
+          <div><div class="t">减速电机 · 产品展示页 <span class="badge b-none">尚未设置</span></div>
+            <div class="s">覆盖产品（1）：<b>DM-200</b> · 买家目前看到平台标准样式</div></div>
           <div class="row-flex"><button class="btn">开始设置</button></div>
         </div>
-        <p class="anno">“下一步按钮 = 现在该做什么”：<b>继续编辑 / 看效果 / 开始设置</b>。状态一律说人话，不用“草稿、待核准”这类词。<br>
-        没有产品类别？先去「产品经营 › 产品管理」核准一个类别（如：沙发 / 阀门 / 传感器——任何品类都可以），再回来设置。</p>
+        <p class="anno">列表＝当前企业的「产品 × 展示页」总览：产品看得见、缺口一眼看到。<br>
+        「下一步按钮 = 现在该做什么」：<b>看效果 / 继续编辑 / 开始设置</b>；状态一律说人话。</p>
       </div>
     </section>
 
-    <!-- ② ①选参数 -->
+    <!-- 选参数 -->
     <section class="screen" id="s2">
       <div class="toolbar">
-        <div><h1>工业输送设备 · 展示页 <span class="badge b-mid">有改动还没发布</span></h1>
+        <div><h1>工业输送设备 · 产品展示页 <span class="badge b-mid">有改动还没发布</span></h1>
           <div class="sub">线上仍是 10-02 的版本 · 已自动保存 15:04</div></div>
-        <div class="row-flex"><button class="btn sec">看效果</button><button class="btn">提交给管理员</button><button class="btn danger">撤回</button></div>
       </div>
-      <div class="coach">第一次设置？跟着三步做即可，大约 5 分钟；随时可以点右上角「看效果」。</div>
-      <div class="stepbar">
-        <div class="st on"><b>①</b>选参数 <span class="muted">· 展示哪些规格</span></div>
-        <div class="st"><b>②</b>排内容</div>
-        <div class="st"><b>③</b>看效果</div>
+      <div class="flowbar">
+        <button class="fh">首页</button>
+        <span class="chain">
+          <button class="fs on">选参数</button><span class="conn"></span>
+          <button class="fs">排内容</button><span class="conn"></span>
+          <button class="fs">看效果</button><span class="conn"></span>
+          <button class="fs">产品页联动</button>
+        </span>
       </div>
-      <div class="notice">你现在的改动<b>不影响线上</b>：买家看到的还是旧版本，直到你点「提交给管理员」并由管理员「确认上线」。</div>
+      <div class="coach">跟着连线一步步来：先定"展示哪些参数"，再排内容，最后看效果。</div>
+      <div class="notice">你现在的改动<b>不影响线上</b>：买家看到的还是旧版本，直到你提交、管理员确认，并对产品重新发布。</div>
       <div class="card">
         <div class="pt"><h2>页面要展示哪些参数？</h2><span class="muted">数量不限，随时可以改</span></div>
         <p class="lead">这些是买家在页面上看到的规格。数值来自你上传的资料，你确认过才会展示——没确认的内容永远不会出现在页面上。</p>
@@ -212,32 +241,33 @@
           <button class="chip-btn">＋ 接口</button><button class="chip-btn">＋ 工作温度</button><button class="chip-btn">＋ 转速</button>
         </div>
         <div class="chips"><button class="chip-btn" style="border-style:solid">＋ 自定义参数…</button></div>
-        <p class="anno">参数完全自定义——设备企业加“功率”，家具企业加“颜色/面料”，电子企业加“电压/接口”，都是同一套操作。<br>
-        “编辑”在行内展开（渐进披露，不吓人）；关掉的参数不会出现在页面上，数据也不受影响。</p>
+        <p class="anno">顶部模块条：首页之外的四步是<b>递进流程</b>（连线指向下一步），当前所在步骤高亮；不使用数字标识。<br>
+        参数完全自定义——设备企业加"功率"，家具企业加"颜色/面料"，电子企业加"电压/接口"，同一套操作。</p>
       </div>
-      <div style="text-align:center; margin:18px 0">
-        <button class="btn big">去第②步 · 排内容 →</button>
-      </div>
+      <div class="center-btn"><button class="btn big">下一步 · 排内容 →</button></div>
     </section>
 
-    <!-- ③ ②排内容 -->
+    <!-- 排内容 -->
     <section class="screen" id="s3">
       <div class="toolbar">
-        <div><h1>工业输送设备 · 展示页 <span class="badge b-mid">有改动还没发布</span></h1>
+        <div><h1>工业输送设备 · 产品展示页 <span class="badge b-mid">有改动还没发布</span></h1>
           <div class="sub">线上仍是 10-02 的版本 · 已自动保存 15:06</div></div>
-        <div class="row-flex"><button class="btn sec">看效果</button><button class="btn">提交给管理员</button><button class="btn danger">撤回</button></div>
       </div>
-      <div class="stepbar">
-        <div class="st"><b>①</b>选参数 <span class="muted">· 完成 ✔</span></div>
-        <div class="st on"><b>②</b>排内容 <span class="muted">· 页面有哪几部分</span></div>
-        <div class="st"><b>③</b>看效果</div>
+      <div class="flowbar">
+        <button class="fh">首页</button>
+        <span class="chain">
+          <button class="fs done">选参数</button><span class="conn"></span>
+          <button class="fs on">排内容</button><span class="conn"></span>
+          <button class="fs">看效果</button><span class="conn"></span>
+          <button class="fs">产品页联动</button>
+        </span>
       </div>
       <div class="card">
         <div class="pt"><h2>页面由哪些部分组成？</h2><span class="muted">开关决定显示，上下箭头调顺序</span></div>
-        <p class="lead">不想要的可以关掉；想加的从下面“板块库”里挑。板块标题不想改就留空，系统会用默认文字。</p>
+        <p class="lead">不想要的可以关掉；想加的从下面"板块库"里挑。板块标题不想改就留空，系统会用默认文字。</p>
 
         <div class="bcard"><span class="row-flex"><span class="thumb"></span><span class="nm">首屏 <small>产品大图 + 关键参数，固定显示</small></span></span><span class="row-flex"><span class="sw lock"></span></span></div>
-        <div class="bcard"><span class="row-flex"><span class="thumb"></span><span class="nm">参数规格 <small>展示你在第①步选的参数</small></span></span><span class="row-flex"><span class="sw on"></span><button class="mini">↑</button><button class="mini">↓</button><input type="text" placeholder="标题默认：规格参数" style="width:170px"></span></div>
+        <div class="bcard"><span class="row-flex"><span class="thumb"></span><span class="nm">参数规格 <small>展示你在第一步选的参数</small></span></span><span class="row-flex"><span class="sw on"></span><button class="mini">↑</button><button class="mini">↓</button><input type="text" placeholder="标题默认：规格参数" style="width:170px"></span></div>
         <div class="bcard"><span class="row-flex"><span class="thumb"></span><span class="nm">图片与图库 <small>产品图、应用照片</small></span></span><span class="row-flex"><span class="sw on"></span><button class="mini">↑</button><button class="mini">↓</button><input type="text" placeholder="标题默认：产品图片" style="width:170px"></span></div>
         <div class="bcard"><span class="row-flex"><span class="thumb"></span><span class="nm">图纸与尺寸 <small>2D/3D 图纸与安装尺寸</small></span></span><span class="row-flex"><span class="sw on"></span><button class="mini">↑</button><button class="mini">↓</button><input type="text" value="安装与图纸" style="width:170px"></span></div>
         <div class="bcard"><span class="row-flex"><span class="thumb"></span><span class="nm">应用场景 <small>适合用在哪些地方</small></span></span><span class="row-flex"><span class="sw on"></span><button class="mini">↑</button><button class="mini">↓</button><input type="text" placeholder="标题默认：应用场景" style="width:170px"></span></div>
@@ -259,30 +289,35 @@
           </div>
         </div>
       </details>
-      <details class="fold"><summary>分组名称（进阶）— 把参数分分类，默认一个“规格参数”组</summary>
+      <details class="fold"><summary>分组名称（进阶）— 把参数分分类，默认一个"规格参数"组</summary>
         <div class="inner muted">可以改名/加组，例如：基本参数 / 性能参数 / 尺寸与安装。多数情况不需要改。</div>
       </details>
-      <details class="fold"><summary>版本记录 — 每次“确认上线”都会留档</summary>
+      <details class="fold"><summary>版本记录 — 每次"确认上线"都会留档</summary>
         <div class="inner muted">v2 · 管理员确认 · 10-04 09:12 · 与上一版比：参数 +2 / 板块 -1　｜　v1 · 首个版本</div>
       </details>
 
-      <div style="text-align:center; margin:18px 0">
-        <button class="btn big">去第③步 · 看效果 →</button>
-      </div>
+      <div class="center-btn"><button class="btn big">下一步 · 看效果 →</button></div>
     </section>
 
-    <!-- ④ 看效果 -->
+    <!-- 看效果 -->
     <section class="screen" id="s4">
       <div class="toolbar">
-        <div><h1>看效果 · 买家视角</h1><div class="sub">用“未发布”的内容 + 已确认的资料渲染；只有你自己看得到</div></div>
+        <div><h1>看效果 · 买家视角</h1><div class="sub">用"未发布"的内容 + 已确认的资料渲染；只有你自己看得到</div></div>
         <div class="row-flex">
           <select style="width:230px"><option>试看产品：AX-500（已发布）</option><option>AX-300（已发布）</option></select>
           <select style="width:110px"><option>English</option><option>中文</option></select>
-          <button class="btn sec">返回编辑</button>
-          <button class="btn">提交给管理员</button>
         </div>
       </div>
-      <div class="pv-banner"><span>👀 预览 · 未发布 —— 买家还看不到；满意后点「提交给管理员」</span><span class="muted">预览不对外、不产生任何数据</span></div>
+      <div class="flowbar">
+        <button class="fh">首页</button>
+        <span class="chain">
+          <button class="fs done">选参数</button><span class="conn"></span>
+          <button class="fs done">排内容</button><span class="conn"></span>
+          <button class="fs on">看效果</button><span class="conn"></span>
+          <button class="fs">产品页联动</button>
+        </span>
+      </div>
+      <div class="pv-banner"><span>👀 预览 · 未发布 —— 买家还看不到；满意就继续到"产品页联动"去发布</span><span class="muted">预览不对外、不产生任何数据</span></div>
       <div class="buyer">
         <div class="top"><span>AX-500 输送设备</span><span class="muted">EN / 中文</span></div>
         <div class="hero">
@@ -293,28 +328,62 @@
         <div class="sec"><h4>规格参数</h4>
           <div class="kv"><div>材质：铝合金<br><span class="muted">资料：AX-500 手册 · 第 3 页</span></div><div>尺寸：1200×800 mm<br><span class="muted">资料：AX-500 手册 · 第 4 页</span></div><div>功率：3.5 kW<br><span class="muted">资料：检测报告 · 第 1 页</span></div></div>
         </div>
-        <div class="sec"><h4>安装与图纸</h4><div class="muted">（标题来自你的设置——“安装与图纸”；内容仍是已确认的图纸文件）</div></div>
+        <div class="sec"><h4>安装与图纸</h4><div class="muted">（标题来自你的设置——"安装与图纸"；内容仍是已确认的图纸文件）</div></div>
         <div class="sec"><h4>资料下载</h4><div class="muted">AX-500 手册.pdf · 外形图.dxf …（只列出你确认公开的资料）</div></div>
         <div class="chatbub">Ask me about products</div>
       </div>
-      <p class="anno">“看效果”是安全感的核心：任何改动先自己看；预览与真实买家页的差别都写在这一页顶部。</p>
+      <div class="center-btn"><button class="btn big">满意，去应用 →</button>　<button class="btn sec">返回调整</button></div>
+      <p class="anno">"看效果"是安全感的核心：任何改动先自己看；预览与真实买家页的差别都写在这一页顶部。</p>
     </section>
 
-    <!-- ⑤ 产品页联动 -->
+    <!-- 产品页联动 -->
     <section class="screen" id="s5">
-      <div class="toolbar"><div><h1>产品页里的「展示页」卡（新增）</h1><div class="sub">产品发布时锁定展示页版本；之后展示页有更新，也要重新发布产品才生效（线上不受影响）</div></div></div>
-      <div class="card">
-        <div class="pt"><h2>AX-500 · 智能输送设备</h2><span class="badge b-run">已发布 v4</span></div>
-        <div class="item"><div><div class="t">这类产品的展示页</div>
-          <div class="s">工业输送设备 · 展示页 <b>v2</b>（发布时锁定 · 引用人：张工）</div></div>
-          <div class="row-flex"><button class="btn sec">去看看</button><button class="btn sec">看效果</button></div></div>
-        <div class="item"><div><div class="t">展示页有新版本 <span class="badge b-wait">提示</span></div>
-          <div class="s">已上线 v3（10-05 确认）· 重新发布后生效 —— <b>当前买家看到的页面不受影响</b></div></div>
-          <div class="row-flex"><button class="btn">重新发布以套用 →</button></div></div>
-        <div class="item"><div><div class="t">示例：还没有产品类别时</div>
-          <div class="s">先在产品管理里核准一个类别（任何品类都可以），才能设置和引用展示页（这里会给出链接）</div></div></div>
-        <p class="anno">产品发布快照会记录展示页版本号；旧询价、历史记录都不会被新版本改动。</p>
+      <div class="toolbar">
+        <div><h1>产品页联动 · 应用与发布</h1><div class="sub">确认上线后，还要在对应产品上"重新发布"，买家才能看到新版本——在此之前线上完全不受影响。</div></div>
       </div>
+      <div class="flowbar">
+        <button class="fh">首页</button>
+        <span class="chain">
+          <button class="fs done">选参数</button><span class="conn"></span>
+          <button class="fs done">排内容</button><span class="conn"></span>
+          <button class="fs done">看效果</button><span class="conn"></span>
+          <button class="fs on">产品页联动</button>
+        </span>
+      </div>
+
+      <div class="card">
+        <div class="pt"><h2>这份展示页</h2><span class="badge b-mid">有改动还没发布</span></div>
+        <p class="lead">线上版本：v2（10-02 确认）· 你现在的改动还没有提交。提交 → 管理员确认 → 产品重新发布，买家就能看到新版本。</p>
+        <div class="row-flex">
+          <button class="btn">提交给管理员</button>
+          <span class="muted">｜</span>
+          <button class="btn sec">确认上线</button>
+          <button class="btn danger">撤回</button>
+          <span class="muted">（示意图同屏展示：员工看到"提交给管理员"；管理员看到"确认上线 / 撤回"）</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="pt"><h2>会用到这份展示页的产品</h2><span class="muted">同类产品的所有产品共用</span></div>
+        <table>
+          <thead><tr><th>产品</th><th>当前使用版本</th><th>状态</th><th></th></tr></thead>
+          <tbody>
+            <tr><td><b>AX-500</b> · 智能输送设备</td><td>v2</td><td><span class="badge b-wait">上线新版后需"重新发布"</span></td><td><a href="#" style="color:var(--accent)">去产品页 →</a></td></tr>
+            <tr><td><b>AX-300</b> · 输送设备</td><td>v2</td><td><span class="badge b-wait">同上</span></td><td><a href="#" style="color:var(--accent)">去产品页 →</a></td></tr>
+          </tbody>
+        </table>
+        <p class="anno">"联动"的含义：产品发布时会"锁定"当时的展示页版本；展示页更新不会偷偷改线上页面，买家永远看到的是发布时那一版。</p>
+      </div>
+
+      <details class="fold" open><summary>产品页里长什么样（示例）</summary>
+        <div class="inner">
+          <div class="item" style="border-bottom:0">
+            <div><div class="t">这类产品的展示页</div>
+              <div class="s">工业输送设备 · 产品展示页 <b>v2</b>（发布时锁定 · 引用人：张工）</div></div>
+            <div class="row-flex"><button class="btn sec">去看看</button><button class="btn sec">看效果</button></div>
+          </div>
+        </div>
+      </details>
     </section>
   </main>
 </div>
