@@ -17,6 +17,7 @@ def cleanup_upload(case, *source_ids):
 class FakeHandler:
     tenant_id = "demo-tenant"
     captured = None
+    render_product_page = Handler.render_product_page
 
     def __init__(self, database):
         self.db = database

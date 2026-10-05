@@ -4500,6 +4500,10 @@ h1{font-size:21px}
 .console details.card .inner label{margin-top:0}
 .console details.card .inner textarea{margin-top:2px;min-height:56px}
 .console details.card + details.card{margin-top:8px}
+/* ── 看效果：试看表单 ── */
+.console .step-form{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0 0}
+.console .step-form label{display:flex;gap:6px;align-items:center;margin:0;font-weight:500;color:var(--text-2);font-size:12.5px}
+.console .step-form select{max-width:340px;min-width:200px}
 """
 
 
@@ -5190,6 +5194,17 @@ def resolved_template_blocks(draft: dict) -> list[dict]:
     return result
 
 
+def enabled_render_blocks(blocks: list | None) -> list[dict]:
+    """渲染用：给定 blocks 配置返回启用项（按列表顺序）；缺省 = 标准模板默认组合。"""
+    items = [b for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else []
+    if not items:
+        items = [
+            {"key": item["key"], "enabled": item["default_enabled"], "title_zh": "", "title_en": ""}
+            for item in TEMPLATE_BLOCK_LIBRARY
+        ]
+    return [b for b in resolved_template_blocks({"blocks": items}) if b.get("enabled")]
+
+
 def creative_blocks_step(template: sqlite3.Row, versions: list[sqlite3.Row]) -> str:
     """「排内容」步骤：板块卡片（开关/排序/改标题）+ 板块库 + 进阶折叠；全部自动保存。"""
     template_id = esc(template["id"])
@@ -5798,6 +5813,10 @@ class Handler(BaseHTTPRequestHandler):
         if match:
             self.admin_creative_editor(match.group(1), query)
             return
+        match = re.fullmatch(r"/admin/creative/([a-f0-9]+)/preview", path)
+        if match:
+            self.admin_creative_preview(match.group(1), query)
+            return
         if re.fullmatch(r"/admin/export/(products|rfqs|leads)(\.csv)?", path):
             self.admin_export(path.rsplit("/", 1)[1].split(".")[0])
             return
@@ -5864,7 +5883,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         match = re.fullmatch(r"/products/([a-zA-Z0-9-]+)/sources/([a-f0-9]+)/?", path)
         if match:
-            self.public_source(match.group(1), match.group(2), preview=query.get("preview", [""])[0] == "1")
+            self.public_source(
+                match.group(1), match.group(2),
+                preview=query.get("preview", [""])[0] == "1",
+                log_events=query.get("nolog", [""])[0] != "1",
+            )
             return
         match = re.fullmatch(r"/s/([A-Za-z0-9_-]+)/products/([a-zA-Z0-9-]+)/sources/([a-f0-9]+)", path)
         if match:
@@ -5872,7 +5895,11 @@ class Handler(BaseHTTPRequestHandler):
             if not site:
                 self.send_html(layout("资料不可用", "<div class='error'>网站入口不可用。</div>", public=True), 404)
                 return
-            self.public_source(match.group(2), match.group(3), site, preview=query.get("preview", [""])[0] == "1")
+            self.public_source(
+                match.group(2), match.group(3), site,
+                preview=query.get("preview", [""])[0] == "1",
+                log_events=query.get("nolog", [""])[0] != "1",
+            )
             return
         if path.startswith("/files/"):
             self.send_html(layout("文件下载", "<div class='error'>演示环境不提供公开文件直链，请从企业后台下载或补充对象存储权限。</div>"), 404)
@@ -8245,6 +8272,8 @@ class Handler(BaseHTTPRequestHandler):
             content = creative_params_step(template)
         elif step == "blocks":
             content = creative_blocks_step(template, self.db.list_template_versions(self.tenant_id, template_id))
+        elif step == "preview":
+            content = self.creative_preview_step(template_id, template)
         else:
             content = f"<section class='card'><div class='panel-title'><h2>{label}</h2></div><p class='muted-block'>「{label}」编辑器正在建设中，即将可用。</p></section>"
         body = f"""
@@ -8256,6 +8285,96 @@ class Handler(BaseHTTPRequestHandler):
 <script>{CREATIVE_PARAMS_JS}</script>
 """
         self.send_html(self.console_page("产品展示页", body, "creative"))
+
+    def creative_preview_step(self, template_id: str, template: sqlite3.Row) -> str:
+        """「看效果」步骤：试看产品与语言选择 + 打开买家视角预览。"""
+        published = [
+            item for item in self.db.list_products(self.tenant_id)
+            if item["status"] != "withdrawn" and self.db.get_published_version(self.tenant_id, item["id"])
+        ]
+        preferred = [item for item in published if self.db.get_approved_category(self.tenant_id, item["id"]) == template["category"]]
+        ordered = preferred + [item for item in published if item not in preferred]
+        head = """
+<div class='panel-title'><h2>看效果 · 买家视角</h2><span class='muted'>用「未发布」的内容 + 已确认的资料渲染</span></div>"""
+        if ordered:
+            options = "".join(
+                f"<option value='{esc(item['id'])}'>{esc(item['model'])} · {esc(item['name'])}</option>" for item in ordered
+            )
+            content = f"""<section class='card'>{head}
+<p class='muted' style='margin:0 0 10px'>预览只有你自己看得到：不对外、不产生任何数据。选一个已发布的产品试看效果；满意就到「产品页联动」去发布。</p>
+<form class='step-form' method='get' action='/admin/creative/{esc(template_id)}/preview'>
+<label>试看产品 <select name='product_id'>{options}</select></label>
+<label>语言 <select name='lang'><option value='zh'>中文</option><option value='en'>English</option></select></label>
+<button>打开买家视角预览 →</button>
+</form></section>"""
+        else:
+            content = f"""<section class='card'>{head}
+<div class='muted-block'>还没有已发布的产品可以试看——先到「产品管理」完成核对并发布一个产品，再回来预览。</div></section>"""
+        return content + f"""
+<div class='step-cta'><a class='button' href='/admin/creative/{esc(template_id)}?step=publish'>满意，去应用 →</a></div>"""
+
+    def admin_creative_preview(self, template_id: str, query: dict[str, list[str]]) -> None:
+        """V1-03：买家视角预览——草稿内容 + 已核准资料渲染；不对外、不产生公开数据。"""
+        template = self.db.get_template(self.tenant_id, template_id)
+        if not template:
+            self.send_html(self.console_page("未找到", "<div class='error'>展示页不存在</div>", "creative"), 404)
+            return
+        published = [
+            item for item in self.db.list_products(self.tenant_id)
+            if item["status"] != "withdrawn" and self.db.get_published_version(self.tenant_id, item["id"])
+        ]
+        product_id = query.get("product_id", [""])[0].strip()
+        product = None
+        if product_id:
+            product = next((item for item in published if item["id"] == product_id), None)
+            if not product:
+                if self.db.get_product(self.tenant_id, product_id):
+                    self.send_html(self.console_page("预览不可用", "<div class='error'>该产品还没有已发布版本；请先完成核对并发布，或改选其他产品。</div>", "creative"), 400)
+                else:
+                    self.send_html(self.console_page("预览不可用", "<div class='error'>请选择本企业的已发布产品进行试看。</div>", "creative"), 400)
+                return
+        else:
+            preferred = [item for item in published if self.db.get_approved_category(self.tenant_id, item["id"]) == template["category"]]
+            product = (preferred or published or [None])[0]
+        if not product:
+            self.send_html(self.console_page("预览不可用", "<div class='error'>还没有已发布的产品可以试看——先在「产品管理」完成核对并发布一个产品。</div>", "creative"), 400)
+            return
+        version = self.db.get_published_version(self.tenant_id, product["id"])
+        lang = query.get("lang", ["zh"])[0]
+        if lang not in ("zh", "en"):
+            lang = "zh"
+        draft = json.loads(template["draft_json"])
+        page = self.render_product_page(
+            self.tenant_id,
+            product,
+            version,
+            {"lang": [lang]},
+            None,
+            blocks=draft.get("blocks") if isinstance(draft.get("blocks"), list) else None,
+            params=draft.get("params") if isinstance(draft.get("params"), list) else None,
+            preview=True,
+        )
+        options = "".join(
+            f"<option value='{esc(item['id'])}'{' selected' if item['id'] == product['id'] else ''}>{esc(item['model'])} · {esc(item['name'])}</option>"
+            for item in published
+        )
+        toolbar = f"""<style>.tpl-preview-bar{{position:sticky;top:0;z-index:60;background:#FFF7DF;border-bottom:1px solid #EBD98A;color:#6B5407;padding:9px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;font:600 12.5px/1.5 "Inter","PingFang SC","Microsoft YaHei",system-ui,sans-serif}}.tpl-preview-bar .grow{{flex:1}}.tpl-preview-bar select{{border:1px solid #EBD98A;background:#fff;border-radius:8px;padding:5px 8px;font:inherit;font-weight:500;color:#6B5407;max-width:280px}}.tpl-preview-bar a{{color:#6B5407;text-decoration:underline;text-underline-offset:2px}}</style>
+<div class="tpl-preview-bar"><span>👀 预览 · 未发布 —— 买家还看不到，也不产生任何数据</span><span class="grow"></span>
+<form method="get" action="/admin/creative/{esc(template_id)}/preview">
+<select name="product_id">{options}</select>
+<select name="lang"><option value="zh"{' selected' if lang == 'zh' else ''}>中文</option><option value="en"{' selected' if lang == 'en' else ''}>English</option></select>
+</form>
+<a href="/admin/creative/{esc(template_id)}?step=preview">返回编辑区</a>
+<a href="/admin/creative/{esc(template_id)}?step=publish">去应用 →</a>
+</div>
+<script>document.querySelectorAll('.tpl-preview-bar select').forEach(function (sel) {{ sel.addEventListener('change', function () {{ sel.form.submit(); }}); }});</script>"""
+        body_tag = page.find("<body")
+        if body_tag != -1:
+            insert_at = page.find(">", body_tag) + 1
+            page = page[:insert_at] + toolbar + page[insert_at:]
+        else:
+            page = toolbar + page
+        self.send_html(page, 200)
 
     def admin_creative_params_action(self, template_id: str, action: str, form: dict) -> None:
         """选参数改动（自动保存）：推荐池/自定义新增、开关、排序、行内编辑、删除。"""
@@ -8928,6 +9047,25 @@ class Handler(BaseHTTPRequestHandler):
         if not version:
             self.send_html(self.console_page("产品不可用", "<div class='error'>找不到已发布版本。</div>", "products"), 404)
             return
+        self.send_html(self.render_product_page(tenant_id, product, version, query, site), 200)
+
+    def render_product_page(
+        self,
+        tenant_id: str,
+        product: sqlite3.Row,
+        version: sqlite3.Row,
+        query: dict[str, list[str]],
+        site: sqlite3.Row | None = None,
+        *,
+        blocks: list | None = None,
+        params: list | None = None,
+        preview: bool = False,
+    ) -> str:
+        """公开产品页渲染（V1-03 参数化）。
+
+        blocks/params = 展示页模板配置（缺省 = 标准模板，输出与现状逐字节一致）；
+        preview = 买家视角预览：不记录公开事件（且 site=None 时天然不含询价表单与聊天窗）。
+        """
         snapshot = json.loads(version["snapshot_json"])
         sources = self.db.get_sources(tenant_id, product["id"])
         allowed_source_ids = self.db.public_downloadable_ids(tenant_id, product["id"])
@@ -8952,20 +9090,63 @@ class Handler(BaseHTTPRequestHandler):
             if not field:
                 return f"<span class='page-missing'>{t('Not provided', '资料未提供')}</span>"
             return f"<strong>{esc(field['value'])} {esc(field['unit'])}</strong><small>{esc(field['source_filename'] or '')} · {esc(field['source_location'])}</small>"
+        # V1-03：模板板块与参数（缺省=标准模板；标准组合的输出与现状逐字节一致）。
+        render_blocks = enabled_render_blocks(blocks)
+        enabled_keys = [block["key"] for block in render_blocks]
+        enabled_set = set(enabled_keys)
+        block_conf = {str(block.get("key")): block for block in render_blocks}
+        def block_title(key: str, default_en: str, default_zh: str) -> str:
+            conf = block_conf.get(key) or {}
+            title_zh = str(conf.get("title_zh") or "").strip()
+            title_en = str(conf.get("title_en") or "").strip()
+            custom = (title_en or title_zh) if lang == "en" else (title_zh or title_en)
+            return esc(custom) if custom else t(default_en, default_zh)
+        if isinstance(params, list):
+            enabled_params = [item for item in params if isinstance(item, dict) and item.get("enabled")]
+            legacy_param_keys = [str(item.get("key")) for item in enabled_params if str(item.get("key")) in FIELD_LABELS]
+            custom_params = [item for item in enabled_params if str(item.get("key")) not in FIELD_LABELS]
+        else:
+            legacy_param_keys = [key for _en, _zh, keys in PRODUCT_PAGE_GROUPS for key in keys]
+            custom_params = []
+        legacy_enabled = set(legacy_param_keys)
         hero_keys = ("flow_range", "head_range", "media", "power", "material", "temperature", "performance_points", "dimension")
         def field_label(key: str) -> str:
             return FIELD_LABELS_EN.get(key, "Installation dimensions") if lang == "en" else FIELD_LABELS.get(key, "安装尺寸")
-        hero_facts = "".join(f"<div><b>{esc(field_label(key))}</b>{fact(key)}</div>" for key in hero_keys)
-        group_html = "".join(
-            f"<section class='page-group'><h3>{t(en, zh)}</h3><dl>" + "".join(f"<div><dt>{esc(field_label(key))}</dt><dd>{fact(key)}</dd></div>" for key in keys) + "</dl></section>"
-            for en, zh, keys in PRODUCT_PAGE_GROUPS
-        )
+        hero_facts = "".join(f"<div><b>{esc(field_label(key))}</b>{fact(key)}</div>" for key in hero_keys if key in legacy_enabled)
+        highlight_keys = [key for key in ("flow_range", "head_range") if key in legacy_enabled]
+        if highlight_keys:
+            highlight_fact_pair = "<div class='page-fact-pair'>" + "".join(f"<div><b>{esc(field_label(key))}</b>{fact(key)}</div>" for key in highlight_keys) + "</div>"
+        else:
+            highlight_fact_pair = f"<p class='page-missing'>{t('Flow and head values are not available in this published record.', '当前发布记录没有流量、扬程数据。')}</p>"
+        group_parts = []
+        for group_en, group_zh, keys in PRODUCT_PAGE_GROUPS:
+            visible_keys = [key for key in keys if key in legacy_enabled]
+            if not visible_keys:
+                continue
+            group_parts.append(
+                f"<section class='page-group'><h3>{t(group_en, group_zh)}</h3><dl>" + "".join(f"<div><dt>{esc(field_label(key))}</dt><dd>{fact(key)}</dd></div>" for key in visible_keys) + "</dl></section>"
+            )
+        if custom_params:
+            custom_rows = "".join(
+                f"<div><dt>{esc(str(item.get('label_en') or '').strip() or str(item.get('label_zh') or '').strip()) if lang == 'en' else esc(str(item.get('label_zh') or '').strip() or str(item.get('label_en') or '').strip())}</dt>"
+                f"<dd><span class='page-missing'>{t('Not provided', '资料未提供')}</span></dd></div>"
+                for item in custom_params
+            )
+            group_parts.append(f"<section class='page-group'><h3>{t('Specifications', '规格参数')}</h3><dl>{custom_rows}</dl></section>")
+        group_html = "".join(group_parts)
         group_html += f"<section class='page-group'><h3>{t('Purchasing and delivery', '采购交付')}</h3><p class='page-missing'>{t('MOQ, lead time and sample availability require seller confirmation.', '起订量、交期和样品状态待卖方确认。')}</p></section>"
         missing_labels = [FIELD_LABELS[key] for key in snapshot.get("missing_fields", []) if key in FIELD_LABELS]
         missing_html = "<p class='muted'>" + ("Pending information: " if lang == "en" else "待补充信息：") + esc("、".join(missing_labels)) + "</p>" if missing_labels else ""
         source_prefix = f"/s/{quote(site['site_key'])}" if site else ""
-        def source_url(entry: dict[str, object]) -> str:
-            return f"{source_prefix}/products/{esc(product['slug'])}/sources/{esc(entry['id'])}"
+        def source_url(entry: dict[str, object], inline: bool = False) -> str:
+            """公开资料 URL；inline=浏览器内预览；预览页自动带 nolog=1（不产生公开事件）。"""
+            base = f"{source_prefix}/products/{esc(product['slug'])}/sources/{esc(entry['id'])}"
+            params = []
+            if inline:
+                params.append("preview=1")
+            if preview:
+                params.append("nolog=1")
+            return f"{base}?{'&'.join(params)}" if params else base
         def scope_chip(entry: dict[str, object]) -> str:
             return t('This model', '本型号') if entry["scope"] == "exact_model" else t('Series reference (not model-specific)', '系列资料（非本型号专属）')
         image_entries = [entry for entry in published_sources if Path(str(entry["filename"])).suffix.lower() in IMAGE_EXTENSIONS]
@@ -8984,11 +9165,11 @@ class Handler(BaseHTTPRequestHandler):
                 for idx in range(len(gallery_entries))
             )
             gallery_slides = "".join(
-                f"<figure class='gallery-slide' data-index='{idx}'><img src='{source_url(entry)}?preview=1' alt='{esc(product['model'])} · {esc(entry['filename'])}'><figcaption>{esc(entry['filename'])} · {t('this model', '本型号已核准图片')}</figcaption></figure>"
+                f"<figure class='gallery-slide' data-index='{idx}'><img src='{source_url(entry, inline=True)}' alt='{esc(product['model'])} · {esc(entry['filename'])}'><figcaption>{esc(entry['filename'])} · {t('this model', '本型号已核准图片')}</figcaption></figure>"
                 for idx, entry in enumerate(gallery_entries)
             )
             gallery_thumbs = "".join(
-                f"<label for='glr-{idx}'><img src='{source_url(entry)}?preview=1' alt='' loading='lazy'><span>{idx + 1}</span></label>"
+                f"<label for='glr-{idx}'><img src='{source_url(entry, inline=True)}' alt='' loading='lazy'><span>{idx + 1}</span></label>"
                 for idx, entry in enumerate(gallery_entries)
             ) if len(gallery_entries) > 1 else ""
             hero_visual = f"<style>.product-gallery .gallery-slide{{display:none}}{gallery_rules}</style><div class='product-gallery'>{gallery_inputs}<div class='gallery-main'>{gallery_slides}</div><div class='gallery-thumbs'>{gallery_thumbs}</div></div>"
@@ -9000,7 +9181,7 @@ class Handler(BaseHTTPRequestHandler):
         def doc_item(entry: dict[str, object]) -> str:
             suffix = Path(str(entry["filename"])).suffix.lower()
             preview = (
-                f" · <a href='{source_url(entry)}?preview=1' target='_blank' rel='noopener'>{t('Preview', '预览')}</a>"
+                f" · <a href='{source_url(entry, inline=True)}' target='_blank' rel='noopener'>{t('Preview', '预览')}</a>"
                 if suffix in (IMAGE_EXTENSIONS | {".pdf"}) else ""
             )
             return (
@@ -9028,8 +9209,8 @@ class Handler(BaseHTTPRequestHandler):
             drawings_html = "".join(drawing_parts)
         else:
             drawings_html = f"<p class='page-missing'>{t('No approved public 2D/3D file for this model yet. Ask the seller whether a drawing is available.', '当前版本没有本型号已获准公开的 2D/3D 文件；可向卖方询问。')}</p>"
-        drawings_action = f"<a class='button secondary' href='#drawings'>{t('2D/3D files', '图纸与模型')}</a>" if (exact_cad or series_cad) else ""
-        comparison_keys = ("flow_range", "head_range", "power", "material", "media")
+        drawings_action = f"<a class='button secondary' href='#drawings'>{t('2D/3D files', '图纸与模型')}</a>" if (exact_cad or series_cad) and "drawings" in enabled_set else ""
+        comparison_keys = tuple(key for key in ("flow_range", "head_range", "power", "material", "media") if key in legacy_enabled)
         comparison_products = [product] + [item for item in self.db.list_products(tenant_id) if item["id"] != product["id"] and item["status"] == "published"][:2]
         comparison_versions = [(item, self.db.get_published_version(tenant_id, item["id"])) for item in comparison_products]
         comparison_versions = [(item, item_version) for item, item_version in comparison_versions if item_version]
@@ -9081,32 +9262,68 @@ class Handler(BaseHTTPRequestHandler):
 <script src='/reference-client/product-page.js' defer></script>""" if site else ""
         public_path = f"/s/{quote(site['site_key'])}/products/{esc(product['slug'])}" if site else f"/products/{esc(product['slug'])}"
         mobile_cta_html = f"<a class='page-mobile-cta' href='#product-rfq'>{t('Request a quote', '发起询价')}</a>" if site else ""
-        body = f"""
-<nav class='page-breadcrumb' aria-label='Breadcrumb'>{t('Home › Products › Pump', '首页 › 产品 › 水泵')} › {esc(product['model'])}</nav>
-<section class='page-hero' id='overview' data-section='hero'><div class='page-visual' role='img' aria-label='{t('Approved product images', '已核准产品图片') if gallery_entries else t('Product image pending approval', '产品图片待核准')}'>{hero_visual}</div><div><p class='page-eyebrow'>{t('Published product version', '已发布产品版本')} {version['version']} · {esc(version['published_at'])}</p><h1>{esc(product['model'])}</h1><p class='page-model'>{esc(product['name'])}</p><p class='muted'>{t('Check the sourced flow and head data before asking for a final duty-point review.', '请先核对有出处的流量与扬程，再请工程师确认最终工况。')}</p><div class='page-actions'>{inquiry_link}<a class='button secondary' href='#downloads'>{t('View documents', '查看资料')}</a>{drawings_action}<a class='button secondary' href='#faq'>{t('Read FAQ', '查看常见问题')}</a></div><div class='page-quick'>{hero_facts}</div>{missing_html}<p class='page-missing'>{t('MOQ, lead time and sample availability: ask the seller.', '起订量、交期、样品状态：请向卖方核实。')}</p></div></section>
-<nav class='page-anchors' aria-label='Product sections'><a href='#overview'>{t('Overview', '概览')}</a><a href='#specifications'>{t('Specifications', '参数')}</a><a href='#applications'>{t('Applications', '应用')}</a><a href='#customization'>{t('Customization', '定制')}</a><a href='#downloads'>{t('Documents', '资料')}</a><a href='#faq'>FAQ</a></nav>
-<section class='page-section' data-section='advantages'><h2>{t('What the approved record supports', '已核准资料能说明什么')}</h2><p>{t('Flow and head values below are shown with their source. Final suitability depends on the buyer’s operating point and conditions.', '下列流量、扬程值附有出处；最终适用性仍取决于买方工况。')}</p><div class='page-fact-pair'><div><b>{esc(field_label('flow_range'))}</b>{fact('flow_range')}</div><div><b>{esc(field_label('head_range'))}</b>{fact('head_range')}</div></div></section>
-<section class='page-section' id='specifications' data-section='specifications'><h2>{t('Technical specifications', '技术参数')}</h2><div class='page-groups'>{group_html}</div></section>
-<section class='page-section' id='drawings' data-section='drawings'><h2>{t('2D drawings and 3D models', '二维图纸与三维模型')}</h2><p class='muted'>{t('Only approved originals are offered here. STEP/DXF files are not rendered in the browser; download and open them in CAD software.', '这里只提供已核准原件；STEP/DXF 等不在浏览器内渲染，请下载后用 CAD 软件打开。')}</p>{drawings_html}</section>
-<section class='page-section' data-section='comparison'><h2>{t('Compare published models', '对比已发布型号')}</h2><p class='muted'>{t('Only approved published models from this seller appear here. Missing data stays visible.', '仅比较本企业已核准发布的型号；缺项如实显示。')}</p><div class='page-table-scroll'><table><thead><tr><th>{t('Parameter', '参数')}</th>{comparison_header}</tr></thead><tbody>{comparison_rows}</tbody></table></div><ul>{comparison_links}</ul></section>
-<section class='page-section' id='applications' data-section='applications'><h2>{t('Applications', '应用场景')}</h2><p class='page-missing'>{t('No application claim has been approved for this product version. Describe your operating conditions in the original website chat or RFQ.', '当前版本没有已核准的应用场景结论。请在原官网聊天窗口或询价中描述工况。')}</p></section>
-<section class='page-section' id='customization' data-section='customization'><h2>{t('Customization', '定制能力')}</h2><p class='page-missing'>{t('Available changes and turnaround times have not been confirmed by the seller.', '可定制项目及周期尚未由卖方确认。')}</p></section>
-<section class='page-section' data-section='manufacturing'><h2>{t('Manufacturing and quality control', '制造与质量控制')}</h2><p class='page-missing'>{t('Factory and inspection evidence has not been provided for publication.', '尚无获准公开的工厂与质检证据。')}</p></section>
-<section class='page-section' data-section='certification'><h2>{t('Certifications and cases', '认证与案例')}</h2><p class='page-missing'>{t('No verified certificates or customer cases are available in this published record.', '当前已发布记录没有可核验的认证或客户案例。')}</p></section>
-<section class='page-section' id='downloads' data-section='downloads'><h2>{t('Approved documents', '已获准公开的资料')}</h2><ul class='file-list'>{source_links}</ul><p class='muted'>{t('Documents without publication permission, outside the current version, or revoked are not downloadable.', '未获准公开、未纳入当前版本或已撤销许可的文件不提供下载。')}</p></section>
-<section class='page-section' id='faq' data-section='faq'><h2>{t('Frequently asked questions', '常见问题')}</h2><details><summary>{t('Can this model meet my exact duty point?', '这个型号能满足我的具体工况吗？')}</summary><p>{t('Compare the sourced flow and head information above, then ask an engineer to check your actual conditions.', '先核对上方有出处的流量、扬程数据，再请工程师检查实际工况。')}</p></details><details><summary>{t('What are the MOQ and lead time?', '起订量和交期是多少？')}</summary><p>{t('The published record does not confirm these commercial terms. Include your quantity and destination in an RFQ.', '当前已发布资料没有确认这些商务条件。请在询价中提供数量和目的地。')}</p></details></section>
-{rfq_html}
-{chat_html}
-{mobile_cta_html}
-<footer class='page-footer'>{t('Initial technical display; not a quotation or final engineering approval.', '初步技术展示；并非报价或最终工程适配结论。')} · <a href='{public_path}?lang={'zh' if lang == 'en' else 'en'}'>{'切换中文' if lang == 'en' else 'Switch to English'}</a></footer>
-"""
+        breadcrumb_html = f"<nav class='page-breadcrumb' aria-label='Breadcrumb'>{t('Home › Products › Pump', '首页 › 产品 › 水泵')} › {esc(product['model'])}</nav>"
+        hero_action_parts = [inquiry_link]
+        if "downloads" in enabled_set:
+            hero_action_parts.append(f"<a class='button secondary' href='#downloads'>{t('View documents', '查看资料')}</a>")
+        hero_action_parts.append(drawings_action)
+        if "faq" in enabled_set:
+            hero_action_parts.append(f"<a class='button secondary' href='#faq'>{t('Read FAQ', '查看常见问题')}</a>")
+        hero_actions = "<div class='page-actions'>" + "".join(hero_action_parts) + "</div>"
+        hero_section = (
+            f"<section class='page-hero' id='overview' data-section='hero'><div class='page-visual' role='img' aria-label='{t('Approved product images', '已核准产品图片') if gallery_entries else t('Product image pending approval', '产品图片待核准')}'>{hero_visual}</div><div><p class='page-eyebrow'>{t('Published product version', '已发布产品版本')} {version['version']} · {esc(version['published_at'])}</p><h1>{esc(product['model'])}</h1><p class='page-model'>{esc(product['name'])}</p><p class='muted'>{t('Check the sourced flow and head data before asking for a final duty-point review.', '请先核对有出处的流量与扬程，再请工程师确认最终工况。')}</p>{hero_actions}<div class='page-quick'>{hero_facts}</div>{missing_html}<p class='page-missing'>{t('MOQ, lead time and sample availability: ask the seller.', '起订量、交期、样品状态：请向卖方核实。')}</p></div></section>"
+        )
+        anchors_items = []
+        for block_key, href, label_en, label_zh in (
+            ("hero", "#overview", "Overview", "概览"),
+            ("specs", "#specifications", "Specifications", "参数"),
+            ("applications", "#applications", "Applications", "应用"),
+            ("customization", "#customization", "Customization", "定制"),
+            ("downloads", "#downloads", "Documents", "资料"),
+            ("faq", "#faq", "FAQ", "FAQ"),
+        ):
+            if block_key not in enabled_set:
+                continue
+            anchors_items.append(f"<a href='{href}'>{'FAQ' if block_key == 'faq' else t(label_en, label_zh)}</a>")
+        anchors_html = f"<nav class='page-anchors' aria-label='Product sections'>{''.join(anchors_items)}</nav>"
+        if gallery_entries:
+            gallery_grid = "".join(
+                f"<figure><img src='{source_url(entry, inline=True)}' alt='{esc(product['model'])} · {esc(entry['filename'])}' loading='lazy'><figcaption>{esc(entry['filename'])}</figcaption></figure>"
+                for entry in gallery_entries
+            )
+        else:
+            gallery_grid = f"<p class='page-missing'>{t('No approved public image for this model yet.', '当前版本没有本型号已核准公开图片。')}</p>"
+        sections = {
+            "hero": hero_section,
+            "highlights": f"<section class='page-section' data-section='advantages'><h2>{block_title('highlights', 'What the approved record supports', '已核准资料能说明什么')}</h2><p>{t('Flow and head values below are shown with their source. Final suitability depends on the buyer’s operating point and conditions.', '下列流量、扬程值附有出处；最终适用性仍取决于买方工况。')}</p>{highlight_fact_pair}</section>",
+            "specs": f"<section class='page-section' id='specifications' data-section='specifications'><h2>{block_title('specs', 'Technical specifications', '技术参数')}</h2><div class='page-groups'>{group_html}</div></section>",
+            "drawings": f"<section class='page-section' id='drawings' data-section='drawings'><h2>{block_title('drawings', '2D drawings and 3D models', '二维图纸与三维模型')}</h2><p class='muted'>{t('Only approved originals are offered here. STEP/DXF files are not rendered in the browser; download and open them in CAD software.', '这里只提供已核准原件；STEP/DXF 等不在浏览器内渲染，请下载后用 CAD 软件打开。')}</p>{drawings_html}</section>",
+            "gallery": f"<section class='page-section' id='gallery' data-section='gallery'><h2>{block_title('gallery', 'Product images', '产品图片')}</h2><div class='page-gallery-grid'>{gallery_grid}</div></section>",
+            "comparison": f"<section class='page-section' data-section='comparison'><h2>{block_title('comparison', 'Compare published models', '对比已发布型号')}</h2><p class='muted'>{t('Only approved published models from this seller appear here. Missing data stays visible.', '仅比较本企业已核准发布的型号；缺项如实显示。')}</p><div class='page-table-scroll'><table><thead><tr><th>{t('Parameter', '参数')}</th>{comparison_header}</tr></thead><tbody>{comparison_rows}</tbody></table></div><ul>{comparison_links}</ul></section>",
+            "applications": f"<section class='page-section' id='applications' data-section='applications'><h2>{block_title('applications', 'Applications', '应用场景')}</h2><p class='page-missing'>{t('No application claim has been approved for this product version. Describe your operating conditions in the original website chat or RFQ.', '当前版本没有已核准的应用场景结论。请在原官网聊天窗口或询价中描述工况。')}</p></section>",
+            "customization": f"<section class='page-section' id='customization' data-section='customization'><h2>{block_title('customization', 'Customization', '定制能力')}</h2><p class='page-missing'>{t('Available changes and turnaround times have not been confirmed by the seller.', '可定制项目及周期尚未由卖方确认。')}</p></section>",
+            "manufacturing": f"<section class='page-section' data-section='manufacturing'><h2>{block_title('manufacturing', 'Manufacturing and quality control', '制造与质量控制')}</h2><p class='page-missing'>{t('Factory and inspection evidence has not been provided for publication.', '尚无获准公开的工厂与质检证据。')}</p></section>",
+            "certifications": f"<section class='page-section' data-section='certification'><h2>{block_title('certifications', 'Certifications and cases', '认证与案例')}</h2><p class='page-missing'>{t('No verified certificates or customer cases are available in this published record.', '当前已发布记录没有可核验的认证或客户案例。')}</p></section>",
+            "downloads": f"<section class='page-section' id='downloads' data-section='downloads'><h2>{block_title('downloads', 'Approved documents', '已获准公开的资料')}</h2><ul class='file-list'>{source_links}</ul><p class='muted'>{t('Documents without publication permission, outside the current version, or revoked are not downloadable.', '未获准公开、未纳入当前版本或已撤销许可的文件不提供下载。')}</p></section>",
+            "faq": f"<section class='page-section' id='faq' data-section='faq'><h2>{block_title('faq', 'Frequently asked questions', '常见问题')}</h2><details><summary>{t('Can this model meet my exact duty point?', '这个型号能满足我的具体工况吗？')}</summary><p>{t('Compare the sourced flow and head information above, then ask an engineer to check your actual conditions.', '先核对上方有出处的流量、扬程数据，再请工程师检查实际工况。')}</p></details><details><summary>{t('What are the MOQ and lead time?', '起订量和交期是多少？')}</summary><p>{t('The published record does not confirm these commercial terms. Include your quantity and destination in an RFQ.', '当前已发布资料没有确认这些商务条件。请在询价中提供数量和目的地。')}</p></details></section>",
+        }
+        footer_html = f"<footer class='page-footer'>{t('Initial technical display; not a quotation or final engineering approval.', '初步技术展示；并非报价或最终工程适配结论。')} · <a href='{public_path}?lang={'zh' if lang == 'en' else 'en'}'>{'切换中文' if lang == 'en' else 'Switch to English'}</a></footer>"
+        body = "\n".join(
+            ["", breadcrumb_html, hero_section, anchors_html]
+            + [sections[key] for key in enabled_keys if key != "hero"]
+            + [rfq_html, chat_html, mobile_cta_html, footer_html, ""]
+        )
         page = layout(title, body, lang=lang, public=True)
         json_ld = json.dumps({'@context': 'https://schema.org', '@type': 'Product', 'name': product['name'], 'model': product['model']}, ensure_ascii=False).replace("</", "<\\/")
-        page = page.replace("</head>", f"<meta name='description' content='{esc(product['name'])} - approved industrial pump specifications'><script type='application/ld+json'>{json_ld}</script><link rel='stylesheet' href='/reference-client/product-page.css'><link rel='stylesheet' href='/reference-client/chat.css'><style>@media(max-width:760px){{.chat-launcher{{bottom:74px}}.chat-panel{{bottom:64px;max-height:calc(100vh - 80px)}}}}</style></head>")
-        self.db.log_product_event(tenant_id, product["id"], "page_view", site_key=(site["site_key"] if site else ""), detail="")
-        self.send_html(page, 200)
+        head_extra = f"<meta name='description' content='{esc(product['name'])} - approved industrial pump specifications'><script type='application/ld+json'>{json_ld}</script><link rel='stylesheet' href='/reference-client/product-page.css'><link rel='stylesheet' href='/reference-client/chat.css'><style>@media(max-width:760px){{.chat-launcher{{bottom:74px}}.chat-panel{{bottom:64px;max-height:calc(100vh - 80px)}}}}</style>"
+        if "gallery" in enabled_set:
+            head_extra += "<style>.page-gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-top:6px}.page-gallery-grid figure{margin:0}.page-gallery-grid img{width:100%;border-radius:10px;display:block}</style>"
+        page = page.replace("</head>", head_extra + "</head>")
+        if not preview:
+            self.db.log_product_event(tenant_id, product["id"], "page_view", site_key=(site["site_key"] if site else ""), detail="")
+        return page
 
-    def public_source(self, slug: str, source_id: str, site: sqlite3.Row | None = None, preview: bool = False) -> None:
+    def public_source(self, slug: str, source_id: str, site: sqlite3.Row | None = None, preview: bool = False, log_events: bool = True) -> None:
         tenant_id = site["tenant_id"] if site else self.tenant_id
         product = self.db.get_product_by_slug(tenant_id, slug)
         if not product or product["status"] == "withdrawn" or not self.db.get_published_version(tenant_id, product["id"]):
@@ -9134,7 +9351,8 @@ class Handler(BaseHTTPRequestHandler):
         content_type = mimetypes.guess_type(source["filename"])[0] or "application/octet-stream"
         previewable = content_type in {"image/png", "image/jpeg", "image/webp", "image/avif", "application/pdf"}
         inline_mode = preview and previewable
-        self.db.log_product_event(tenant_id, product["id"], "download", site_key=(site["site_key"] if site else ""), detail=f"{source['filename']};{'inline' if inline_mode else 'attachment'}")
+        if log_events:
+            self.db.log_product_event(tenant_id, product["id"], "download", site_key=(site["site_key"] if site else ""), detail=f"{source['filename']};{'inline' if inline_mode else 'attachment'}")
         self.send_bytes(content, content_type, source["filename"], inline=inline_mode)
 
 

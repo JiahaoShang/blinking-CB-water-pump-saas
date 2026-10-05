@@ -601,5 +601,130 @@ class BlocksEditorTests(unittest.TestCase):
         self.assertNotIn("字段", stripped)
 
 
+class PreviewTests(unittest.TestCase):
+    """看效果 · 买家视角预览：草稿渲染（板块/参数/标题）、同源渲染、不产生公开数据、试看限制。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.db.ensure_tenant("other-tenant", "另一家企业")
+        # 已发布产品（两份来源 + 两项核准字段）
+        cls.published_id = cls.db.create_product("demo-tenant", "PV-100", "预览测试泵", "测试用途", "demo-admin@example.invalid")
+        cls.source_id = cls.db.add_source("demo-tenant", cls.published_id, "PV-100-手册A.txt", "TXT", "第1页：参数表", "流量范围: 20-80 m³/h\n".encode(), "demo-admin@example.invalid", scope="exact_model")
+        cls.db.add_source("demo-tenant", cls.published_id, "PV-100-手册B.txt", "TXT", "第1页：参数表", "扬程范围: 18-42 m\n".encode(), "demo-admin@example.invalid", scope="exact_model")
+        cls.db.approve_field("demo-tenant", cls.published_id, "flow_range")
+        cls.db.approve_field("demo-tenant", cls.published_id, "head_range")
+        cls.db.finalize_product_review("demo-tenant", cls.published_id)
+        cls.db.allow_public_source("demo-tenant", cls.published_id, cls.source_id, "demo-admin@example.invalid")
+        cls.db.publish_product("demo-tenant", cls.published_id, "demo-admin@example.invalid")
+        # 未发布产品（对照）
+        cls.draft_id = cls.db.create_product("demo-tenant", "PV-200", "未发布泵", "测试用途", "demo-admin@example.invalid")
+        # 模板：关闭 FAQ、改 specs 标题、禁用扬程参数、加自定义参数
+        cls.template_id = cls.db.create_template("demo-tenant", "测试品类", "demo-admin@example.invalid")
+        draft = json.loads(cls.db.get_template("demo-tenant", cls.template_id)["draft_json"])
+        for block in draft["blocks"]:
+            if block["key"] == "faq":
+                block["enabled"] = False
+            if block["key"] == "specs":
+                block["title_zh"] = "核心规格"
+                block["title_en"] = "Core specs"
+        for param in draft["params"]:
+            if param["key"] == "head_range":
+                param["enabled"] = False
+        draft["params"].append({"key": "custom_demo01", "label_zh": "防爆等级", "label_en": "Ex rating", "enabled": True})
+        cls.db.save_template_draft("demo-tenant", cls.template_id, draft, "demo-admin@example.invalid")
+        cls.db.create_user("demo-tenant", "v103s5-nomod@example.invalid", "无权员工", "employee", "pass-preview-1", "demo-admin@example.invalid")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        cls.nomod = login(cls.server, "v103s5-nomod@example.invalid", "pass-preview-1")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.db.conn.close()
+        cls.thread.join()
+        cls.temp_dir.cleanup()
+
+    def test_preview_guards(self):
+        # 未发布产品 → 400
+        status, _, body = form_request(
+            self.server, "GET", f"/admin/creative/{self.template_id}/preview?product_id={self.draft_id}", cookie=self.admin
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("还没有已发布版本", body)
+        # 跨企业产品 id → 400（视为不可选）
+        other = self.db.create_product("other-tenant", "OT-1", "别家产品", "测试", "setup")
+        status, _, body = form_request(
+            self.server, "GET", f"/admin/creative/{self.template_id}/preview?product_id={other}", cookie=self.admin
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("本企业", body)
+        # 无权员工 → 403；展示页不存在 → 404
+        status, _, _ = form_request(self.server, "GET", f"/admin/creative/{self.template_id}/preview", cookie=self.nomod)
+        self.assertEqual(status, 403)
+        status, _, _ = form_request(self.server, "GET", "/admin/creative/" + "b" * 24 + "/preview", cookie=self.admin)
+        self.assertEqual(status, 404)
+
+    def test_preview_renders_draft_and_does_not_log_events(self):
+        before = self.db.conn.execute("SELECT COUNT(*) FROM product_events WHERE tenant_id='demo-tenant'").fetchone()[0]
+        status, _, page = form_request(
+            self.server, "GET", f"/admin/creative/{self.template_id}/preview?product_id={self.published_id}&lang=zh", cookie=self.admin
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("预览 · 未发布", page)          # 横幅
+        self.assertIn("预览测试泵", page)
+        self.assertIn("核心规格", page)                # 区块标题覆盖
+        self.assertIn("防爆等级", page)                # 自定义参数（缺项行）
+        self.assertIn("nolog=1", page)                 # 预览内资料/图片链接带 nolog（不产生事件）
+        self.assertNotIn("扬程范围", page)             # 被禁用参数不再出现（含要点/规格/对比）
+        self.assertNotIn("id='faq'", page)             # 被关闭板块不渲染
+        self.assertNotIn("#faq", page)                 # 锚点与首屏按钮联动移除
+        # 预览不产生公开数据：无事件、无询价表单、无聊天窗
+        after = self.db.conn.execute("SELECT COUNT(*) FROM product_events WHERE tenant_id='demo-tenant'").fetchone()[0]
+        self.assertEqual(before, after)
+        self.assertNotIn("id='product-rfq'", page)
+        self.assertNotIn('id="chat-launcher"', page)
+        # 缺省产品（不带 product_id）→ 落到已发布产品
+        status, _, default_page = form_request(self.server, "GET", f"/admin/creative/{self.template_id}/preview", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("PV-100", default_page)
+        # 英文覆盖
+        status, _, en_page = form_request(
+            self.server, "GET", f"/admin/creative/{self.template_id}/preview?product_id={self.published_id}&lang=en", cookie=self.admin
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("Core specs", en_page)
+        self.assertIn("Ex rating", en_page)
+
+    def test_source_route_nolog_flag(self):
+        # 公开资料路由：正常访问记一条下载事件；带 nolog=1 不记录（预览链路专用）
+        def count():
+            return self.db.conn.execute("SELECT COUNT(*) FROM product_events WHERE tenant_id='demo-tenant'").fetchone()[0]
+        before = count()
+        status, _, _ = form_request(self.server, "GET", f"/products/pv-100/sources/{self.source_id}?nolog=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(count(), before)
+        status, _, _ = form_request(self.server, "GET", f"/products/pv-100/sources/{self.source_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(count(), before + 1)
+
+    def test_preview_step_shows_controls(self):
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{self.template_id}?step=preview", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("看效果 · 买家视角", page)
+        self.assertIn("打开买家视角预览", page)
+        self.assertIn("满意，去应用", page)
+        self.assertIn("PV-100", page)
+        self.assertIn("fs on'>看效果", page)
+        self.assertEqual(page.count("class='flowbar"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

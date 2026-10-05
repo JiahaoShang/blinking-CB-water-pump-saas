@@ -60,6 +60,7 @@ class ProductApprovalTests(unittest.TestCase):
             db = self.db
             tenant_id = "demo-tenant"
             captured = None
+            render_product_page = Handler.render_product_page
 
             def send_html(self, content, status=200):
                 self.captured = (content, status)
@@ -85,6 +86,7 @@ class ProductApprovalTests(unittest.TestCase):
             db = self.db
             tenant_id = "demo-tenant"
             captured = None
+            render_product_page = Handler.render_product_page
 
             def send_html(self, content, status=200):
                 self.captured = (content, status)
@@ -109,6 +111,7 @@ class PublicPageTests(unittest.TestCase):
                 db = Database(Path(temp) / "app.db")
                 tenant_id = "demo-tenant"
                 captured = None
+                render_product_page = Handler.render_product_page
 
                 def send_html(self, content, status=200):
                     self.captured = (content, status)
@@ -134,6 +137,7 @@ class PublicPageTests(unittest.TestCase):
             class FakeHandler:
                 tenant_id = "demo-tenant"
                 captured = None
+                render_product_page = Handler.render_product_page
 
                 def __init__(self, database):
                     self.db = database
