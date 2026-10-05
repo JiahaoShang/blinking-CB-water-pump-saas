@@ -427,6 +427,34 @@ class Database:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (tenant_id, key)
             );
+            CREATE TABLE IF NOT EXISTS templates (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                category TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                draft_json TEXT NOT NULL DEFAULT '{}',
+                draft_updated_by TEXT NOT NULL DEFAULT '',
+                draft_updated_at TEXT,
+                published_version INTEGER NOT NULL DEFAULT 0,
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (tenant_id, category)
+            );
+            CREATE TABLE IF NOT EXISTS template_versions (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                template_id TEXT NOT NULL REFERENCES templates(id),
+                version INTEGER NOT NULL,
+                content_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'published',
+                approved_by TEXT NOT NULL DEFAULT '',
+                approved_at TEXT,
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE (template_id, version)
+            );
             CREATE TABLE IF NOT EXISTS product_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -3225,6 +3253,57 @@ class Database:
         product = self.get_product(tenant_id, product_id)
         return (product["category"] or "").strip() if product else ""
 
+    # ── V1-03 创意中心 · 产品展示页（企业展示页模板） ─────────────────────
+    def list_templates(self, tenant_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM templates WHERE tenant_id=? ORDER BY updated_at DESC, id", (tenant_id,)
+        ).fetchall()
+
+    def get_template(self, tenant_id: str, template_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM templates WHERE tenant_id=? AND id=?", (tenant_id, template_id)
+        ).fetchone()
+
+    def get_template_for_category(self, tenant_id: str, category: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM templates WHERE tenant_id=? AND category=?", (tenant_id, category)
+        ).fetchone()
+
+    def create_template(self, tenant_id: str, category: str, actor: str, *, blank: bool = False) -> str:
+        """按品类创建展示页（每类一份）：同品类已存在时报错，由界面改为直接打开。"""
+        category = category.strip()
+        if not category:
+            raise ValueError("请先选择产品并确认品类")
+        if self.get_template_for_category(tenant_id, category):
+            raise ValueError("该品类已有展示页")
+        draft = blank_template_draft() if blank else standard_template_draft()
+        template_id = secrets.token_hex(12)
+        now = now_iso()
+        try:
+            self.conn.execute(
+                "INSERT INTO templates(id, tenant_id, category, name, status, draft_json, draft_updated_by, draft_updated_at, created_by, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)",
+                (template_id, tenant_id, category, f"{category} · 产品展示页", json.dumps(draft, ensure_ascii=False), actor, now, actor, now, now),
+            )
+        except sqlite3.IntegrityError:
+            self.conn.rollback()
+            raise ValueError("该品类已有展示页")
+        self._audit(tenant_id, "template", template_id, "template_created", actor, f"category={category}")
+        self.conn.commit()
+        return template_id
+
+    def save_template_draft(self, tenant_id: str, template_id: str, draft: dict, actor: str) -> None:
+        """保存展示页改动（自动保存入口）；只影响草稿，不触碰线上。"""
+        if not self.get_template(tenant_id, template_id):
+            raise ValueError("展示页不存在")
+        now = now_iso()
+        self.conn.execute(
+            "UPDATE templates SET draft_json=?, draft_updated_by=?, draft_updated_at=?, updated_at=? WHERE tenant_id=? AND id=?",
+            (json.dumps(draft, ensure_ascii=False), actor, now, now, tenant_id, template_id),
+        )
+        self._audit(tenant_id, "template", template_id, "template_draft_saved", actor, "")
+        self.conn.commit()
+
     def publish_product(self, tenant_id: str, product_id: str, actor: str = "demo-admin") -> int:
         product = self.get_product(tenant_id, product_id)
         if not product:
@@ -4353,6 +4432,7 @@ CONSOLE_ICONS = """<svg width="0" height="0" style="position:absolute" aria-hidd
 <symbol id="i-folder" viewBox="0 0 24 24"><path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/></symbol>
 <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
 <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></symbol>
+<symbol id="i-palette" viewBox="0 0 24 24"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></symbol>
 </defs></svg>"""
 
 
@@ -4575,6 +4655,7 @@ def admin_permission_area(path: str) -> tuple[str, str, str]:
         ("/admin/sales", "访问「销售工作台」", "模块权限「销售工作台」", module_why),
         ("/admin/leads", "访问「销售工作台」", "模块权限「销售工作台」", module_why),
         ("/admin/rfqs", "访问「RFQ 询价」", "模块权限「RFQ 询价」", module_why),
+        ("/admin/creative", "访问「产品展示页」", "模块权限「创意中心」", module_why),
     )
     for prefix, area, required, why in areas:
         if path.startswith(prefix):
@@ -4691,6 +4772,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("tasks", "/admin/tasks", "tool", "人工任务"),
         )),
         ("产品经营", (("products", "/admin/products", "box", "产品管理"),)),
+        ("创意中心", (("creative", "/admin/creative", "palette", "产品展示页"),)),
         ("经营分析", (("analytics", "/admin/analytics", "chart", "分析报表"),)),
         ("团队与接入", (
             ("users", "/admin/users", "users", "成员管理"),
@@ -4701,7 +4783,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("audit", "/admin/audit", "history", "操作记录"),
         )),
     )
-    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "audit": "设置与治理", "analytics": "经营分析"}
+    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "creative": "创意中心", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "audit": "设置与治理", "analytics": "经营分析"}
     role_label = "管理员" if role == "admin" else ("员工" if role else "未登录")
     lang_target = f"{esc(path)}?lang={'en' if lang == 'zh' else 'zh'}"
     counts = nav_counts or {}
@@ -4791,11 +4873,55 @@ def parse_multipart(handler: BaseHTTPRequestHandler) -> dict[str, str | bytes]:
 DEMO_TOOL_PATHS = {"/admin/products/seed", "/admin/products/seed-lowara", "/admin/demo/seed", "/admin/lowara/seed"}
 
 # V1-01 账号与模块权限：账号只有两种（admin=管理员 / employee=普通员工）；员工的可访问模块由管理员逐项授权。
-GRANTABLE_MODULES = (("products", "产品管理"), ("tasks", "人工任务"), ("rfqs", "RFQ 询价"), ("sales", "销售工作台"), ("sites", "网站 API 接入"))
+GRANTABLE_MODULES = (("products", "产品管理"), ("tasks", "人工任务"), ("rfqs", "RFQ 询价"), ("sales", "销售工作台"), ("sites", "网站 API 接入"), ("creative", "创意中心"))
 GRANTABLE_MODULE_KEYS = tuple(key for key, _label in GRANTABLE_MODULES)
 MODULE_LABELS = dict(GRANTABLE_MODULES)
 # 旧角色名兼容（旧库迁移与既有测试）：等价于"员工 + 对应模块授权"，能力与迁移前一致。
 LEGACY_ROLE_MODULES = {"sales": ("rfqs", "sales"), "engineer": ("tasks", "rfqs", "sales")}
+
+# ── V1-03 创意中心 · 产品展示页：板块库与标准模板（首批冻结，见 docs/V1-03-收口稿.md） ──
+# 板块库顺序 = 标准组合在现状公开页的自上而下顺序；fixed=不可关闭；default_enabled=标准模板默认开关。
+TEMPLATE_BLOCK_LIBRARY = (
+    {"key": "hero", "label_zh": "首屏", "label_en": "Hero", "fixed": True, "default_enabled": True},
+    {"key": "highlights", "label_zh": "要点速览", "label_en": "Highlights", "fixed": False, "default_enabled": True},
+    {"key": "specs", "label_zh": "参数规格", "label_en": "Specifications", "fixed": False, "default_enabled": True},
+    {"key": "drawings", "label_zh": "图纸与尺寸", "label_en": "Drawings", "fixed": False, "default_enabled": True},
+    {"key": "gallery", "label_zh": "图片与图库", "label_en": "Gallery", "fixed": False, "default_enabled": False},
+    {"key": "comparison", "label_zh": "型号对比", "label_en": "Model comparison", "fixed": False, "default_enabled": True},
+    {"key": "applications", "label_zh": "应用场景", "label_en": "Applications", "fixed": False, "default_enabled": True},
+    {"key": "customization", "label_zh": "定制能力", "label_en": "Customization", "fixed": False, "default_enabled": True},
+    {"key": "manufacturing", "label_zh": "制造与质检", "label_en": "Manufacturing & QC", "fixed": False, "default_enabled": True},
+    {"key": "certifications", "label_zh": "认证与案例", "label_en": "Certifications & cases", "fixed": False, "default_enabled": True},
+    {"key": "downloads", "label_zh": "资料下载", "label_en": "Documents", "fixed": False, "default_enabled": True},
+    {"key": "faq", "label_zh": "常见问题", "label_en": "FAQ", "fixed": False, "default_enabled": True},
+)
+# 标准模板默认参数 = 现有 8 个可提取字段（按现状公开页展示顺序），保证默认渲染与现状等价。
+STANDARD_TEMPLATE_PARAMS = tuple(key for _group_en, _group_zh, keys in PRODUCT_PAGE_GROUPS for key in keys)
+
+
+def standard_template_draft() -> dict:
+    """标准模板（推荐）初始内容：与现状公开页等价的板块与参数组合。"""
+    return {
+        "params": [
+            {"key": key, "label_zh": FIELD_LABELS[key], "label_en": FIELD_LABELS_EN.get(key, key), "enabled": True}
+            for key in STANDARD_TEMPLATE_PARAMS
+        ],
+        "blocks": [
+            {"key": block["key"], "enabled": block["default_enabled"], "title_zh": "", "title_en": ""}
+            for block in TEMPLATE_BLOCK_LIBRARY
+        ],
+    }
+
+
+def blank_template_draft() -> dict:
+    """空白创建初始内容：仅保留固定首屏，其余板块默认关闭、参数为空。"""
+    return {
+        "params": [],
+        "blocks": [
+            {"key": block["key"], "enabled": bool(block["fixed"]), "title_zh": "", "title_en": ""}
+            for block in TEMPLATE_BLOCK_LIBRARY
+        ],
+    }
 
 # ── V1-01 步骤② 企业设置：线索阶段 / RFQ 表单字段 / 通知接收人 ──────────────────
 SETTING_LEAD_STAGES = "lead_stages"
@@ -4838,7 +4964,7 @@ AUDIT_ENTITY_LABELS = {
     "conversation": "会话", "requirement_revision": "工况修订", "recommendation": "推荐",
     "human_task": "人工任务", "rfq": "询价单", "lead": "线索", "product": "产品",
     "product_field": "产品字段", "source_document": "来源资料", "user": "成员账号", "settings": "企业设置",
-    "material_task": "资料补充任务", "export": "数据导出", "reply": "回复草稿",
+    "material_task": "资料补充任务", "export": "数据导出", "reply": "回复草稿", "template": "产品展示页",
 }
 AUDIT_ACTION_LABELS = {
     "created": "创建", "updated": "更新", "activated": "启用", "deactivated": "停用",
@@ -4856,6 +4982,7 @@ AUDIT_ACTION_LABELS = {
     "public_download_blocked_hash_mismatch": "拦截下载（哈希不符）", "modules_updated": "模块授权",
     "exported": "导出数据", "completed": "完成", "sent": "记录发送", "discarded": "废弃",
     "milestone_completed": "节点完成", "milestone_reopened": "节点重开",
+    "template_created": "创建展示页", "template_draft_saved": "保存展示页改动",
 }
 
 
@@ -4935,6 +5062,7 @@ class Handler(BaseHTTPRequestHandler):
                 ("/admin/sales", "sales"),
                 ("/admin/leads", "sales"),
                 ("/admin/rfqs", "rfqs"),
+                ("/admin/creative", "creative"),
             ):
                 if path.startswith(prefix):
                     requirement = f"module:{module_key}"
@@ -5300,6 +5428,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/admin/analytics":
             self.admin_analytics(query)
+            return
+        if path == "/admin/creative":
+            self.admin_creative(query)
             return
         if re.fullmatch(r"/admin/export/(products|rfqs|leads)(\.csv)?", path):
             self.admin_export(path.rsplit("/", 1)[1].split(".")[0])
@@ -7600,6 +7731,15 @@ class Handler(BaseHTTPRequestHandler):
             self.redirect("/admin/analytics?notice=material_invalid#material-tasks")
             return
         self.redirect("/admin/analytics?notice=material_done#material-tasks")
+
+    def admin_creative(self, query: dict[str, list[str]]) -> None:
+        """V1-03 创意中心 · 产品展示页（入口占位：列表与编辑器在后续切片上线）。"""
+        body = """
+<div class='toolbar'><div><h1>产品展示页</h1><div class='muted'>买家点开产品后看到的页面，都在这里管理。改完发布后，买家才会看到新版本。</div></div></div>
+<section class='card'><div class='panel-title'><h2>模块已开通</h2></div>
+<p class='muted-block'>展示页列表与编辑器正在建设中，完成后将在这里管理每个产品的展示页。</p></section>
+"""
+        self.send_html(self.console_page("产品展示页", body, "creative"))
 
     def admin_users(self, query: dict[str, list[str]]) -> None:
         users = self.db.list_users(self.tenant_id)
