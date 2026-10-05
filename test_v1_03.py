@@ -7,6 +7,7 @@
 """
 import http.client
 import json
+import re
 import tempfile
 import threading
 import unittest
@@ -96,7 +97,7 @@ class CreativePermissionTests(unittest.TestCase):
         self.assertIn("创意中心", body)
         self.assertIn("所需权限", body)
         _, _, home_before = form_request(self.server, "GET", "/admin", cookie=self.employee)
-        self.assertNotIn("创意中心", home_before)
+        self.assertNotIn("side-heading'>创意中心", home_before)
         # 管理员在成员管理勾选授权 → 立即生效（免重登）
         status, _, _ = form_request(
             self.server, "POST", f"/admin/users/{self.employee_id}/modules", {"module_creative": "1"}, self.admin
@@ -106,7 +107,7 @@ class CreativePermissionTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("产品展示页", page)
         _, _, home_after = form_request(self.server, "GET", "/admin", cookie=self.employee)
-        self.assertIn("创意中心", home_after)
+        self.assertIn("side-heading'>创意中心", home_after)
         self.assertIn("/admin/creative", home_after)
         # 仅此模块：其他模块仍被拦
         self.assertEqual(form_request(self.server, "GET", "/admin/products", cookie=self.employee)[0], 403)
@@ -201,6 +202,137 @@ class TemplateDataTests(unittest.TestCase):
         self.assertIn("template_created", AUDIT_ACTION_LABELS)
         self.assertIn("template_draft_saved", AUDIT_ACTION_LABELS)
         self.assertIn("template", AUDIT_ENTITY_LABELS)
+
+
+class CreativeHomeTests(unittest.TestCase):
+    """首页（产品视角列表 / 新建卡 / 三态与按钮）与编辑区骨架（模块条、分步路由、404）。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        # 只读企业：一个已核准品类产品、无展示页（「尚未设置」态断言；本类其它用例不依赖它）
+        cls.db.ensure_tenant("readonly-tenant", "只读测试企业")
+        readonly_user = cls.db.create_user("readonly-tenant", "ro-creator@example.invalid", "只读编辑", "employee", "ro-pass-1", "setup")
+        cls.db.set_user_modules("readonly-tenant", readonly_user, ["creative"], "setup")
+        ro_product = cls.db.create_product("readonly-tenant", "RO-1", "只读产品", "测试", "setup")
+        cls.db.set_category_candidate("readonly-tenant", ro_product, "工业输送设备", "manual", "setup")
+        cls.db.approve_category("readonly-tenant", ro_product, "setup")
+        # 空企业：无产品（空态引导断言）
+        cls.db.ensure_tenant("empty-tenant", "空测试企业")
+        empty_user = cls.db.create_user("empty-tenant", "empty-creator@example.invalid", "空编辑", "employee", "empty-pass-1", "setup")
+        cls.db.set_user_modules("empty-tenant", empty_user, ["creative"], "setup")
+        # demo 企业：创建旅程用产品（p4 故意不核准品类）
+        cls.p1 = cls.db.create_product("demo-tenant", "AX-500", "智能输送设备", "测试", "demo-admin@example.invalid")
+        cls.p2 = cls.db.create_product("demo-tenant", "AX-300", "输送设备", "测试", "demo-admin@example.invalid")
+        cls.p3 = cls.db.create_product("demo-tenant", "V-100", "灌溉阀门", "测试", "demo-admin@example.invalid")
+        cls.p4 = cls.db.create_product("demo-tenant", "DM-200", "减速电机", "测试", "demo-admin@example.invalid")
+        for pid, category in ((cls.p1, "工业输送设备"), (cls.p2, "工业输送设备"), (cls.p3, "灌溉阀门")):
+            cls.db.set_category_candidate("demo-tenant", pid, category, "manual", "demo-admin@example.invalid")
+            cls.db.approve_category("demo-tenant", pid, "demo-admin@example.invalid")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        cls.ro_cookie = login(cls.server, "ro-creator@example.invalid", "ro-pass-1")
+        cls.empty_cookie = login(cls.server, "empty-creator@example.invalid", "empty-pass-1")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.db.conn.close()
+        cls.thread.join()
+        cls.temp_dir.cleanup()
+
+    def test_home_fresh_state_readonly(self):
+        status, _, page = form_request(self.server, "GET", "/admin/creative", cookie=self.ro_cookie)
+        self.assertEqual(status, 200)
+        self.assertIn("RO-1", page)
+        self.assertIn("尚未设置", page)
+        self.assertIn("开始设置", page)
+        self.assertIn("＋ 新建展示页", page)
+        self.assertIn("data-cat='工业输送设备'", page)
+        # 唯一模块条 + 首页态淡化 + 连线递进
+        self.assertEqual(page.count("class='flowbar"), 1)
+        self.assertIn("flowbar ghost", page)
+        self.assertIn("class='conn'", page)
+
+    def test_home_empty_tenant_guides_to_products(self):
+        status, _, page = form_request(self.server, "GET", "/admin/creative", cookie=self.empty_cookie)
+        self.assertEqual(status, 200)
+        self.assertIn("还没有可制作展示页的产品", page)
+        self.assertIn("/admin/products", page)
+        self.assertNotIn("id='creative-new'", page)
+
+    def test_create_journey_and_editor(self):
+        # 1) 选择产品创建 → 303 → 进入编辑区（notice=created）；审计 template_created
+        status, headers, _ = form_request(self.server, "POST", "/admin/creative/create", {"product_id": self.p1}, self.admin)
+        self.assertEqual(status, 303)
+        match = re.fullmatch(r"/admin/creative/([a-f0-9]+)\?notice=created", headers.get("Location", ""))
+        self.assertIsNotNone(match, headers.get("Location", ""))
+        template_id = match.group(1)
+        self.assertEqual(self.db.get_template_for_category("demo-tenant", "工业输送设备")["id"], template_id)
+        actions = [
+            row["action"]
+            for row in self.db.conn.execute(
+                "SELECT action FROM audit_log WHERE entity_type='template' AND entity_id=?", (template_id,)
+            )
+        ]
+        self.assertEqual(actions, ["template_created"])
+        # 2) 编辑区骨架：唯一模块条、选参数高亮、步骤链接、占位文案、无数字标识
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{template_id}?notice=created", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("工业输送设备 · 产品展示页", page)
+        self.assertIn("展示页已创建", page)
+        self.assertEqual(page.count("class='flowbar"), 1)
+        self.assertIn("fs on'>选参数", page)
+        self.assertIn(f"href='/admin/creative/{template_id}?step=blocks'", page)
+        self.assertIn(f"href='/admin/creative/{template_id}?step=publish'", page)
+        self.assertIn("正在建设中", page)
+        # 模块条范围内无数字标识（整页含 CSS 历史备注字符，只对链路本身断言）
+        bar = page.split("class='flowbar", 1)[1].split("</div>", 1)[0]
+        for digit in ("①", "②", "③", "④", "⑤"):
+            self.assertNotIn(digit, bar)
+        # 3) 同品类再建 → 直接打开现有页（不重复创建）
+        status, headers, _ = form_request(self.server, "POST", "/admin/creative/create", {"product_id": self.p2}, self.admin)
+        self.assertEqual(status, 303)
+        self.assertEqual(headers.get("Location", ""), f"/admin/creative/{template_id}?notice=existing")
+        self.assertEqual(len(self.db.list_templates("demo-tenant")), 1)
+        # 4) 首页：有改动还没发布 + 继续编辑 + 覆盖产品链接 + 未核准品类脚注
+        status, _, home = form_request(self.server, "GET", "/admin/creative", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("工业输送设备 · 产品展示页", home)
+        self.assertIn("有改动还没发布", home)
+        self.assertIn("继续编辑", home)
+        self.assertIn(f"/admin/products/{self.p1}", home)
+        self.assertIn(f"/admin/products/{self.p2}", home)
+        self.assertIn("另有 1 个产品还没有已核准的品类", home)
+        # 5) 未核准品类的产品 / 库外 id → 400 + 明确提示（不落数据）
+        status, _, body = form_request(self.server, "POST", "/admin/creative/create", {"product_id": self.p4}, self.admin)
+        self.assertEqual(status, 400)
+        self.assertIn("核准品类", body)
+        status, _, body = form_request(self.server, "POST", "/admin/creative/create", {"product_id": "0" * 24}, self.admin)
+        self.assertEqual(status, 400)
+        self.assertIn("本企业产品库", body)
+        self.assertEqual(len(self.db.list_templates("demo-tenant")), 1)
+        # 6) 空白创建（另一品类）→ 初始内容仅保留固定首屏
+        status, headers, _ = form_request(self.server, "POST", "/admin/creative/create", {"product_id": self.p3, "start": "blank"}, self.admin)
+        self.assertEqual(status, 303)
+        blank_id = re.fullmatch(r"/admin/creative/([a-f0-9]+)\?notice=created", headers.get("Location", "")).group(1)
+        draft = json.loads(self.db.get_template("demo-tenant", blank_id)["draft_json"])
+        self.assertEqual(draft["params"], [])
+        self.assertEqual([b["key"] for b in draft["blocks"] if b["enabled"]], ["hero"])
+        # 7) 跨企业 id / 不存在 id → 404（不泄露、不区分）
+        foreign = self.db.create_template("readonly-tenant", "别家品类", "setup")
+        status, _, body = form_request(self.server, "GET", f"/admin/creative/{foreign}", cookie=self.admin)
+        self.assertEqual(status, 404)
+        self.assertIn("展示页不存在", body)
+        status, _, _ = form_request(self.server, "GET", "/admin/creative/" + "a" * 24, cookie=self.admin)
+        self.assertEqual(status, 404)
 
 
 if __name__ == "__main__":

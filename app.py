@@ -3304,6 +3304,33 @@ class Database:
         self._audit(tenant_id, "template", template_id, "template_draft_saved", actor, "")
         self.conn.commit()
 
+    def creative_home_rows(self, tenant_id: str) -> dict:
+        """创意中心首页数据：按品类聚合（覆盖产品 + 对应展示页），并统计未核准品类的产品数。"""
+        products = self.conn.execute(
+            "SELECT id, model, name, category FROM products WHERE tenant_id=? ORDER BY model", (tenant_id,)
+        ).fetchall()
+        templates = {row["category"]: row for row in self.list_templates(tenant_id)}
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        uncategorized = 0
+        for product in products:
+            category = (product["category"] or "").strip()
+            if category:
+                grouped.setdefault(category, []).append(product)
+            else:
+                uncategorized += 1
+        rows = [
+            {"category": category, "products": items, "template": templates.pop(category, None)}
+            for category, items in grouped.items()
+        ]
+        # 极少数情况：展示页所属品类下已没有产品（如产品改类后）——仍然列出，避免出现“看不见的展示页”。
+        for category, template in templates.items():
+            rows.append({"category": category, "products": [], "template": template})
+        with_tpl = sorted(
+            (row for row in rows if row["template"]), key=lambda row: row["template"]["updated_at"] or "", reverse=True
+        )
+        without = sorted((row for row in rows if not row["template"]), key=lambda row: row["category"])
+        return {"rows": with_tpl + without, "uncategorized": uncategorized, "total_products": len(products)}
+
     def publish_product(self, tenant_id: str, product_id: str, actor: str = "demo-admin") -> int:
         product = self.get_product(tenant_id, product_id)
         if not product:
@@ -4405,6 +4432,22 @@ h1{font-size:21px}
 .side-count .n.flip-out{transform:rotateX(90deg)}
 .side-count .n.flip-in{transform:rotateX(-90deg);transition:none}
 @media (prefers-reduced-motion:reduce){.side-count .n{transition:none}}
+/* ── V1-03 创意中心 · 产品展示页：区域模块条（全区域唯一导航，无数字、连线递进）与新建卡 ── */
+.console .flowbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 16px}
+.console .flowbar .fh,.console .flowbar .fs{display:inline-flex;align-items:center;padding:8px 15px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface);color:var(--text-1);font-size:13px;cursor:pointer;text-decoration:none}
+.console .flowbar a.fh:hover,.console .flowbar a.fs:hover{border-color:var(--accent-border);color:var(--accent);text-decoration:none}
+.console .flowbar .fh.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.console .flowbar .fs.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft);font-weight:600}
+.console .flowbar .fs.done{color:var(--text-2)}
+.console .flowbar .chain{display:flex;align-items:center;flex-wrap:wrap}
+.console .flowbar .conn{width:24px;height:2px;background:var(--border-strong);position:relative;margin:0 7px;flex:none}
+.console .flowbar .conn::after{content:"";position:absolute;right:-1px;top:-3.5px;border-left:7px solid var(--border-strong);border-top:4.5px solid transparent;border-bottom:4.5px solid transparent}
+.console .flowbar.ghost .fs,.console .flowbar.ghost .conn{opacity:.45}
+.console .newcard{display:none;border:1px dashed var(--accent-border);background:var(--accent-soft);border-radius:var(--r-lg);padding:14px 16px;margin:0 0 16px}
+.console .newcard.open{display:block}
+.console .newcard .step-t{font-family:var(--font-mono);font-size:11px;letter-spacing:.1em;color:var(--accent);font-weight:600}
+.console .newcard .line{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 0}
+.console .coach{border:1px solid var(--accent-border);background:var(--accent-soft);color:var(--text-2);border-radius:var(--r-md);padding:9px 13px;font-size:12.5px;margin:0 0 12px;line-height:1.6}
 """
 
 
@@ -4923,6 +4966,68 @@ def blank_template_draft() -> dict:
         ],
     }
 
+
+# 展示页编辑四步（顺序即递进关系；界面文案与收口稿冻结一致）。
+CREATIVE_STEPS = (("params", "选参数"), ("blocks", "排内容"), ("preview", "看效果"), ("publish", "产品页联动"))
+
+
+def creative_flowbar(active: str, template_id: str = "") -> str:
+    """区域顶部唯一模块条：首页 + 四步递进链路（无数字、连线箭头、当前步高亮）。
+
+    active ∈ {home, params, blocks, preview, publish}；首页态整条链路淡化预览（ghost）。
+    """
+    order = [key for key, _label in CREATIVE_STEPS]
+    home = "<span class='fh on'>首页</span>" if active == "home" else "<a class='fh' href='/admin/creative'>首页</a>"
+    parts = []
+    for key, label in CREATIVE_STEPS:
+        if active == key:
+            parts.append(f"<span class='fs on'>{label}</span>")
+        elif active == "home":
+            parts.append(f"<span class='fs'>{label}</span>")
+        else:
+            css = "fs done" if order.index(key) < order.index(active) else "fs"
+            parts.append(f"<a class='{css}' href='/admin/creative/{template_id}?step={key}'>{label}</a>")
+    chain = "<span class='conn'></span>".join(parts)
+    ghost = " ghost" if active == "home" else ""
+    return f"<div class='flowbar{ghost}'>{home}<span class='chain'>{chain}</span></div>"
+
+
+# 首页交互（新建卡点击展开 / 选择产品联动提示 /「开始设置」预选对应品类产品）。
+CREATIVE_HOME_JS = """
+(function(){
+ var btn=document.getElementById('creative-new');
+ var card=document.getElementById('newCard');
+ var sel=document.getElementById('creative-product');
+ var hint=document.getElementById('creative-hint');
+ function sync(){
+  if(!sel||!hint){return;}
+  var opt=sel.options[sel.selectedIndex];
+  var cat=opt?opt.getAttribute('data-cat'):'';
+  if(!cat){hint.textContent='';return;}
+  hint.textContent=opt.getAttribute('data-has')==='1'
+   ?('将归入「'+cat+'」· 该品类已有展示页 → 将直接打开现有页')
+   :('将归入「'+cat+'」· 将创建新展示页');
+ }
+ function openCard(){if(card){card.classList.add('open');sync();}}
+ if(btn&&card){
+  btn.addEventListener('click',function(){card.classList.toggle('open');if(card.classList.contains('open')){sync();}});
+ }
+ if(sel){sel.addEventListener('change',sync);sync();}
+ var starters=document.querySelectorAll('[data-start-cat]');
+ for(var i=0;i<starters.length;i++){
+  starters[i].addEventListener('click',function(){
+   if(!card||!sel){return;}
+   var cat=this.getAttribute('data-start-cat');
+   for(var j=0;j<sel.options.length;j++){
+    if(sel.options[j].getAttribute('data-cat')===cat){sel.selectedIndex=j;break;}
+   }
+   openCard();
+   card.scrollIntoView({block:'nearest'});
+  });
+ }
+})();
+"""
+
 # ── V1-01 步骤② 企业设置：线索阶段 / RFQ 表单字段 / 通知接收人 ──────────────────
 SETTING_LEAD_STAGES = "lead_stages"
 SETTING_RFQ_FIELDS = "rfq_fields"
@@ -5431,6 +5536,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/admin/creative":
             self.admin_creative(query)
+            return
+        match = re.fullmatch(r"/admin/creative/([a-f0-9]+)/?", path)
+        if match:
+            self.admin_creative_editor(match.group(1), query)
             return
         if re.fullmatch(r"/admin/export/(products|rfqs|leads)(\.csv)?", path):
             self.admin_export(path.rsplit("/", 1)[1].split(".")[0])
@@ -6503,6 +6612,29 @@ class Handler(BaseHTTPRequestHandler):
                 self.db.set_user_modules(self.tenant_id, match.group(1), wanted, self.actor)
                 self.redirect("/admin/users?notice=modules")
                 return
+            if path == "/admin/creative/create":
+                # V1-03：创建展示页——必须先选择本企业的产品；同品类已有展示页则直接打开（每类一份）。
+                product = self.db.get_product(self.tenant_id, str(form.get("product_id", "")))
+                if not product:
+                    raise ValueError("请选择本企业产品库中的产品")
+                category = self.db.get_approved_category(self.tenant_id, product["id"])
+                if not category:
+                    raise ValueError(f"「{product['model']}」还没有已核准的品类；请先在「产品管理」里核准品类")
+                existing = self.db.get_template_for_category(self.tenant_id, category)
+                if existing:
+                    self.redirect(f"/admin/creative/{existing['id']}?notice=existing")
+                    return
+                blank = str(form.get("start", "standard")).strip() == "blank"
+                try:
+                    template_id = self.db.create_template(self.tenant_id, category, self.actor, blank=blank)
+                except ValueError:
+                    existing = self.db.get_template_for_category(self.tenant_id, category)
+                    if not existing:
+                        raise
+                    self.redirect(f"/admin/creative/{existing['id']}?notice=existing")
+                    return
+                self.redirect(f"/admin/creative/{template_id}?notice=created")
+                return
             if path == "/admin/settings/stages":
                 self.admin_settings_save_stages(form)
                 return
@@ -6623,7 +6755,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(layout("操作未完成", f"<div class='error'>{esc(exc)}</div><p><a href='{esc(return_path)}'>返回并修改</a></p>"), 400)
                 return
             product_match = re.match(r"(/admin/products/[a-f0-9]+)(/|$)", path)
-            return_path = product_match.group(1) if product_match else "/admin/products"
+            if product_match:
+                return_path = product_match.group(1)
+            elif path.startswith("/admin/creative"):
+                return_path = "/admin/creative"
+            else:
+                return_path = "/admin/products"
             self.send_html(self.console_page("操作未完成", f"<div class='error'>{esc(exc)}</div><p><a href='{esc(return_path)}'>返回并修改</a></p>", ""), 400)
             return
         if path.startswith("/inquiry/"):
@@ -7733,11 +7870,116 @@ class Handler(BaseHTTPRequestHandler):
         self.redirect("/admin/analytics?notice=material_done#material-tasks")
 
     def admin_creative(self, query: dict[str, list[str]]) -> None:
-        """V1-03 创意中心 · 产品展示页（入口占位：列表与编辑器在后续切片上线）。"""
-        body = """
-<div class='toolbar'><div><h1>产品展示页</h1><div class='muted'>买家点开产品后看到的页面，都在这里管理。改完发布后，买家才会看到新版本。</div></div></div>
-<section class='card'><div class='panel-title'><h2>模块已开通</h2></div>
-<p class='muted-block'>展示页列表与编辑器正在建设中，完成后将在这里管理每个产品的展示页。</p></section>
+        """V1-03 创意中心 · 产品展示页首页：产品视角列表（每类产品一份）+ 选产品创建。"""
+        data = self.db.creative_home_rows(self.tenant_id)
+        rows, uncategorized, total_products = data["rows"], data["uncategorized"], data["total_products"]
+        has_template = {row["category"]: bool(row["template"]) for row in rows}
+        selectable = sorted(
+            (product for row in rows for product in row["products"]),
+            key=lambda product: product["model"],
+        )
+        items = []
+        for row in rows:
+            template = row["template"]
+            category = esc(row["category"])
+            covered = " · ".join(
+                f"<a href='/admin/products/{esc(product['id'])}'>{esc(product['model'])}</a>"
+                for product in row["products"]
+            ) or "（暂无产品）"
+            if template:
+                if template["published_version"]:
+                    badge = f"<span class='badge approved'>已上线 v{template['published_version']}</span>"
+                else:
+                    badge = "<span class='badge pending_review'>有改动还没发布</span>"
+                updated = (template["draft_updated_at"] or template["created_at"])[:16].replace("T", " ")
+                meta = f"更新：{esc(template['draft_updated_by'] or template['created_by'])} · {esc(updated)}"
+                actions = f"<a class='button secondary' href='/admin/creative/{esc(template['id'])}'>继续编辑</a>"
+            else:
+                badge = "<span class='badge'>尚未设置</span>"
+                meta = "买家目前看到平台标准样式"
+                actions = f"<button class='secondary' type='button' data-start-cat='{category}'>开始设置</button>"
+            items.append(
+                f"<div class='simple-item'><div><strong>{category} · 产品展示页 {badge}</strong>"
+                f"<small>覆盖产品（{len(row['products'])}）：{covered}</small><small>{meta}</small></div>"
+                f"<div class='actions'>{actions}</div></div>"
+            )
+        if rows:
+            footnote = (
+                f"<p class='guide'>另有 {uncategorized} 个产品还没有已核准的品类，未列入以上分组——请先在产品管理里核准品类。</p>"
+                if uncategorized
+                else ""
+            )
+            section = (
+                f"<section class='card'><div class='panel-title'><h2>产品 × 展示页</h2>"
+                f"<span class='muted'>每类产品一份 · 同类下所有产品共用</span></div>"
+                f"<div class='simple-list'>{''.join(items)}</div>{footnote}</section>"
+            )
+        else:
+            hint = (
+                "还没有可制作展示页的产品。先去 <a href='/admin/products'>产品管理</a> 添加产品，再回来为每一类产品做一份展示页。"
+                if total_products == 0
+                else f"现有的 {total_products} 个产品都没有已核准的品类——先到 <a href='/admin/products'>产品管理</a> 里为产品核准品类（品类决定展示页分组），再回来制作。"
+            )
+            section = f"<section class='card'><div class='panel-title'><h2>产品 × 展示页</h2></div><div class='muted-block'>{hint}</div></section>"
+        create_html = ""
+        if selectable:
+            options = "".join(
+                f"<option value='{esc(product['id'])}' data-cat='{esc((product['category'] or '').strip())}' data-has='{'1' if has_template.get((product['category'] or '').strip()) else '0'}'>"
+                f"{esc(product['model'])} · {esc(product['name'])}（{esc((product['category'] or '').strip())}）</option>"
+                for product in selectable
+            )
+            create_html = f"""
+<div class='newcard' id='newCard'>
+<span class='step-t'>新建展示页 · 第一步：选择产品</span>
+<form method='post' action='/admin/creative/create'><div class='line'>
+<select name='product_id' id='creative-product'>{options}</select>
+<label class='muted'>起点 <select name='start'><option value='standard'>标准模板（推荐）</option><option value='blank'>空白创建</option></select></label>
+<button>继续 →</button>
+</div>
+<p class='guide' id='creative-hint'></p>
+<p class='guide'>只能为本企业产品库中的产品建页；产品列表里没有你要的产品？先去「产品经营 › 产品管理」添加。</p>
+</form>
+</div>
+"""
+        toolbar_action = "<button id='creative-new' type='button'>＋ 新建展示页</button>" if selectable else ""
+        body = f"""
+<div class='toolbar'><div><h1>产品展示页</h1><div class='muted'>买家点开产品后看到的页面，都在这里管理。改完发布后，买家才会看到新版本。</div></div>
+<div class='actions'>{toolbar_action}</div></div>
+{creative_flowbar("home")}
+<div class='coach'>第一次设置？每一类产品做一份：选参数 → 排内容 → 看效果，大约 5 分钟。</div>
+{create_html}
+{section}
+<script>{CREATIVE_HOME_JS}</script>
+"""
+        self.send_html(self.console_page("产品展示页", body, "creative"))
+
+    def admin_creative_editor(self, template_id: str, query: dict[str, list[str]]) -> None:
+        """V1-03 展示页编辑区分步骨架（模块条 + 当前步骤占位；编辑器随后续切片上线）。"""
+        template = self.db.get_template(self.tenant_id, template_id)
+        if not template:
+            self.send_html(self.console_page("未找到", "<div class='error'>展示页不存在</div>", "creative"), 404)
+            return
+        step = query.get("step", ["params"])[0]
+        if step not in {key for key, _label in CREATIVE_STEPS}:
+            step = "params"
+        label = dict(CREATIVE_STEPS)[step]
+        if template["published_version"]:
+            badge = f"<span class='badge approved'>已上线 v{template['published_version']}</span>"
+            line = f"线上版本 v{template['published_version']}；改动只在确认上线并由产品重新发布后才对买家生效。"
+        else:
+            badge = "<span class='badge pending_review'>有改动还没发布</span>"
+            line = "这个展示页还没有上线；买家目前看到平台标准样式。"
+        notices = {
+            "created": "<div class='notice'>展示页已创建。建议顺序：选参数 → 排内容 → 看效果。</div>",
+            "existing": "<div class='notice'>该品类已有展示页，已直接打开现有页。</div>",
+        }
+        body = f"""
+<div class='toolbar'><div><h1>{esc(template['category'])} · 产品展示页 {badge}</h1>
+<div class='muted'>{line}</div></div></div>
+{notices.get(query.get("notice", [""])[0], "")}
+{creative_flowbar(step, template_id=template_id)}
+<section class='card'><div class='panel-title'><h2>{label}</h2></div>
+<p class='muted-block'>「{label}」编辑器正在建设中，即将可用。</p></section>
 """
         self.send_html(self.console_page("产品展示页", body, "creative"))
 
