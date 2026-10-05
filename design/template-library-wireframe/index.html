@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>V1-03 产品展示页设计器 · 线框稿 v0.3（示例数据）</title>
+<title>V1-03 产品展示页设计器 · 线框稿 v0.3b（示例数据）</title>
 <style>
   :root{
     --bg-app:#F4F5F9; --card:#FFFFFF; --line:#E5E7EF; --ink:#191C24; --muted:#6B7180;
@@ -25,22 +25,19 @@
   .nav a.sel .dot{background:#8F86FF}
   .main{flex:1; min-width:0; padding:26px 30px 70px}
   .demo-note{max-width:1040px; margin:0 auto 14px; background:#FFF8E6; border:1px solid #F5E3B3; color:#7A5A12; padding:9px 14px; border-radius:10px; font-size:12.5px}
-  .tabs{max-width:1040px; margin:0 auto 16px; display:flex; gap:8px; flex-wrap:wrap}
-  .tabs button{border:1px solid var(--line); background:#fff; color:var(--ink); padding:8px 14px; border-radius:999px; cursor:pointer; font:inherit; font-size:13px}
-  .tabs button.on{background:var(--accent); border-color:var(--accent); color:#fff}
-  .screen{display:none; max-width:1040px; margin:0 auto}
-  .screen.on{display:block}
-  /* ── 顶部模块条（无数字 · 递进连线）── */
-  .flowbar{display:flex; align-items:center; gap:12px; margin:4px 0 14px; flex-wrap:wrap}
-  .fh{padding:8px 16px; border:1px solid var(--line); border-radius:10px; background:#fff; font-weight:600; font-size:13.5px; cursor:pointer}
+  /* ── 唯一的顶部模块条（产品内导航；本线框用它切换五屏）── */
+  .flowbar{max-width:1040px; margin:0 auto 16px; display:flex; align-items:center; gap:12px; flex-wrap:wrap}
+  .fh{padding:9px 17px; border:1px solid var(--line); border-radius:10px; background:#fff; font-weight:600; font-size:13.5px; cursor:pointer}
   .fh.on{background:var(--accent); border-color:var(--accent); color:#fff}
   .chain{display:flex; align-items:center}
-  .fs{padding:8px 14px; border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--ink); font-size:13.5px; cursor:pointer}
+  .fs{padding:9px 15px; border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--ink); font-size:13.5px; cursor:pointer}
   .fs.on{border-color:var(--accent); color:var(--accent); background:#FBFAFF; font-weight:600}
   .fs.done{color:var(--muted)}
   .conn{width:26px; height:2px; background:var(--conn); position:relative; margin:0 7px}
   .conn::after{content:""; position:absolute; right:-1px; top:-3.5px; border-left:7px solid var(--conn); border-top:4.5px solid transparent; border-bottom:4.5px solid transparent}
   .flowbar.ghost .fs, .flowbar.ghost .conn{opacity:.45}
+  .screen{display:none; max-width:1040px; margin:0 auto}
+  .screen.on{display:block}
   .toolbar{display:flex; justify-content:space-between; align-items:flex-start; gap:14px; margin-bottom:12px}
   .toolbar h1{font-size:20px; letter-spacing:-.01em}
   .toolbar .sub{color:var(--muted); font-size:12.5px; margin-top:3px}
@@ -129,13 +126,17 @@
     <nav class="nav"><a href="#"><span class="lft"><span class="dot"></span>企业设置</span></a><a href="#"><span class="lft"><span class="dot"></span>操作记录</span></a></nav>
   </aside>
   <main class="main">
-    <div class="demo-note">线框稿 <b>v0.3</b>（示例数据）——<b>命名：创意中心 › 产品展示页</b>；首页＝产品视角列表（覆盖产品可见）；<b>顶部模块条去数字、四步用连线递进</b>；发布动作收进「产品页联动」。下方标签页与产品内的模块一一对应。</div>
-    <div class="tabs">
-      <button class="on" data-s="s1">首页</button>
-      <button data-s="s2">选参数</button>
-      <button data-s="s3">排内容</button>
-      <button data-s="s4">看效果</button>
-      <button data-s="s5">产品页联动</button>
+    <div class="demo-note">线框稿 <b>v0.3b</b>（示例数据）——顶部模块条＝产品内<b>唯一</b>导航（已去重：不再有第二排；它也是本线框的切换入口，点一下就能切换五屏）。首页＝产品视角列表；四步用连线递进、无编号；发布动作在「产品页联动」步。</div>
+
+    <!-- ══ 唯一的顶部模块条（点击切换五屏）══ -->
+    <div class="flowbar ghost" id="flowbar">
+      <button class="fh on" data-s="s1">首页</button>
+      <span class="chain">
+        <button class="fs" data-s="s2">选参数</button><span class="conn"></span>
+        <button class="fs" data-s="s3">排内容</button><span class="conn"></span>
+        <button class="fs" data-s="s4">看效果</button><span class="conn"></span>
+        <button class="fs" data-s="s5">产品页联动</button>
+      </span>
     </div>
 
     <!-- 首页 -->
@@ -144,17 +145,6 @@
         <div><h1>产品展示页</h1><div class="sub">买家点开产品后看到的页面，都在这里管理。改完发布后，买家才会看到新版本。</div></div>
         <div class="row-flex"><button class="btn">＋ 新建展示页</button></div>
       </div>
-
-      <div class="flowbar ghost">
-        <button class="fh on">首页</button>
-        <span class="chain">
-          <button class="fs">选参数</button><span class="conn"></span>
-          <button class="fs">排内容</button><span class="conn"></span>
-          <button class="fs">看效果</button><span class="conn"></span>
-          <button class="fs">产品页联动</button>
-        </span>
-      </div>
-
       <div class="coach">第一次设置？每一类产品做一份：选参数 → 排内容 → 看效果，大约 5 分钟。</div>
 
       <div class="newcard">
@@ -166,7 +156,7 @@
             <option>V-100 · 灌溉阀门（灌溉阀门）</option>
             <option>DM-200 · 减速电机（减速电机）</option>
           </select>
-          <button class="btn">继续 →</button>
+          <button class="btn" data-goto="s2">继续 →</button>
           <span class="muted">将归入「工业输送设备」· 该品类已有展示页 → 将直接打开现有页</span>
         </div>
         <p class="muted" style="margin-top:8px">只能为本企业产品库中的产品建页；产品列表里没有你要的产品？先去「产品经营 › 产品管理」添加。</p>
@@ -178,18 +168,18 @@
           <div><div class="t">工业输送设备 · 产品展示页 <span class="badge b-run">已上线 v2</span></div>
             <div class="s">覆盖产品（2）：<b>AX-500</b> · <b>AX-300</b></div>
             <div class="s">有改动还没发布（线上仍是 10-02 的版本）· 更新：张工</div></div>
-          <div class="row-flex"><button class="btn sec">看效果</button><button class="btn">继续编辑</button></div>
+          <div class="row-flex"><button class="btn sec" data-goto="s4">看效果</button><button class="btn" data-goto="s2">继续编辑</button></div>
         </div>
         <div class="item">
           <div><div class="t">灌溉阀门 · 产品展示页 <span class="badge b-mid">有改动还没发布</span></div>
             <div class="s">覆盖产品（3）：<b>V-100</b> · <b>V-200</b> · <b>V-300</b></div>
             <div class="s">线上仍是 09-28 的版本 · 更新：李工</div></div>
-          <div class="row-flex"><button class="btn sec">看效果</button><button class="btn">继续编辑</button></div>
+          <div class="row-flex"><button class="btn sec" data-goto="s4">看效果</button><button class="btn" data-goto="s2">继续编辑</button></div>
         </div>
         <div class="item">
           <div><div class="t">减速电机 · 产品展示页 <span class="badge b-none">尚未设置</span></div>
             <div class="s">覆盖产品（1）：<b>DM-200</b> · 买家目前看到平台标准样式</div></div>
-          <div class="row-flex"><button class="btn">开始设置</button></div>
+          <div class="row-flex"><button class="btn" data-goto="s2">开始设置</button></div>
         </div>
         <p class="anno">列表＝当前企业的「产品 × 展示页」总览：产品看得见、缺口一眼看到。<br>
         「下一步按钮 = 现在该做什么」：<b>看效果 / 继续编辑 / 开始设置</b>；状态一律说人话。</p>
@@ -201,15 +191,6 @@
       <div class="toolbar">
         <div><h1>工业输送设备 · 产品展示页 <span class="badge b-mid">有改动还没发布</span></h1>
           <div class="sub">线上仍是 10-02 的版本 · 已自动保存 15:04</div></div>
-      </div>
-      <div class="flowbar">
-        <button class="fh">首页</button>
-        <span class="chain">
-          <button class="fs on">选参数</button><span class="conn"></span>
-          <button class="fs">排内容</button><span class="conn"></span>
-          <button class="fs">看效果</button><span class="conn"></span>
-          <button class="fs">产品页联动</button>
-        </span>
       </div>
       <div class="coach">跟着连线一步步来：先定"展示哪些参数"，再排内容，最后看效果。</div>
       <div class="notice">你现在的改动<b>不影响线上</b>：买家看到的还是旧版本，直到你提交、管理员确认，并对产品重新发布。</div>
@@ -244,7 +225,7 @@
         <p class="anno">顶部模块条：首页之外的四步是<b>递进流程</b>（连线指向下一步），当前所在步骤高亮；不使用数字标识。<br>
         参数完全自定义——设备企业加"功率"，家具企业加"颜色/面料"，电子企业加"电压/接口"，同一套操作。</p>
       </div>
-      <div class="center-btn"><button class="btn big">下一步 · 排内容 →</button></div>
+      <div class="center-btn"><button class="btn big" data-goto="s3">下一步 · 排内容 →</button></div>
     </section>
 
     <!-- 排内容 -->
@@ -252,15 +233,6 @@
       <div class="toolbar">
         <div><h1>工业输送设备 · 产品展示页 <span class="badge b-mid">有改动还没发布</span></h1>
           <div class="sub">线上仍是 10-02 的版本 · 已自动保存 15:06</div></div>
-      </div>
-      <div class="flowbar">
-        <button class="fh">首页</button>
-        <span class="chain">
-          <button class="fs done">选参数</button><span class="conn"></span>
-          <button class="fs on">排内容</button><span class="conn"></span>
-          <button class="fs">看效果</button><span class="conn"></span>
-          <button class="fs">产品页联动</button>
-        </span>
       </div>
       <div class="card">
         <div class="pt"><h2>页面由哪些部分组成？</h2><span class="muted">开关决定显示，上下箭头调顺序</span></div>
@@ -296,7 +268,7 @@
         <div class="inner muted">v2 · 管理员确认 · 10-04 09:12 · 与上一版比：参数 +2 / 板块 -1　｜　v1 · 首个版本</div>
       </details>
 
-      <div class="center-btn"><button class="btn big">下一步 · 看效果 →</button></div>
+      <div class="center-btn"><button class="btn big" data-goto="s4">下一步 · 看效果 →</button></div>
     </section>
 
     <!-- 看效果 -->
@@ -307,15 +279,6 @@
           <select style="width:230px"><option>试看产品：AX-500（已发布）</option><option>AX-300（已发布）</option></select>
           <select style="width:110px"><option>English</option><option>中文</option></select>
         </div>
-      </div>
-      <div class="flowbar">
-        <button class="fh">首页</button>
-        <span class="chain">
-          <button class="fs done">选参数</button><span class="conn"></span>
-          <button class="fs done">排内容</button><span class="conn"></span>
-          <button class="fs on">看效果</button><span class="conn"></span>
-          <button class="fs">产品页联动</button>
-        </span>
       </div>
       <div class="pv-banner"><span>👀 预览 · 未发布 —— 买家还看不到；满意就继续到"产品页联动"去发布</span><span class="muted">预览不对外、不产生任何数据</span></div>
       <div class="buyer">
@@ -332,7 +295,7 @@
         <div class="sec"><h4>资料下载</h4><div class="muted">AX-500 手册.pdf · 外形图.dxf …（只列出你确认公开的资料）</div></div>
         <div class="chatbub">Ask me about products</div>
       </div>
-      <div class="center-btn"><button class="btn big">满意，去应用 →</button>　<button class="btn sec">返回调整</button></div>
+      <div class="center-btn"><button class="btn big" data-goto="s5">满意，去应用 →</button>　<button class="btn sec" data-goto="s3">返回调整</button></div>
       <p class="anno">"看效果"是安全感的核心：任何改动先自己看；预览与真实买家页的差别都写在这一页顶部。</p>
     </section>
 
@@ -341,16 +304,6 @@
       <div class="toolbar">
         <div><h1>产品页联动 · 应用与发布</h1><div class="sub">确认上线后，还要在对应产品上"重新发布"，买家才能看到新版本——在此之前线上完全不受影响。</div></div>
       </div>
-      <div class="flowbar">
-        <button class="fh">首页</button>
-        <span class="chain">
-          <button class="fs done">选参数</button><span class="conn"></span>
-          <button class="fs done">排内容</button><span class="conn"></span>
-          <button class="fs done">看效果</button><span class="conn"></span>
-          <button class="fs on">产品页联动</button>
-        </span>
-      </div>
-
       <div class="card">
         <div class="pt"><h2>这份展示页</h2><span class="badge b-mid">有改动还没发布</span></div>
         <p class="lead">线上版本：v2（10-02 确认）· 你现在的改动还没有提交。提交 → 管理员确认 → 产品重新发布，买家就能看到新版本。</p>
@@ -388,12 +341,21 @@
   </main>
 </div>
 <script>
-  const btns = document.querySelectorAll('.tabs button');
-  btns.forEach(b => b.addEventListener('click', () => {
-    btns.forEach(x => x.classList.toggle('on', x === b));
-    document.querySelectorAll('.screen').forEach(s => s.classList.toggle('on', s.id === b.dataset.s));
+  const STEPS = ['s2', 's3', 's4', 's5'];
+  const bar = document.getElementById('flowbar');
+  function render(target) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.toggle('on', s.id === target));
+    bar.classList.toggle('ghost', target === 's1');
+    bar.querySelector('.fh').classList.toggle('on', target === 's1');
+    const idx = STEPS.indexOf(target);
+    bar.querySelectorAll('.fs').forEach((btn, i) => {
+      btn.classList.toggle('on', i === idx);
+      btn.classList.toggle('done', idx >= 0 && i < idx);
+    });
     window.scrollTo({top: 0, behavior: 'instant'});
-  }));
+  }
+  bar.querySelectorAll('[data-s]').forEach(b => b.addEventListener('click', () => render(b.dataset.s)));
+  document.querySelectorAll('[data-goto]').forEach(b => b.addEventListener('click', () => render(b.dataset.goto)));
 </script>
 </body>
 </html>
