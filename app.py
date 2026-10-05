@@ -4448,6 +4448,38 @@ h1{font-size:21px}
 .console .newcard .step-t{font-family:var(--font-mono);font-size:11px;letter-spacing:.1em;color:var(--accent);font-weight:600}
 .console .newcard .line{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 0}
 .console .coach{border:1px solid var(--accent-border);background:var(--accent-soft);color:var(--text-2);border-radius:var(--r-md);padding:9px 13px;font-size:12.5px;margin:0 0 12px;line-height:1.6}
+/* ── 选参数：参数卡片 / 推荐池 chips / 开关 ── */
+.console .pcard{border:1px solid var(--border);border-radius:var(--r-md);padding:11px 14px;margin:0 0 8px;background:var(--surface)}
+.console .pcard.disabled{opacity:.6}
+.console .pcard .top{display:flex;justify-content:space-between;gap:10px;align-items:center}
+.console .pcard .nm{font-weight:600;font-size:13px}
+.console .pcard .nm small{color:var(--text-3);font-weight:400;margin-left:6px}
+.console .pcard .unit{color:var(--text-3);font-size:12px;margin-left:6px}
+.console .pcard .tools{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.console .pcard .editrow{display:none}
+.console .pcard.editing .editrow{display:block;margin-top:10px}
+.console .pcard .editrow form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.console .pcard .editrow input{max-width:190px}
+.console .pcard .mini{border:1px solid var(--border);background:var(--surface);color:var(--text-2);border-radius:var(--r-sm);min-width:26px;height:26px;padding:0 8px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
+.console .pcard .mini:hover{border-color:var(--accent-border);color:var(--accent)}
+.console .pcard .mini.link{border:0;background:none;color:var(--accent);padding:0 4px}
+.console .pcard .mini.danger-link{border:0;background:none;color:var(--danger-text);padding:0 4px}
+.console .pcard .mini.danger-link:hover{color:var(--danger)}
+.console .pcard .ptoggle{width:34px;height:19px;border-radius:var(--r-full);background:var(--border-strong);position:relative;padding:0;border:0;cursor:pointer;transition:background .15s}
+.console .pcard .ptoggle::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 2px rgba(0,0,0,.18)}
+.console .pcard .ptoggle.on{background:var(--accent)}
+.console .pcard .ptoggle.on::after{left:17px}
+.console .pchips{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 0}
+.console .pchip{border:1px dashed var(--border-strong);background:var(--surface);color:var(--text-2);border-radius:var(--r-full);padding:5px 12px;font-size:12px;cursor:pointer;display:inline-block}
+.console .pchip:hover{border-color:var(--accent);color:var(--accent)}
+.console .pchip.added{border-style:solid;border-color:var(--border-subtle);color:var(--text-4);cursor:default}
+.console .pnew{margin-top:10px}
+.console .pnew summary{list-style:none;display:inline-block}
+.console .pnew summary::-webkit-details-marker{display:none}
+.console .pnew[open] summary{margin-bottom:8px}
+.console .pnew form{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.console .pnew input{max-width:220px}
+.console .step-cta{text-align:center;margin:18px 0 4px}
 """
 
 
@@ -5026,6 +5058,102 @@ CREATIVE_HOME_JS = """
   });
  }
 })();
+"""
+
+
+# 参数推荐池（首批 14 项，行业通用；键与现有提取字段同名者直接复用：material/power/dimension）。
+CREATIVE_PARAM_POOL = (
+    {"key": "model", "label_zh": "型号", "label_en": "Model", "unit": ""},
+    {"key": "material", "label_zh": "材质", "label_en": "Material", "unit": ""},
+    {"key": "dimension", "label_zh": "尺寸", "label_en": "Dimensions", "unit": "mm"},
+    {"key": "weight", "label_zh": "重量", "label_en": "Weight", "unit": "kg"},
+    {"key": "color", "label_zh": "颜色", "label_en": "Color", "unit": ""},
+    {"key": "power", "label_zh": "功率", "label_en": "Power", "unit": "kW"},
+    {"key": "voltage", "label_zh": "电压", "label_en": "Voltage", "unit": "V"},
+    {"key": "capacity", "label_zh": "容量", "label_en": "Capacity", "unit": ""},
+    {"key": "speed", "label_zh": "转速", "label_en": "Speed", "unit": "rpm"},
+    {"key": "pressure", "label_zh": "压力", "label_en": "Pressure", "unit": "MPa"},
+    {"key": "accuracy", "label_zh": "精度", "label_en": "Accuracy", "unit": ""},
+    {"key": "operating_temperature", "label_zh": "工作温度", "label_en": "Operating temperature", "unit": "°C"},
+    {"key": "ip_rating", "label_zh": "防护等级", "label_en": "IP rating", "unit": ""},
+    {"key": "interface", "label_zh": "接口", "label_en": "Interface", "unit": ""},
+)
+
+# 选参数页交互（「编辑」行内展开；不参与后续自动保存——保存走表单提交后重定向）。
+CREATIVE_PARAMS_JS = """
+(function(){
+ var buttons=document.querySelectorAll('[data-edit]');
+ for(var i=0;i<buttons.length;i++){
+  buttons[i].addEventListener('click',function(){
+   var card=document.getElementById(this.getAttribute('data-edit'));
+   if(card){card.classList.toggle('editing');}
+  });
+ }
+})();
+"""
+
+
+def creative_params_step(template: sqlite3.Row) -> str:
+    """「选参数」步骤：参数卡片（开关/排序/行内编辑/删除）+ 推荐池 + 自定义；全部自动保存。"""
+    template_id = esc(template["id"])
+    draft = json.loads(template["draft_json"])
+    raw_params = draft.get("params")
+    params = [p for p in raw_params if isinstance(p, dict)] if isinstance(raw_params, list) else []
+    present = {str(p.get("key")) for p in params}
+    cards = []
+    for param in params:
+        key = esc(str(param.get("key", "")))
+        enabled = bool(param.get("enabled"))
+        label_zh = esc(str(param.get("label_zh", "")))
+        label_en = esc(str(param.get("label_en", "")))
+        unit = esc(str(param.get("unit", "")))
+        unit_html = f"<span class='unit'>{unit}</span>" if unit else ""
+        card_id = f"pc-{key}"
+        cards.append(f"""
+<div class='pcard{' disabled' if not enabled else ''}' id='{card_id}'>
+<div class='top'><span class='nm'>{label_zh} <small>{label_en}</small>{unit_html}</span>
+<span class='tools'>
+<form method='post' action='/admin/creative/{template_id}/params/toggle' class='inline'><input type='hidden' name='param_key' value='{key}'><button class='ptoggle{' on' if enabled else ''}' title='点击隐藏或显示这个参数' aria-label='显示或隐藏'></button></form>
+<form method='post' action='/admin/creative/{template_id}/params/move' class='inline'><input type='hidden' name='param_key' value='{key}'><input type='hidden' name='dir' value='up'><button class='mini' title='上移'>↑</button></form>
+<form method='post' action='/admin/creative/{template_id}/params/move' class='inline'><input type='hidden' name='param_key' value='{key}'><input type='hidden' name='dir' value='down'><button class='mini' title='下移'>↓</button></form>
+<button class='mini link' type='button' data-edit='{card_id}'>编辑</button>
+<form method='post' action='/admin/creative/{template_id}/params/delete' class='inline'><input type='hidden' name='param_key' value='{key}'><button class='mini danger-link'>删除</button></form>
+</span></div>
+<div class='editrow'><form method='post' action='/admin/creative/{template_id}/params/update'>
+<input name='label_zh' value='{label_zh}' placeholder='参数名称' required>
+<input name='label_en' value='{label_en}' placeholder='英文名（可选）'>
+<input name='unit' value='{unit}' placeholder='单位（可选）'>
+<input type='hidden' name='param_key' value='{key}'>
+<button class='secondary'>完成</button>
+</form></div>
+</div>""")
+    chips = []
+    for item in CREATIVE_PARAM_POOL:
+        if item["key"] in present:
+            chips.append(f"<span class='pchip added'>✓ {esc(item['label_zh'])}</span>")
+        else:
+            chips.append(
+                f"<form method='post' action='/admin/creative/{template_id}/params/add' class='inline'>"
+                f"<input type='hidden' name='source' value='pool'><input type='hidden' name='pool_key' value='{esc(item['key'])}'>"
+                f"<button class='pchip'>＋ {esc(item['label_zh'])}</button></form>"
+            )
+    return f"""
+<section class='card'>
+<div class='panel-title'><h2>页面要展示哪些参数？</h2><span class='muted'>数量不限，随时可以改</span></div>
+<p class='muted' style='margin:0 0 12px'>这些是买家在页面上看到的规格。数值来自你上传的资料，你确认过才会展示——没确认的内容永远不会出现在页面上。</p>
+{''.join(cards)}
+<div class='muted' style='margin-top:12px'>从推荐里加（点一下加一个）：</div>
+<div class='pchips'>{''.join(chips)}</div>
+<details class='pnew'><summary class='pchip'>＋ 自定义参数…</summary>
+<form method='post' action='/admin/creative/{template_id}/params/add'>
+<input type='hidden' name='source' value='custom'>
+<input name='label_zh' placeholder='参数名称（必填）' required>
+<input name='label_en' placeholder='英文名（可选）'>
+<input name='unit' placeholder='单位（可选）'>
+<button>添加</button>
+</form></details>
+</section>
+<div class='step-cta'><a class='button' href='/admin/creative/{template_id}?step=blocks'>下一步 · 排内容 →</a></div>
 """
 
 # ── V1-01 步骤② 企业设置：线索阶段 / RFQ 表单字段 / 通知接收人 ──────────────────
@@ -6635,6 +6763,10 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self.redirect(f"/admin/creative/{template_id}?notice=created")
                 return
+            match = re.fullmatch(r"/admin/creative/([a-f0-9]+)/params/(add|toggle|move|update|delete)", path)
+            if match:
+                self.admin_creative_params_action(match.group(1), match.group(2), form)
+                return
             if path == "/admin/settings/stages":
                 self.admin_settings_save_stages(form)
                 return
@@ -7973,15 +8105,79 @@ class Handler(BaseHTTPRequestHandler):
             "created": "<div class='notice'>展示页已创建。建议顺序：选参数 → 排内容 → 看效果。</div>",
             "existing": "<div class='notice'>该品类已有展示页，已直接打开现有页。</div>",
         }
+        saved_line = ""
+        if template["draft_updated_at"]:
+            saved_line = f" · 已自动保存 {template['draft_updated_at'][5:16].replace('T', ' ')}"
+        if step == "params":
+            content = creative_params_step(template)
+        else:
+            content = f"<section class='card'><div class='panel-title'><h2>{label}</h2></div><p class='muted-block'>「{label}」编辑器正在建设中，即将可用。</p></section>"
         body = f"""
 <div class='toolbar'><div><h1>{esc(template['category'])} · 产品展示页 {badge}</h1>
-<div class='muted'>{line}</div></div></div>
+<div class='muted'>{line}{saved_line}</div></div></div>
 {notices.get(query.get("notice", [""])[0], "")}
 {creative_flowbar(step, template_id=template_id)}
-<section class='card'><div class='panel-title'><h2>{label}</h2></div>
-<p class='muted-block'>「{label}」编辑器正在建设中，即将可用。</p></section>
+{content}
+<script>{CREATIVE_PARAMS_JS}</script>
 """
         self.send_html(self.console_page("产品展示页", body, "creative"))
+
+    def admin_creative_params_action(self, template_id: str, action: str, form: dict) -> None:
+        """选参数改动（自动保存）：推荐池/自定义新增、开关、排序、行内编辑、删除。"""
+        template = self.db.get_template(self.tenant_id, template_id)
+        if not template:
+            raise ValueError("展示页不存在")
+        draft = json.loads(template["draft_json"])
+        raw_params = draft.get("params")
+        params = [p for p in raw_params if isinstance(p, dict)] if isinstance(raw_params, list) else []
+        key = str(form.get("param_key", "")).strip()
+        index = next((i for i, p in enumerate(params) if str(p.get("key")) == key), -1)
+        if action == "add":
+            if str(form.get("source", "pool")).strip() == "custom":
+                label_zh = str(form.get("label_zh", "")).strip()
+                if not label_zh:
+                    raise ValueError("请填写参数名称")
+                new_key = ""
+                while not new_key or any(str(p.get("key")) == new_key for p in params):
+                    new_key = f"custom_{secrets.token_hex(4)}"
+                params.append({
+                    "key": new_key, "label_zh": label_zh[:40],
+                    "label_en": str(form.get("label_en", "")).strip()[:60],
+                    "unit": str(form.get("unit", "")).strip()[:20], "enabled": True,
+                })
+            else:
+                pool_key = str(form.get("pool_key", "")).strip()
+                pool_item = next((item for item in CREATIVE_PARAM_POOL if item["key"] == pool_key), None)
+                if not pool_item:
+                    raise ValueError("不支持的推荐参数")
+                if any(str(p.get("key")) == pool_key for p in params):
+                    raise ValueError("这个参数已经在页面上了")
+                params.append({
+                    "key": pool_item["key"], "label_zh": pool_item["label_zh"],
+                    "label_en": pool_item["label_en"], "unit": pool_item["unit"], "enabled": True,
+                })
+        elif index < 0:
+            raise ValueError("参数不存在")
+        elif action == "toggle":
+            params[index]["enabled"] = not bool(params[index].get("enabled"))
+        elif action == "move":
+            target = index - 1 if str(form.get("dir", "")) == "up" else index + 1
+            if not (0 <= target < len(params)):
+                self.redirect(f"/admin/creative/{template_id}?step=params")
+                return
+            params[index], params[target] = params[target], params[index]
+        elif action == "update":
+            label_zh = str(form.get("label_zh", "")).strip()
+            if not label_zh:
+                raise ValueError("请填写参数名称")
+            params[index]["label_zh"] = label_zh[:40]
+            params[index]["label_en"] = str(form.get("label_en", "")).strip()[:60]
+            params[index]["unit"] = str(form.get("unit", "")).strip()[:20]
+        elif action == "delete":
+            params.pop(index)
+        draft["params"] = params
+        self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor)
+        self.redirect(f"/admin/creative/{template_id}?step=params")
 
     def admin_users(self, query: dict[str, list[str]]) -> None:
         users = self.db.list_users(self.tenant_id)

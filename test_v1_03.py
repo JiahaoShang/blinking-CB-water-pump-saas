@@ -292,7 +292,7 @@ class CreativeHomeTests(unittest.TestCase):
         self.assertIn("fs on'>选参数", page)
         self.assertIn(f"href='/admin/creative/{template_id}?step=blocks'", page)
         self.assertIn(f"href='/admin/creative/{template_id}?step=publish'", page)
-        self.assertIn("正在建设中", page)
+        self.assertIn("页面要展示哪些参数？", page)  # 默认落在「选参数」编辑器（切片3）
         # 模块条范围内无数字标识（整页含 CSS 历史备注字符，只对链路本身断言）
         bar = page.split("class='flowbar", 1)[1].split("</div>", 1)[0]
         for digit in ("①", "②", "③", "④", "⑤"):
@@ -333,6 +333,139 @@ class CreativeHomeTests(unittest.TestCase):
         self.assertIn("展示页不存在", body)
         status, _, _ = form_request(self.server, "GET", "/admin/creative/" + "a" * 24, cookie=self.admin)
         self.assertEqual(status, 404)
+
+
+class ParamsEditorTests(unittest.TestCase):
+    """选参数编辑器：推荐池/自定义、开关、排序、行内编辑、删除、自动保存（审计）、术语。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.db.ensure_tenant("other-tenant", "另一家企业")
+        cls.template_id = cls.db.create_template("demo-tenant", "工业输送设备", "demo-admin@example.invalid")
+        cls.db.create_user("demo-tenant", "v103s3-nomod@example.invalid", "无权员工", "employee", "pass-s3-long", "demo-admin@example.invalid")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        cls.nomod = login(cls.server, "v103s3-nomod@example.invalid", "pass-s3-long")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.db.conn.close()
+        cls.thread.join()
+        cls.temp_dir.cleanup()
+
+    def _draft(self):
+        return json.loads(self.db.get_template("demo-tenant", self.template_id)["draft_json"])
+
+    def _keys(self):
+        return [p["key"] for p in self._draft()["params"]]
+
+    def _find(self, key):
+        return next(p for p in self._draft()["params"] if p["key"] == key)
+
+    def _post(self, action, fields):
+        return form_request(self.server, "POST", f"/admin/creative/{self.template_id}/params/{action}", fields, self.admin)
+
+    def test_cross_tenant_and_unauthorized(self):
+        # 未授权员工：服务端硬拦截（模块门）
+        status, _, _ = form_request(
+            self.server, "POST", f"/admin/creative/{self.template_id}/params/toggle", {"param_key": "material"}, self.nomod
+        )
+        self.assertEqual(status, 403)
+        # 跨租户模板 id：视为不存在（400 错误页，不泄露）
+        foreign = self.db.create_template("other-tenant", "别家品类", "setup")
+        status, _, body = form_request(
+            self.server, "POST", f"/admin/creative/{foreign}/params/toggle", {"param_key": "material"}, self.admin
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("展示页不存在", body)
+
+    def test_param_actions_journey(self):
+        # 推荐池添加 → 自动保存 + 重定向回本步
+        status, headers, _ = self._post("add", {"source": "pool", "pool_key": "voltage"})
+        self.assertEqual(status, 303)
+        self.assertEqual(headers.get("Location", ""), f"/admin/creative/{self.template_id}?step=params")
+        self.assertEqual(self._keys()[-1], "voltage")
+        self.assertTrue(self._find("voltage")["enabled"])
+        self.assertEqual(self._find("voltage")["label_zh"], "电压")
+        # 重复添加 → 400；未知推荐项 → 400
+        status, _, body = self._post("add", {"source": "pool", "pool_key": "voltage"})
+        self.assertEqual(status, 400)
+        self.assertIn("已经在页面上", body)
+        self.assertEqual(self._post("add", {"source": "pool", "pool_key": "nope"})[0], 400)
+        # 自定义参数 → 生成 custom_ 键；空名称 → 400
+        status, _, _ = self._post("add", {"source": "custom", "label_zh": "涂层", "label_en": "Coating", "unit": ""})
+        self.assertEqual(status, 303)
+        custom_key = self._keys()[-1]
+        self.assertTrue(custom_key.startswith("custom_"))
+        self.assertEqual(self._find(custom_key)["label_zh"], "涂层")
+        self.assertEqual(self._post("add", {"source": "custom", "label_zh": "   "})[0], 400)
+        # 开关（自动保存）
+        self._post("toggle", {"param_key": "voltage"})
+        self.assertFalse(self._find("voltage")["enabled"])
+        self._post("toggle", {"param_key": "voltage"})
+        self.assertTrue(self._find("voltage")["enabled"])
+        # 排序：voltage 上移一格；首位上移 = 不变（不写坏顺序）
+        before = self._keys()
+        self._post("move", {"param_key": "voltage", "dir": "up"})
+        after = self._keys()
+        self.assertEqual(after.index("voltage"), before.index("voltage") - 1)
+        self._post("move", {"param_key": after[0], "dir": "up"})
+        self.assertEqual(self._keys(), after)
+        # 行内编辑（旧字段也可改标签）；空名 → 400
+        self._post("update", {"param_key": "voltage", "label_zh": "工作电压", "label_en": "Operating voltage", "unit": "V"})
+        row = self._find("voltage")
+        self.assertEqual((row["label_zh"], row["label_en"], row["unit"]), ("工作电压", "Operating voltage", "V"))
+        self.assertEqual(self._post("update", {"param_key": "voltage", "label_zh": ""})[0], 400)
+        # 删除自定义；未知 key → 400
+        self._post("delete", {"param_key": custom_key})
+        self.assertNotIn(custom_key, self._keys())
+        status, _, body = self._post("delete", {"param_key": "ghost"})
+        self.assertEqual(status, 400)
+        self.assertIn("参数不存在", body)
+        # 自动保存痕迹：页面头部显示「已自动保存」；审计累计（每次生效的改动一条）
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{self.template_id}?step=params", cookie=self.admin)
+        self.assertIn("已自动保存", page)
+        saves = self.db.conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE entity_type='template' AND entity_id=? AND action='template_draft_saved'",
+            (self.template_id,),
+        ).fetchone()[0]
+        self.assertGreaterEqual(saves, 7)
+
+    def test_params_step_renders_cards_pool_and_no_jargon(self):
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{self.template_id}?step=params", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("页面要展示哪些参数？", page)
+        self.assertIn("从推荐里加", page)
+        self.assertIn("＋ 自定义参数…", page)
+        self.assertIn("下一步 · 排内容", page)
+        # 标准模板默认 8 个（现有字段）都在卡片里
+        for label in ("材质", "功率", "安装尺寸", "流量范围", "扬程范围", "介质适用条件", "介质温度", "性能曲线目录点"):
+            self.assertIn(label, page)
+        # 未添加的推荐项可点添加；已添加项显示已加状态
+        self.assertIn("name='pool_key' value='color'", page)
+        self.assertIn("pchip added", page)
+        # 唯一模块条 + 当前步高亮
+        self.assertEqual(page.count("class='flowbar"), 1)
+        self.assertIn("fs on'>选参数", page)
+        # 术语：正文（去样式/脚本）不出现技术词「字段」；模块条无数字标识
+        stripped = re.sub(r"<style>.*?</style>|<script>.*?</script>", "", page, flags=re.S)
+        self.assertNotIn("字段", stripped)
+        bar = page.split("class='flowbar", 1)[1].split("</div>", 1)[0]
+        for digit in ("①", "②", "③", "④", "⑤"):
+            self.assertNotIn(digit, bar)
+        # 其他步骤仍为占位（切片 4 上线）
+        status, _, blocks_page = form_request(self.server, "GET", f"/admin/creative/{self.template_id}?step=blocks", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("正在建设中", blocks_page)
 
 
 if __name__ == "__main__":
