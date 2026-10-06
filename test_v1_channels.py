@@ -842,6 +842,22 @@ class TelegramPipelineTests(unittest.TestCase):
         self.assertTrue(conversation_id)
         self.assertTrue(any("流量" in text for text in self.sent_texts(4303)))
 
+    def test_poller_skips_when_channel_disabled(self):
+        # 停用渠道：轮询器不消费、不落库（与 Webhook 的 200 skipped 口径一致）
+        self.mock.inject_message(4310, "disabled channel message", first_name="Offline")
+        self.db.set_channel_enabled("demo-tenant", "telegram", False, "demo-admin@example.invalid")
+        try:
+            env = os.environ.copy()
+            result = subprocess.run(
+                [sys.executable, "tools/channels/telegram_poller.py", "--db", str(self.db_path), "--once"],
+                cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=60,
+            )
+        finally:
+            self.db.set_channel_enabled("demo-tenant", "telegram", True, "demo-admin@example.invalid")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("渠道未启用", result.stdout)
+        self.assertIsNone(self.conversation_for(4310))
+
     def test_requirement_confirm_and_match(self):
         status, _body = self.post_update(self.update_for(4304, "请报价：flow 15 m3/h, head 30 m, medium clean water，用于冷却水系统", 904))
         self.assertEqual(status, 200)

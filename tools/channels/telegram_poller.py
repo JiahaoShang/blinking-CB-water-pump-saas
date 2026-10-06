@@ -66,8 +66,20 @@ def main() -> None:
     ai = app_module.AIService(app_module.AIConfig.from_env())
     tenant_id = resolve_tenant(db, args.tenant)
     print(f"Telegram 轮询就绪：tenant={tenant_id} db={args.db} base={base}")
+
+    def channel_enabled() -> bool:
+        account = db.get_channel_account(tenant_id, "telegram")
+        return bool(account and account["status"] == "enabled")
+
     offset = 0
     while True:
+        if not channel_enabled():
+            # 与 Webhook 口径一致：停用渠道不收任何消息（不消费、不落库）。
+            print("渠道未启用：暂停收信；在「设置与治理 › 渠道接入」启用后自动继续。")
+            if args.once:
+                return
+            time.sleep(max(args.interval, 5.0))
+            continue
         try:
             data = telegram_call(base, token, "getUpdates", {"offset": offset + 1 if offset else 0, "timeout": args.timeout}, timeout=max(args.timeout + 10, 30))
         except app_module.ChannelSendError as error:
