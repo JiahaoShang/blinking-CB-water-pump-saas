@@ -4931,7 +4931,12 @@ h1{font-size:21px}
 .console .chat-composer{display:flex;gap:10px;align-items:flex-end;padding:12px 18px;border-top:1px solid var(--border)}
 .console .chat-composer textarea{flex:1;min-height:44px;max-height:140px;margin:0;resize:vertical}
 .console .chat-composer button{flex:none;height:40px;padding:0 22px}
-.console .chat-hint{margin:0;padding:0 18px 12px;font-size:11.5px;color:var(--text-3)}
+.console .chat-foot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:0 18px 12px}
+.console .chat-hint{margin:0;font-size:11.5px;color:var(--text-3)}
+/* 输入区底部小气泡（用户口径：小气泡格放在输入框底部、不越出对话框边线） */
+.console .qpill{height:28px;padding:0 12px;border-radius:999px;font-size:12px;font-weight:500;background:var(--surface-2);border:1px solid var(--border-strong);color:var(--text-2);display:inline-flex;align-items:center;gap:6px;box-shadow:none;cursor:pointer}
+.console .qpill:hover{border-color:var(--accent-border);color:var(--accent);background:var(--accent-soft)}
+.console .qpill .ic{width:14px;height:14px}
 /* iOS 风格滑块开关（AI 自动回复） */
 .console .ai-switch-form{display:flex;align-items:center;gap:8px;margin:0}
 .console .ios-switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin:0;font-weight:500}
@@ -5447,7 +5452,7 @@ CHANNEL_LABELS = {"whatsapp": "WhatsApp", "langbot": "LangBot"}
 # whatsapp 为平台原生通道（Twilio 直连）；registry 之外的来源自动生成通用模块；已接入但无消息的平台显示空态指引。
 INBOX_PLATFORM_REGISTRY = (
     {"slug": "telegram", "label": "Telegram", "icon": "plat-telegram", "adapters": ("telegram",), "order": 10},
-    {"slug": "whatsapp", "label": "WhatsApp", "icon": "plat-whatsapp", "adapters": (), "native": True, "order": 20},
+    {"slug": "whatsapp", "label": "WhatsApp", "icon": "phone", "adapters": (), "native": True, "order": 20},
     {"slug": "wechat", "label": "微信", "icon": "plat-wechat", "adapters": ("微信", "openclaw-weixin", "openclaw", "wechatpad", "wechatpadpro"), "order": 30},
     {"slug": "wecom", "label": "企业微信", "icon": "plat-wecom", "adapters": ("企业微信", "wecom", "wecombot"), "order": 40},
     {"slug": "wecomcs", "label": "微信客服", "icon": "plat-wecom", "adapters": ("微信客服", "wecomcs"), "order": 45},
@@ -9740,11 +9745,14 @@ class Handler(BaseHTTPRequestHandler):
             chips.append(f"<a class='chip' href='/admin/rfqs/{esc(rfq_row['id'])}'>询价单 {esc(rfq_row['id'][:8])} · {esc(rfq_row['status'])}</a>")
         if lead_row:
             chips.append(f"<a class='chip' href='/admin/leads/{esc(lead_row['id'])}'>关联线索</a>")
+        rfq_pill_html = ""
         if section["kind"] == "platform":
-            chips.append(
-                f"<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/rfq-link' class='inline'>"
-                f"<button class='secondary'>发送询价填写链接</button></form>"
+            rfq_pill_html = (
+                f"<form class='inline' method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/rfq-link'>"
+                f"<button class='qpill' title='给买方发送询价填写链接'>{svg_icon('file')}发送询价单</button></form>"
             )
+        chips_html = "".join(chips)
+        chips_row = f"<div class='chat-chips'>{chips_html}</div>" if chips_html else ""
         stop_badge = "<span class='badge withdrawn'>停止主动联系</span>" if conversation["stop_proactive_contact"] else ""
         identity = None
         if not is_web:
@@ -9782,13 +9790,13 @@ class Handler(BaseHTTPRequestHandler):
 <div class='chat-id'><strong>{esc(title_name)}</strong><small>{meta_line}</small></div>
 <div class='chat-tools'>{ai_switch}</div>
 </header>
-<div class='chat-chips'>{''.join(chips) or "<span class='muted'>暂无关联业务</span>"}</div>
+{chips_row}
 <div class='chat-log'>{transcript}</div>
 <form class='chat-composer' method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/reply'>
 <textarea name='body' required maxlength='4000' placeholder='输入回复内容…'></textarea>
 <button>发送</button>
 </form>
-<p class='chat-hint'>{hint}</p>
+<div class='chat-foot'>{rfq_pill_html}<span class='chat-hint'>{hint}</span></div>
 </section>"""
         self.send_html(self.console_page(f"{label} · 会话", body, f"inbox_{slug}"))
 

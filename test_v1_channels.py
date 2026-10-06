@@ -642,8 +642,27 @@ class ConversationInboxTests(unittest.TestCase):
         for marker in ("/admin/inbox/web", "/admin/inbox/telegram", "/admin/inbox/whatsapp", "/admin/inbox/other"):
             self.assertIn(marker, page)
         self.assertIn("i-plat-telegram", page)
-        self.assertIn("i-plat-whatsapp", page)
+        self.assertIn("i-phone", page)  # WhatsApp 用纯电话图标（用户反馈：沿用上一版）
         self.assertNotIn("/admin/inbox/langbot", page)
+
+    def test_inbox_rfq_pill_in_composer_foot(self):
+        """用户反馈修订：发送询价单=输入区底部小气泡（不越出对话框边线），顶部工具条不再重复；网站聊天无此气泡。"""
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.langbot_conv}", cookie=self.inbox_emp)
+        self.assertEqual(status, 200)
+        self.assertIn("class='qpill'", page)
+        self.assertIn(f"/admin/inbox/telegram/{self.langbot_conv}/rfq-link", page)
+        self.assertIn("class='chat-foot'", page)
+        self.assertIn("发送询价单", page)
+        # 位置：composer 之后、仍在对话框（section）之内——不越出底边线
+        self.assertTrue(page.find("class='chat-composer'") < page.find("class='chat-foot'"))
+        self.assertTrue(page.find("class='chat-foot'") < page.rindex("</section>"))
+        # 旧顶栏按钮形态不再出现；空工具条整条隐藏（不再渲染「暂无关联业务」）
+        self.assertNotIn("发送询价填写链接</button>", page)  # 旧顶栏按钮形态不回归（新气泡的 title 提示词不算）
+        self.assertNotIn("暂无关联业务", page)
+        # 网站聊天详情：无 RFQ 气泡
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/web/{self.web_a}", cookie=self.inbox_emp)
+        self.assertEqual(status, 200)
+        self.assertNotIn("class='qpill'", page)
 
     def test_inbox_reply_channel_delivery_gated(self):
         # 渠道回复走真实发送：未启用渠道时消息仍落库并标记「发送失败」（不再直接拒绝）。
