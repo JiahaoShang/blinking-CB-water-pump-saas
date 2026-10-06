@@ -195,8 +195,11 @@ function render() {
     let localized = message.source?.startsWith('human-request') ? t('engineerRequested') : message.content;
     // 工程师回复消息自带「工程师回复：」前缀（供旧页面直接消费）；参考窗已用标签呈现，去掉前缀避免重复。
     if (message.source === 'human-engineer') localized = localized.replace(/^工程师回复：/, '');
+    // 卖家回复消息自带「卖家回复：」前缀（供旧页面直接消费）；参考窗已用标签呈现，去掉前缀避免重复。
+    if (message.source === 'staff-reply') localized = localized.replace(/^卖家回复：/, '');
     const bubble = node('div', `bubble ${message.role === 'buyer' ? 'buyer' : 'assistant'}`, localized);
     if (message.source === 'human-engineer') bubble.prepend(node('small', '', locale === 'en' ? 'Engineer reply' : '工程师回复'));
+    if (message.source === 'staff-reply') bubble.prepend(node('small', '', locale === 'en' ? 'Seller reply' : '卖家回复'));
     if (message.source?.startsWith('engineer-followup:')) {
       bubble.prepend(node('small', '', locale === 'en' ? 'Engineer question' : '工程师追问'));
       const task = (current.human_tasks || []).find((item) => item.id === message.source.split(':')[1]);

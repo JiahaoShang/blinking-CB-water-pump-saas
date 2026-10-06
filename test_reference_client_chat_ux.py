@@ -89,6 +89,10 @@ class ReferenceChatSourceContractTests(unittest.TestCase):
         # 转交确认以消息流形式播报（客户端按语言本地化）；悬浮按钮文案本地化
         self.assertIn("human-request", source)
         self.assertIn("launcher", source)
+        # 卖家回复（收件箱直接回复）：带标签呈现并去掉内容前缀，与工程师回复同法处理
+        self.assertIn("staff-reply", source)
+        self.assertIn("Seller reply", source)
+        self.assertIn("卖家回复：", source)
         self.assertIn('id="chat-launcher-label"', (ROOT / "reference-client" / "index.html").read_text(encoding="utf-8"))
         # 兜底文案不再写死邀请语（动向与入口只由界面按真实状态给出）
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")

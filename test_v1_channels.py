@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools" / "channels"))
 
 from app import (  # noqa: E402
+    AI_PAUSED_ANSWER,
     AUDIT_ACTION_LABELS,
     AUDIT_ENTITY_LABELS,
     CHANNEL_KEYS,
@@ -66,6 +67,18 @@ def json_request(method, url, payload=None):
     request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method=method)
     with urllib.request.urlopen(request, timeout=5) as response:
         return response.status, json.loads(response.read().decode("utf-8"))
+
+
+def json_http(server, method, path, payload=None, headers=None):
+    """对测试服务发 JSON 请求（买家 API 等）。"""
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
+    request_headers = {"Content-Type": "application/json", **(headers or {})}
+    conn.request(method, path, json.dumps(payload).encode("utf-8") if payload is not None else None, request_headers)
+    response = conn.getresponse()
+    data = response.read()
+    result = response.status, json.loads(data.decode("utf-8")) if data else None
+    conn.close()
+    return result
 
 
 class _CaptureServer:
@@ -432,6 +445,215 @@ class ChannelMockTests(unittest.TestCase):
         finally:
             receiver.stop()
             server.stop()
+
+
+class ConversationInboxTests(unittest.TestCase):
+    """会话收件箱（切片2）：列表分渠道、详情标注与回复人、直接回复、AI 开关、权限。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.db.ensure_tenant("other-tenant", "另一家企业")
+        cls.db.register_buyer_site("demo-tenant", "site-a", "https://seller-a.example")
+        cls.db.create_user("demo-tenant", "v104b-inbox@example.invalid", "收件箱员工", "employee", "pass-inbox-2", "demo-admin@example.invalid")
+        inbox_row = cls.db.conn.execute("SELECT id FROM users WHERE email=?", ("v104b-inbox@example.invalid",)).fetchone()
+        cls.db.set_user_modules("demo-tenant", inbox_row["id"], ["inbox"], "demo-admin@example.invalid")
+        cls.db.create_user("demo-tenant", "v104b-nomod@example.invalid", "零权限员工", "employee", "pass-nomod-2", "demo-admin@example.invalid")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        cls.inbox_emp = login(cls.server, "v104b-inbox@example.invalid", "pass-inbox-2")
+        cls.nomod = login(cls.server, "v104b-nomod@example.invalid", "pass-nomod-2")
+        # 会话主夹具：买方消息 + AI 有据回答 + 工程师回复（新：带回复人）+ 旧工程师回复（回退匹配任务）+ 转交播报
+        cls.web_a = cls.db.create_conversation("demo-tenant", "website_api", "en")
+        cls.db.save_message("demo-tenant", cls.web_a, "buyer", "flow 50 m3/h, clean water", "website_api")
+        cls.db.save_message("demo-tenant", cls.web_a, "assistant", "流量范围 30-90 m³/h（依据：参数表 第 2 行）", "grounded-answer")
+        cls.db.save_message("demo-tenant", cls.web_a, "assistant", "工程师回复：建议核对工况后选型。", "human-engineer", actor_email="eng-new@example.invalid")
+        question_message_id = cls.db.save_message("demo-tenant", cls.web_a, "buyer", "还有样品吗？", "website_api")
+        cls.db.save_message("demo-tenant", cls.web_a, "assistant", "工程师回复：样品需要确认。", "human-engineer")
+        cls.db.conn.execute(
+            "INSERT INTO human_tasks(id, tenant_id, conversation_id, question_message_id, question, reason, status, response, assigned_to, created_at, updated_at, resolved_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'resolved', ?, ?, ?, ?, ?)",
+            ("task-old-1", "demo-tenant", cls.web_a, question_message_id, "还有样品吗？", "no_basis", "样品需要确认。", "eng-old@example.invalid", "2026-10-06T00:00:00+00:00", "2026-10-06T00:00:00+00:00", "2026-10-06T00:00:00+00:00"),
+        )
+        cls.db.conn.commit()
+        cls.db.save_message("demo-tenant", cls.web_a, "assistant", "已转交工程师核实——答复会直接出现在这里。", "human-request:task-old-1")
+        # 关联询价（列表联系方式与详情关联业务用）
+        cls.rfq_id, _created = cls.db.create_rfq(
+            "demo-tenant", cls.web_a, "sub-inbox-1",
+            {"contact_email": "buyer@example.invalid", "contact_phone": "+491234", "quantity": "2", "region": "Germany"},
+            "请报价",
+        )
+        # 第二个网站会话（列表排序用）与渠道会话、演示夹具会话（应被排除）
+        cls.web_b = cls.db.create_conversation("demo-tenant", "web", "en")
+        cls.db.save_message("demo-tenant", cls.web_b, "buyer", "hello from second visitor", "website_api")
+        cls.telegram_conv = cls.db.create_conversation("demo-tenant", "telegram", "en")
+        cls.db.bind_channel_identity("demo-tenant", "telegram", "88002", "Maya (Telegram)", cls.telegram_conv)
+        cls.db.save_message("demo-tenant", cls.telegram_conv, "buyer", "hi from telegram", "buyer_web", channel="telegram", external_message_id="tg-1")
+        cls.fixture_conv = cls.db.create_conversation("demo-tenant", "demo-fixture", "en")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.temp_dir.cleanup()
+
+    @classmethod
+    def _buyer_token(cls, conversation_id):
+        cache = getattr(cls, "_token_cache", None)
+        if cache is None:
+            cache = cls._token_cache = {}
+        if conversation_id not in cache:
+            cache[conversation_id] = cls.db.issue_buyer_access("demo-tenant", conversation_id)
+        return cache[conversation_id]
+
+    def test_inbox_ai_toggle_and_question_suppression(self):
+        # 暂停 AI
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/web/{self.web_a}/ai-toggle", {}, self.inbox_emp)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=ai_paused", headers.get("Location", ""))
+        self.assertEqual(self.db.get_conversation("demo-tenant", self.web_a)["ai_paused"], 1)
+        token = self._buyer_token(self.web_a)
+        headers_api = {"X-Site-Key": "site-a", "Authorization": f"Bearer {token}", "Idempotency-Key": "q-paused-1"}
+        status, body = json_http(self.server, "POST", f"/api/v1/buyer/conversations/{self.web_a}/questions", {"question": "what is the flow range?"}, headers_api)
+        self.assertEqual(status, 201)
+        self.assertEqual(body["status"], "needs_human")
+        self.assertEqual(body["answer"], AI_PAUSED_ANSWER)
+        # 恢复 AI：同样问题不再返回「已暂停」文案（无产品语境 → 走常规兜底）
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/web/{self.web_a}/ai-toggle", {}, self.inbox_emp)
+        self.assertIn("notice=ai_resumed", headers.get("Location", ""))
+        self.assertEqual(self.db.get_conversation("demo-tenant", self.web_a)["ai_paused"], 0)
+        status, body = json_http(self.server, "POST", f"/api/v1/buyer/conversations/{self.web_a}/questions", {"question": "what is the flow range?"}, {**headers_api, "Idempotency-Key": "q-resumed-1"})
+        self.assertEqual(status, 201)
+        self.assertNotEqual(body["answer"], AI_PAUSED_ANSWER)
+        # 审计：两次切换可见
+        switches = [
+            row["details"]
+            for row in self.db.conn.execute(
+                "SELECT details FROM audit_log WHERE tenant_id='demo-tenant' AND action='conversation_ai_switch' AND entity_id=? ORDER BY id",
+                (self.web_a,),
+            )
+        ]
+        self.assertEqual(switches, ["paused=1", "paused=0"])
+
+    def test_inbox_detail_labels_and_responders(self):
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/web/{self.web_a}", cookie=self.inbox_emp)
+        self.assertEqual(status, 200)
+        self.assertIn("买方", page)
+        self.assertIn("AI · 有据回答", page)
+        self.assertIn("人工 · 工程师（eng-new@example.invalid）", page)
+        self.assertIn("人工 · 工程师（eng-old@example.invalid）", page)  # 旧消息经任务回退还原回复人
+        self.assertIn("系统 · 已转交工程师", page)
+        self.assertNotIn("工程师回复：建议核对工况后选型", page)  # 前缀剥离，以标签+正文呈现
+        self.assertIn("建议核对工况后选型。", page)
+        self.assertIn("AI 自动回复开启", page)
+        # 关联业务：询价单链接
+        self.assertIn(f"/admin/rfqs/{self.rfq_id}", page)
+        self.assertIn("询价单", page)
+        # 页面内的链接/表单必须用 URL 段 slug（web），不能把内部导航键拼进地址（走查抓到的缺陷）
+        self.assertIn(f"/admin/inbox/web/{self.web_a}/reply", page)
+        self.assertIn(f"/admin/inbox/web/{self.web_a}/ai-toggle", page)
+        self.assertIn("href='/admin/inbox/web'", page)
+        self.assertNotIn("/admin/inbox/inbox_web", page)  # 坏的 URL 形态（导航徽标 data-nav-count 不算）
+
+    def test_inbox_lists_filter_and_preview(self):
+        # 制造确定性排序：把 web_b 的“最后活动”推到未来时间（避免同秒并列按 id 兜底）
+        self.db.save_message("demo-tenant", self.web_b, "buyer", "second visitor again", "website_api")
+        self.db.conn.execute("UPDATE conversations SET updated_at='2099-01-01T00:00:00+00:00' WHERE id=?", (self.web_b,))
+        self.db.conn.commit()
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/web", cookie=self.inbox_emp)
+        self.assertEqual(status, 200)
+        self.assertIn("网站访客", page)
+        self.assertIn("buyer@example.invalid", page)  # 联系方式来自关联询价
+        self.assertNotIn(self.telegram_conv[:6], page)  # 渠道会话不进网站聊天列表
+        self.assertNotIn(self.fixture_conv[:6], page)  # 演示夹具不进收件箱
+        self.assertIn(self.web_b[:6], page)
+        self.assertIn(self.web_a[:6], page)
+        self.assertTrue(page.find(self.web_b[:6]) < page.find(self.web_a[:6]))  # 最新在前
+        self.assertIn(f"/admin/inbox/web/{self.web_b}", page)  # 列表链接用 URL 段 slug
+        # Telegram 列表：显示绑定买方名，不含网站会话
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/telegram", cookie=self.inbox_emp)
+        self.assertEqual(status, 200)
+        self.assertIn("Maya (Telegram)", page)
+        self.assertNotIn(self.web_a[:6], page)
+        # WhatsApp：空态
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/whatsapp", cookie=self.inbox_emp)
+        self.assertEqual(status, 200)
+        self.assertIn("渠道未启用", page)
+
+    def test_inbox_permissions_isolation(self):
+        status, _, _ = form_request(self.server, "GET", "/admin/inbox/web", cookie=self.nomod)
+        self.assertEqual(status, 403)
+        status, _, _ = form_request(self.server, "GET", f"/admin/inbox/web/{self.web_a}", cookie=self.nomod)
+        self.assertEqual(status, 403)
+        status, _, _ = form_request(self.server, "POST", f"/admin/inbox/web/{self.web_a}/reply", {"body": "x"}, self.nomod)
+        self.assertEqual(status, 403)
+        status, _, _ = form_request(self.server, "POST", f"/admin/inbox/web/{self.web_a}/ai-toggle", {}, self.nomod)
+        self.assertEqual(status, 403)
+        # 跨租户 / 串模块：404
+        other_conv = self.db.create_conversation("other-tenant", "website_api", "en")
+        status, _, _ = form_request(self.server, "GET", f"/admin/inbox/web/{other_conv}", cookie=self.inbox_emp)
+        self.assertEqual(status, 404)
+        status, _, _ = form_request(self.server, "GET", f"/admin/inbox/web/{self.telegram_conv}", cookie=self.inbox_emp)
+        self.assertEqual(status, 404)
+
+    def test_inbox_reply_channel_blocked(self):
+        before = self.db.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=?", (self.telegram_conv,)
+        ).fetchone()[0]
+        status, _, body = form_request(self.server, "POST", f"/admin/inbox/telegram/{self.telegram_conv}/reply", {"body": "hello"}, self.inbox_emp)
+        self.assertEqual(status, 400)
+        self.assertIn("发送通道尚未开通", body)
+        after = self.db.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=?", (self.telegram_conv,)
+        ).fetchone()[0]
+        self.assertEqual(before, after)
+
+    def test_inbox_reply_web_and_buyer_visibility(self):
+        status, headers, _ = form_request(
+            self.server, "POST", f"/admin/inbox/web/{self.web_a}/reply",
+            {"body": "我们已经安排工程师复查，明天答复您。"}, self.inbox_emp,
+        )
+        self.assertEqual(status, 303)
+        self.assertIn("notice=sent", headers.get("Location", ""))
+        # 落库：卖家回复消息（含回复人、前缀、来源）与审计
+        row = self.db.conn.execute(
+            "SELECT * FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=? ORDER BY rowid DESC LIMIT 1",
+            (self.web_a,),
+        ).fetchone()
+        self.assertEqual(row["role"], "staff")
+        self.assertEqual(row["source"], "staff-reply")
+        self.assertEqual(row["actor_email"], "v104b-inbox@example.invalid")
+        self.assertEqual(row["delivery_status"], "sent")
+        self.assertTrue(row["content"].startswith("卖家回复："))
+        actions = [
+            item["action"]
+            for item in self.db.conn.execute(
+                "SELECT action FROM audit_log WHERE tenant_id='demo-tenant' AND entity_id=? ORDER BY id", (self.web_a,)
+            )
+        ]
+        self.assertIn("staff_replied", actions)
+        # 买家侧可见（网站聊天轮询读取同一会话）：卖家回复出现在消息流里
+        token = self._buyer_token(self.web_a)
+        status, body = json_http(
+            self.server, "GET", f"/api/v1/buyer/conversations/{self.web_a}",
+            headers={"X-Site-Key": "site-a", "Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(
+            any(message.get("source") == "staff-reply" and str(message.get("content", "")).startswith("卖家回复：") for message in body["messages"])
+        )
+        # 详情页呈现：人工 · 卖家回复（回复人）+ 前缀剥离
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/web/{self.web_a}?notice=sent", cookie=self.inbox_emp)
+        self.assertIn("人工 · 卖家回复（v104b-inbox@example.invalid）", page)
+        self.assertIn("我们已经安排工程师复查，明天答复您。", page)
+        self.assertIn("回复已发送", page)
+        self.assertIn("发送卖家回复", AUDIT_ACTION_LABELS.get("staff_replied", ""))  # 标签中文
+        self.assertEqual(AUDIT_ACTION_LABELS["staff_replied"], "发送卖家回复")
 
 
 if __name__ == "__main__":

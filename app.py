@@ -52,6 +52,7 @@ COMMERCIAL_QUESTION_TOKENS = (
 COMMERCIAL_REFUSAL_ANSWER = "关于价格、库存、交期或认证，我手上的核准资料还无法确认。"
 NO_PUBLISHED_PRODUCT_ANSWER = "目前没有可引用的已发布产品资料，我还不能确认这个问题。"
 NO_APPROVED_BASIS_ANSWER = "现有核准资料没有足够依据回答这个问题，参数还需要核实。"
+AI_PAUSED_ANSWER = "本会话的 AI 自动回复已被卖家暂停；你的问题已保存，稍后由人工核实后回复。"
 HUMAN_REQUEST_ACK = "已转交工程师核实——答复会直接出现在这里。"
 REQUIREMENT_LABELS = {
     "category": "品类",
@@ -1532,6 +1533,11 @@ class Database:
         self._audit(tenant_id, "conversation", conversation_id, "conversation_ai_switch", actor, f"paused={1 if paused else 0}")
         self.conn.commit()
 
+    def audit_staff_reply(self, tenant_id: str, conversation_id: str, message_id: str, actor: str) -> None:
+        """卖家在收件箱里发出的回复留痕（消息本体由 save_message 落库）。"""
+        self._audit(tenant_id, "conversation", conversation_id, "staff_replied", actor, f"message={message_id[:8]}")
+        self.conn.commit()
+
     def get_revisions(self, tenant_id: str, conversation_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM requirement_revisions WHERE tenant_id=? AND conversation_id=? ORDER BY revision",
@@ -1750,7 +1756,7 @@ class Database:
             )
             if updated.rowcount != 1:
                 raise ValueError("任务状态已变化")
-            self.save_message(tenant_id, task["conversation_id"], "engineer", question, f"engineer-followup:{task_id}", commit=False)
+            self.save_message(tenant_id, task["conversation_id"], "engineer", question, f"engineer-followup:{task_id}", commit=False, actor_email=actor)
             self._audit(tenant_id, "human_task", task_id, "asked_buyer", actor)
 
     def answer_task_followup(self, tenant_id: str, conversation_id: str, task_id: str, answer: str) -> None:
@@ -1784,7 +1790,7 @@ class Database:
             )
             if updated.rowcount != 1:
                 raise ValueError("人工任务已处理")
-            self.save_message(tenant_id, task["conversation_id"], "assistant", f"工程师回复：{response}", "human-engineer", commit=False)
+            self.save_message(tenant_id, task["conversation_id"], "assistant", f"工程师回复：{response}", "human-engineer", commit=False, actor_email=actor)
             self._audit(tenant_id, "human_task", task_id, "resolved", actor)
 
     def latest_confirmed_revision(self, tenant_id: str, conversation_id: str) -> sqlite3.Row | None:
@@ -4763,6 +4769,14 @@ h1{font-size:21px}
 .console .step-form{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0 0}
 .console .step-form label{display:flex;gap:6px;align-items:center;margin:0;font-weight:500;color:var(--text-2);font-size:12.5px}
 .console .step-form select{max-width:340px;min-width:200px}
+/* ── 渠道收件箱：消息记录（AI/人工标注）与回复 ── */
+.console .msgrow{margin:0 0 10px;display:flex;flex-direction:column;gap:4px}
+.console .msgrow .meta{display:flex;gap:10px;align-items:baseline;font-size:11.5px;color:var(--text-3)}
+.console .msgrow .who{font-weight:600;color:var(--text-2)}
+.console .msgrow .bubble{max-width:720px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-md);padding:8px 12px;white-space:pre-wrap;font-size:12.5px;line-height:1.65;color:var(--text-1)}
+.console .msgrow.buyer .bubble{background:var(--accent-soft);border-color:var(--accent-border)}
+.console .msgrow.system .bubble{color:var(--text-3)}
+.console .msgrow.human .bubble{border-color:var(--ok-border)}
 """
 
 
@@ -5680,6 +5694,7 @@ AUDIT_ACTION_LABELS = {
     "template_restored_defaults": "恢复默认设置",
     "channel_configured": "保存渠道配置", "channel_enabled": "启用渠道", "channel_disabled": "停用渠道",
     "conversation_ai_switch": "切换AI自动回复", "rfq_form_created": "生成询价表单链接",
+    "staff_replied": "发送卖家回复",
 }
 
 
@@ -6131,6 +6146,10 @@ class Handler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/admin/inbox/(web|telegram|whatsapp)", path)
         if match:
             self.admin_inbox(f"inbox_{match.group(1)}", query)
+            return
+        match = re.fullmatch(r"/admin/inbox/(web|telegram|whatsapp)/([a-f0-9]+)", path)
+        if match:
+            self.admin_inbox_conversation(f"inbox_{match.group(1)}", match.group(2), query)
             return
         if path == "/admin/channels":
             self.admin_channels(query)
@@ -6658,10 +6677,14 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     question_message_id = existing["id"]
             try:
-                status, answer_text, answered_product_id, version_id, citations, _reason = answer_question_with_mode(
-                    self.db, self.ai, site["tenant_id"], conversation["id"], question,
-                    product_id if isinstance(product_id, str) and product_id else None,
-                )
+                if conversation["ai_paused"]:
+                    # 收件箱「暂停 AI」开关：暂停自动答复（问题已保存、按待人工处理；不自动建任务）。
+                    status, answer_text, answered_product_id, version_id, citations, _reason = ("needs_human", AI_PAUSED_ANSWER, None, None, [], "ai_paused")
+                else:
+                    status, answer_text, answered_product_id, version_id, citations, _reason = answer_question_with_mode(
+                        self.db, self.ai, site["tenant_id"], conversation["id"], question,
+                        product_id if isinstance(product_id, str) and product_id else None,
+                    )
                 self.db.save_message(site["tenant_id"], conversation["id"], "assistant", answer_text, "grounded-answer" if status == "grounded" else "unresolved-question")
                 try:
                     answer_id = self.db.save_answer(site["tenant_id"], conversation["id"], question_message_id, answered_product_id, version_id, status, answer_text, citations)
@@ -6988,10 +7011,15 @@ class Handler(BaseHTTPRequestHandler):
                         result_for_product = next((result for result in recommendation_results if result.get("status") == "candidate"), None)
                     selected_product_id = (result_for_product or {}).get("product_id") or selected_product_id
                 try:
-                    answer_status, answer_text, answered_product_id, product_version_id, citations, _reason = answer_question_with_mode(
-                        self.db, self.ai, self.tenant_id, conversation_id, question,
-                        selected_product_id if isinstance(selected_product_id, str) and selected_product_id else None,
-                    )
+                    paused_conversation = self.db.get_conversation(self.tenant_id, conversation_id)
+                    if paused_conversation and paused_conversation["ai_paused"]:
+                        # 收件箱「暂停 AI」开关（旧询价页同口径）。
+                        answer_status, answer_text, answered_product_id, product_version_id, citations, _reason = ("needs_human", AI_PAUSED_ANSWER, None, None, [], "ai_paused")
+                    else:
+                        answer_status, answer_text, answered_product_id, product_version_id, citations, _reason = answer_question_with_mode(
+                            self.db, self.ai, self.tenant_id, conversation_id, question,
+                            selected_product_id if isinstance(selected_product_id, str) and selected_product_id else None,
+                        )
                 except AIUnavailableError:
                     # 模型故障：问题已保存，明确提示可重试；不落假答案、不建人工任务。
                     self.redirect(f"/inquiry/{conversation_id}?notice=answer_unavailable")
@@ -7284,6 +7312,13 @@ class Handler(BaseHTTPRequestHandler):
                 enabled = not (account and account["status"] == "enabled")
                 self.db.set_channel_enabled(self.tenant_id, channel, enabled, self.actor)
                 self.redirect(f"/admin/channels?notice={'enabled' if enabled else 'disabled'}")
+                return
+            match = re.fullmatch(r"/admin/inbox/(web|telegram|whatsapp)/([a-f0-9]+)/(reply|ai-toggle)", path)
+            if match:
+                if match.group(3) == "reply":
+                    self.admin_inbox_reply(f"inbox_{match.group(1)}", match.group(2), form)
+                else:
+                    self.admin_inbox_ai_toggle(f"inbox_{match.group(1)}", match.group(2))
                 return
             if path == "/admin/settings/stages":
                 self.admin_settings_save_stages(form)
@@ -8251,42 +8286,208 @@ class Handler(BaseHTTPRequestHandler):
         self.db.set_tenant_setting(self.tenant_id, SETTING_NOTIFY_RECIPIENTS, recipients, self.actor)
         self.redirect("/admin/settings?notice=notify")
 
-    # ── V1-04 外部渠道接入：会话收件箱子模块（骨架）与渠道接入页 ──────────────
+    # ── V1-04 外部渠道接入：会话收件箱（列表 / 详情 / 回复 / AI 开关） ──────────
+    def _inbox_conversation_in_section(self, channel: str, conversation: sqlite3.Row) -> bool:
+        """会话是否属于该收件箱子模块（网站聊天=web+website_api；渠道=对应 source；演示夹具不进收件箱）。"""
+        source = conversation["source"] or ""
+        if channel == "web":
+            return source in ("web", "website_api")
+        return source == channel
+
+    def _inbox_message_view(self, message: sqlite3.Row) -> tuple[str, str, str]:
+        """单条消息 →（标注、正文、样式类）。AI 与人工分开标注；人工显示回复人。"""
+        role = message["role"] or ""
+        source = message["source"] or ""
+        actor = message["actor_email"] or ""
+        content = message["content"] or ""
+        if role == "buyer" or source.startswith("buyer-followup"):
+            return "买方", content, "buyer"
+        if source == "human-engineer":
+            body = content.removeprefix("工程师回复：")
+            suffix = f"（{actor}）" if actor else self._engineer_actor_suffix(message["conversation_id"], body)
+            return f"人工 · 工程师{suffix}", body, "human"
+        if source.startswith("engineer-followup"):
+            suffix = f"（{actor}）" if actor else ""
+            return f"人工 · 工程师追问{suffix}", content, "human"
+        if source == "staff-reply":
+            body = content.removeprefix("卖家回复：")
+            return (f"人工 · 卖家回复（{actor}）" if actor else "人工 · 卖家回复"), body, "human"
+        if source == "grounded-answer":
+            return "AI · 有据回答", content, "ai"
+        if source == "unresolved-question":
+            return "AI · 未能确认（待人工）", content, "ai"
+        if source.startswith("human-request"):
+            return "系统 · 已转交工程师", content, "system"
+        return ("AI 回复" if role == "assistant" else "系统消息"), content, "ai"
+
+    def _engineer_actor_suffix(self, conversation_id: str, body: str) -> str:
+        """旧消息未记回复人时的尽力还原：按任务答复原文匹配已处理任务。"""
+        row = self.db.conn.execute(
+            "SELECT assigned_to FROM human_tasks WHERE tenant_id=? AND conversation_id=? AND response=? AND assigned_to IS NOT NULL ORDER BY resolved_at DESC LIMIT 1",
+            (self.tenant_id, conversation_id, body),
+        ).fetchone()
+        return f"（{row['assigned_to']}）" if row and row["assigned_to"] else ""
+
     def admin_inbox(self, section: str, query: dict[str, list[str]]) -> None:
-        """会话收件箱子模块入口（V1-04 切片1 骨架）：列表与回复界面在后续切片上线。"""
+        """会话收件箱子模块：列表（按渠道分开，一眼看清来源）。"""
         channel = INBOX_SECTION_CHANNELS.get(section)
         if not channel:
             self.send_html(self.console_page("未找到", "<div class='error'>页面不存在。</div>", ""), 404)
             return
+        slug = section.removeprefix("inbox_")  # URL 段只用 web/telegram/whatsapp（section=inbox_web 仅供内部导航键）
         label = INBOX_SECTION_LABELS[section]
         if channel == "web":
-            count = self.db.conn.execute(
-                "SELECT COUNT(*) FROM conversations WHERE tenant_id=? AND source IN ('web','website_api')",
-                (self.tenant_id,),
-            ).fetchone()[0]
-            if count:
-                state_html = f"<p class='muted'>目前已有 {count} 条网站聊天会话入库；会话列表与详情（含 AI / 人工标注、直接回复）将在下一批接入。</p>"
+            source_where, params = "c.source IN ('web','website_api')", ()
+        else:
+            source_where, params = "c.source=?", (channel,)
+        rows = self.db.conn.execute(
+            f"""SELECT c.*,
+                (SELECT COUNT(*) FROM messages m WHERE m.tenant_id=c.tenant_id AND m.conversation_id=c.id) AS message_count,
+                (SELECT m.content FROM messages m WHERE m.conversation_id=c.id ORDER BY m.rowid DESC LIMIT 1) AS last_content,
+                (SELECT r.contact_email FROM rfqs r WHERE r.tenant_id=c.tenant_id AND r.conversation_id=c.id AND r.contact_email<>'' ORDER BY r.created_at DESC LIMIT 1) AS rfq_email,
+                (SELECT l.contact_email FROM leads l WHERE l.tenant_id=c.tenant_id AND l.conversation_id=c.id AND l.contact_email<>'' ORDER BY l.created_at DESC LIMIT 1) AS lead_email,
+                (SELECT i.display_name FROM channel_identities i WHERE i.tenant_id=c.tenant_id AND i.conversation_id=c.id LIMIT 1) AS ext_name,
+                (SELECT i.external_user_id FROM channel_identities i WHERE i.tenant_id=c.tenant_id AND i.conversation_id=c.id LIMIT 1) AS ext_id
+            FROM conversations c WHERE c.tenant_id=? AND {source_where}
+            ORDER BY c.updated_at DESC, c.id DESC LIMIT 50""",
+            (self.tenant_id, *params),
+        ).fetchall()
+        items = []
+        for row in rows:
+            if channel == "web":
+                title = f"网站访客 · {row['id'][:6]}"
             else:
-                state_html = "<p class='muted'>还没有网站聊天会话；买方在官网窗口发起咨询后，会在这里统一查看与回复。</p>"
+                title = row["ext_name"] or row["ext_id"] or f"渠道访客 · {row['id'][:6]}"
+            contact = row["rfq_email"] or row["lead_email"] or ""
+            meta_parts = [f"消息 {row['message_count']} 条", f"最后活动 {esc((row['updated_at'] or '')[:16].replace('T', ' '))}"]
+            if contact:
+                meta_parts.insert(0, f"联系方式 {esc(contact)}")
+            if row["ai_paused"]:
+                meta_parts.append("<span class='badge pending_review'>AI 已暂停</span>")
+            if row["stop_proactive_contact"]:
+                meta_parts.append("<span class='badge withdrawn'>停止主动联系</span>")
+            preview = (row["last_content"] or "（暂无消息）").strip().splitlines()[0][:60]
+            items.append(
+                f"<div class='simple-item'><div><strong>{esc(title)}</strong>"
+                f"<small>最后一条：{esc(preview)}</small><small>{' · '.join(meta_parts)}</small></div>"
+                f"<div class='actions'><a class='button secondary' href='/admin/inbox/{slug}/{esc(row['id'])}'>查看会话</a></div></div>"
+            )
+        if channel == "web":
+            empty = "还没有网站聊天会话；买方在官网窗口发起咨询后，会在这里统一查看与回复。"
         else:
             account = self.db.get_channel_account(self.tenant_id, channel)
             secret = channel_secret_status(channel)
-            identities = self.db.conn.execute(
-                "SELECT COUNT(*) FROM channel_identities WHERE tenant_id=? AND channel=?", (self.tenant_id, channel)
-            ).fetchone()[0]
             if not account or account["status"] != "enabled":
-                state = "渠道未启用——管理员可在「设置与治理 › 渠道接入」完成配置并启用。"
+                empty = "渠道未启用——管理员可在「设置与治理 › 渠道接入」完成配置并启用。"
             elif not secret["configured"]:
-                state = f"渠道已启用，但本机凭证未配置（缺少 {'、'.join(secret['missing'])}）；凭证就绪前不会收发任何消息。"
+                empty = f"渠道已启用，但本机凭证未配置（缺少 {'、'.join(secret['missing'])}）；凭证就绪前不会收发任何消息。"
             else:
-                state = "渠道已启用且凭证就绪；连接、收发与回复将在对应切片上线。"
-            state_html = f"<p class='muted'>{esc(state)}</p><p class='muted'>已绑定买方：{identities} 位。</p>"
+                empty = "渠道已启用且凭证就绪；买方在渠道里发来的消息会出现在这里。"
+        list_html = "".join(items) or f"<div class='muted-block'>{esc(empty)}</div>"
         body = f"""
 <div class='toolbar'><div><h1>{esc(label)}</h1><div class='muted'>会话收件箱 · 同一批会话对象，按来源渠道分开展示，一眼看清消息来自哪里。</div></div></div>
-<section class='card'><div class='panel-title'><h2>{esc(label)}会话</h2></div>
-<div class='muted-block'>这里将统一展示渠道里的全部聊天记录（AI 回复与人工回复分开标注、人工显示回复人），并支持直接回复与发送 RFQ 填写链接。</div>
-{state_html}</section>"""
+<section class='card'><div class='panel-title'><h2>最近会话</h2><span class='muted'>按最后活动倒序 · 最多 50 条</span></div>
+<div class='simple-list'>{list_html}</div></section>"""
         self.send_html(self.console_page(f"{label} · 会话", body, section))
+
+    def admin_inbox_conversation(self, section: str, conversation_id: str, query: dict[str, list[str]]) -> None:
+        """会话详情：全部聊天记录（AI/人工标注＋回复人）、关联询价/线索、回复与 AI 开关。"""
+        channel = INBOX_SECTION_CHANNELS.get(section)
+        label = INBOX_SECTION_LABELS.get(section, "会话")
+        slug = section.removeprefix("inbox_")
+        conversation = channel and self.db.get_conversation(self.tenant_id, conversation_id)
+        if not conversation or not self._inbox_conversation_in_section(channel, conversation):
+            self.send_html(self.console_page("未找到", "<div class='error'>会话不存在或不属于这个渠道。</div>", section if channel else ""), 404)
+            return
+        notices = {
+            "sent": "<div class='notice'>回复已发送——买方在网站聊天窗口里可见。</div>",
+            "ai_paused": "<div class='notice'>已暂停本会话的 AI 自动回复；买方提问将按「待人工」处理。</div>",
+            "ai_resumed": "<div class='notice'>已恢复本会话的 AI 自动回复。</div>",
+        }
+        notice = notices.get(query.get("notice", [""])[0], "")
+        messages = self.db.list_messages(self.tenant_id, conversation_id)
+        message_rows = []
+        for message in messages:
+            who, body_text, css = self._inbox_message_view(message)
+            when = esc((message["created_at"] or "")[:16].replace("T", " "))
+            message_rows.append(
+                f"<div class='msgrow {css}'><div class='meta'><span class='who'>{esc(who)}</span><span class='when'>{when}</span></div>"
+                f"<div class='bubble'>{esc(body_text)}</div></div>"
+            )
+        transcript = "".join(message_rows) or "<div class='muted-block'>这个会话还没有消息。</div>"
+        rfq_rows = self.db.conn.execute(
+            "SELECT id, status, quantity, created_at FROM rfqs WHERE tenant_id=? AND conversation_id=? ORDER BY created_at",
+            (self.tenant_id, conversation_id),
+        ).fetchall()
+        lead_row = self.db.conn.execute(
+            "SELECT id FROM leads WHERE tenant_id=? AND conversation_id=? AND merged_into IS NULL ORDER BY created_at DESC LIMIT 1",
+            (self.tenant_id, conversation_id),
+        ).fetchone()
+        related_parts = []
+        for rfq_row in rfq_rows:
+            related_parts.append(
+                f"<div class='simple-item'><div><strong>询价单 {esc(rfq_row['id'][:8])}</strong>"
+                f"<small>状态 {esc(rfq_row['status'])} · 数量 {esc(rfq_row['quantity'] or '未填')} · {esc((rfq_row['created_at'] or '')[:16].replace('T', ' '))}</small></div>"
+                f"<div class='actions'><a class='button secondary' href='/admin/rfqs/{esc(rfq_row['id'])}'>查看询价</a></div></div>"
+            )
+        if lead_row:
+            related_parts.append(
+                f"<div class='simple-item'><div><strong>关联线索</strong><small>这个会话已形成销售线索</small></div>"
+                f"<div class='actions'><a class='button secondary' href='/admin/leads/{esc(lead_row['id'])}'>查看线索</a></div></div>"
+            )
+        related_html = "".join(related_parts) or "<div class='muted-block'>这个会话还没有关联询价或线索。</div>"
+        ai_badge = "<span class='badge pending_review'>AI 自动回复已暂停</span>" if conversation["ai_paused"] else "<span class='badge approved'>AI 自动回复开启</span>"
+        ai_action_label = "恢复 AI 自动回复" if conversation["ai_paused"] else "暂停 AI 自动回复"
+        stop_badge = "<span class='badge withdrawn'>停止主动联系</span>" if conversation["stop_proactive_contact"] else ""
+        if channel == "web":
+            reply_html = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>回复买方</h2><span class='muted'>立即出现在买方网站聊天窗口</span></div>
+<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/reply'><textarea name='body' required maxlength='4000' placeholder='输入回复内容…'></textarea>
+<p style='margin-top:10px'><button>发送回复</button></p></form></section>"""
+        else:
+            reply_html = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>回复买方</h2></div>
+<div class='muted-block'>{esc(label)} 的发送通道将在渠道接入切片上线后开放；当前阶段可以查看记录与调整 AI 开关。</div>
+<textarea disabled placeholder='发送通道未开通'></textarea></section>"""
+        body = f"""
+<div class='toolbar'><div><a href='/admin/inbox/{slug}'>← 返回{esc(label)}列表</a><h1 style='margin-top:6px'>{esc(label)}会话</h1>
+<div class='muted'>会话 {esc(conversation_id[:10])} · 开始 {esc((conversation['created_at'] or '')[:16].replace('T', ' '))} · 最后活动 {esc((conversation['updated_at'] or '')[:16].replace('T', ' '))} · 消息 {len(messages)} 条</div></div>
+<div class='actions'>{ai_badge} {stop_badge}
+<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/ai-toggle' class='inline'><button class='secondary'>{ai_action_label}</button></form></div></div>
+{notice}
+<section class='card'><div class='panel-title'><h2>关联业务</h2></div><div class='simple-list'>{related_html}</div></section>
+<section class='card' style='margin-top:16px'><div class='panel-title'><h2>全部聊天记录</h2><span class='muted'>AI 与人工分开标注 · 人工显示回复人</span></div>
+{transcript}</section>
+{reply_html}"""
+        self.send_html(self.console_page(f"{label}会话", body, section))
+
+    def admin_inbox_reply(self, section: str, conversation_id: str, form: dict) -> None:
+        """收件箱直接回复：网站聊天即时可见；渠道发送通道未开通前明确拒绝。"""
+        channel = INBOX_SECTION_CHANNELS.get(section)
+        slug = section.removeprefix("inbox_")
+        conversation = channel and self.db.get_conversation(self.tenant_id, conversation_id)
+        if not conversation or not self._inbox_conversation_in_section(channel, conversation):
+            raise ValueError("会话不存在或不属于这个渠道")
+        if channel != "web":
+            raise ValueError("该渠道的发送通道尚未开通，暂时不能从这里回复")
+        body_text = str(form.get("body", "")).strip()
+        if not body_text:
+            raise ValueError("回复内容不能为空")
+        message_id = self.db.save_message(
+            self.tenant_id, conversation_id, "staff", f"卖家回复：{body_text}", "staff-reply",
+            actor_email=self.actor, delivery_status="sent",
+        )
+        self.db.audit_staff_reply(self.tenant_id, conversation_id, message_id, self.actor)
+        self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice=sent")
+
+    def admin_inbox_ai_toggle(self, section: str, conversation_id: str) -> None:
+        """每会话「暂停/恢复 AI 自动回复」。"""
+        channel = INBOX_SECTION_CHANNELS.get(section)
+        slug = section.removeprefix("inbox_")
+        conversation = channel and self.db.get_conversation(self.tenant_id, conversation_id)
+        if not conversation or not self._inbox_conversation_in_section(channel, conversation):
+            raise ValueError("会话不存在或不属于这个渠道")
+        paused = not conversation["ai_paused"]
+        self.db.set_conversation_ai_paused(self.tenant_id, conversation_id, paused, self.actor)
+        self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice={'ai_paused' if paused else 'ai_resumed'}")
 
     def admin_channels(self, query: dict[str, list[str]]) -> None:
         """渠道接入页（管理员）：配置与启停 Telegram / WhatsApp；凭证只读环境变量状态、不回显值。"""
