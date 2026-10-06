@@ -21,6 +21,7 @@ from app import (
     GRANTABLE_MODULE_KEYS,
     TEMPLATE_BLOCK_LIBRARY,
     make_server,
+    standard_template_draft,
 )
 
 
@@ -933,6 +934,152 @@ class PublishFlowTests(unittest.TestCase):
         status, _, body = form_request(self.server, "POST", f"/admin/creative/{foreign}/publish/confirm", {}, self.admin)
         self.assertEqual(status, 400)
         self.assertIn("展示页不存在", body)
+
+
+class TemplateAuditTests(unittest.TestCase):
+    """切片7：审计与合规——六动作中文标签、恢复默认、操作记录可见可筛、术语与数字化断言。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.db.ensure_tenant("other-tenant", "另一家企业")
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        cls.db.create_user("demo-tenant", "v103s7-emp@example.invalid", "审计员工", "employee", "pass-audit-1", "demo-admin@example.invalid")
+        emp_row = cls.db.conn.execute("SELECT id FROM users WHERE email=?", ("v103s7-emp@example.invalid",)).fetchone()
+        cls.db.set_user_modules("demo-tenant", emp_row["id"], ["creative"], "demo-admin@example.invalid")
+        cls.emp = login(cls.server, "v103s7-emp@example.invalid", "pass-audit-1")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.temp_dir.cleanup()
+
+    def _make_template(self, category):
+        return self.db.create_template("demo-tenant", category, "demo-admin@example.invalid")
+
+    def _template_audit_rows(self):
+        return self.db.conn.execute(
+            "SELECT action, entity_type, details, actor FROM audit_log WHERE tenant_id='demo-tenant' AND entity_type='template' ORDER BY id DESC"
+        ).fetchall()
+
+    def test_all_template_actions_have_chinese_labels(self):
+        expected = {
+            "template_created": "创建展示页",
+            "template_draft_saved": "保存展示页改动",
+            "template_submitted": "提交展示页给管理员",
+            "template_published": "确认上线展示页",
+            "template_withdrawn": "撤回展示页",
+            "template_restored_defaults": "恢复默认设置",
+        }
+        for action, label in expected.items():
+            self.assertEqual(AUDIT_ACTION_LABELS.get(action), label, action)
+        self.assertEqual(AUDIT_ENTITY_LABELS.get("template"), "产品展示页")
+
+    def test_six_actions_produce_audit_rows(self):
+        tid = self._make_template("审计动作品类")
+        draft = json.loads(self.db.get_template("demo-tenant", tid)["draft_json"])
+        draft["params"] = draft["params"][:3]
+        self.db.save_template_draft("demo-tenant", tid, draft, "v103s7-emp@example.invalid", detail="params.toggle")
+        self.db.submit_template("demo-tenant", tid, "v103s7-emp@example.invalid")
+        self.db.publish_template_version("demo-tenant", tid, "demo-admin@example.invalid")
+        self.db.withdraw_template("demo-tenant", tid, "demo-admin@example.invalid")
+        self.db.restore_template_defaults("demo-tenant", tid, "v103s7-emp@example.invalid")
+        rows = [row for row in self._template_audit_rows()]
+        actions = {row["action"] for row in rows}
+        for name in ("template_created", "template_draft_saved", "template_submitted", "template_published", "template_withdrawn", "template_restored_defaults"):
+            self.assertIn(name, actions)
+        # 改动类审计带操作明细（可判读）；发布类带版本号
+        saved = next(row for row in rows if row["action"] == "template_draft_saved")
+        self.assertEqual(saved["details"], "params.toggle")
+        published = next(row for row in rows if row["action"] == "template_published")
+        self.assertEqual(published["details"], "version=1")
+        # 操作者如实记录（员工与管理员）
+        actors = {row["actor"] for row in rows}
+        self.assertIn("v103s7-emp@example.invalid", actors)
+        self.assertIn("demo-admin@example.invalid", actors)
+
+    def test_restore_defaults_action_and_guard(self):
+        tid = self._make_template("恢复品类")
+        draft = json.loads(self.db.get_template("demo-tenant", tid)["draft_json"])
+        for block in draft["blocks"]:
+            if block["key"] == "faq":
+                block["enabled"] = False
+        draft["params"] = []
+        self.db.save_template_draft("demo-tenant", tid, draft, "demo-admin@example.invalid")
+        # 员工执行恢复（草稿动作，不需要管理员）
+        status, headers, _ = form_request(self.server, "POST", f"/admin/creative/{tid}/restore_defaults", {}, self.emp)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=restored", headers.get("Location", ""))
+        restored = json.loads(self.db.get_template("demo-tenant", tid)["draft_json"])
+        self.assertEqual(restored, standard_template_draft())
+        # 已发布版本不受影响（恢复不触碰 template_versions）
+        # 页面：恢复提示 + 进阶折叠中的按钮（用回跳地址取页，等价浏览器跟随跳转）
+        status, _, page = form_request(self.server, "GET", headers.get("Location", f"/admin/creative/{tid}?step=blocks"), cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("已恢复为标准默认设置", page)
+        self.assertIn("恢复默认设置（进阶）", page)
+        self.assertIn(f"/admin/creative/{tid}/restore_defaults", page)
+        # 审计
+        actions = {row["action"] for row in self._template_audit_rows()}
+        self.assertIn("template_restored_defaults", actions)
+        # 跨租户拒绝
+        foreign = self.db.create_template("other-tenant", "别家恢复品类", "setup")
+        status, _, body = form_request(self.server, "POST", f"/admin/creative/{foreign}/restore_defaults", {}, self.admin)
+        self.assertEqual(status, 400)
+        self.assertIn("展示页不存在", body)
+
+    def test_audit_page_visible_and_filterable(self):
+        tid = self._make_template("操作记录品类")
+        self.db.submit_template("demo-tenant", tid, "v103s7-emp@example.invalid")
+        self.db.create_template("other-tenant", "别家记录品类", "setup")
+        # 管理员访问：中文标签 + 可筛选项
+        status, _, page = form_request(self.server, "GET", "/admin/audit", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("提交展示页给管理员", page)
+        self.assertIn("产品展示页", page)
+        self.assertNotIn("category=别家记录品类", page)
+        # 按对象筛选 type=template
+        status, _, page = form_request(self.server, "GET", "/admin/audit?type=template", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("提交展示页给管理员", page)
+        self.assertIn("option value='template' selected", page)
+        self.assertNotIn("category=别家记录品类", page)
+        # 非管理员访问被拒
+        status, _, _ = form_request(self.server, "GET", "/admin/audit", cookie=self.emp)
+        self.assertEqual(status, 403)
+
+    def test_editor_terminology_and_digit_assertions(self):
+        tid = self._make_template("术语品类")
+        expectations = {
+            "params": "页面要展示哪些参数？",
+            "blocks": "页面由哪些部分组成？",
+            "preview": "看效果 · 买家视角",
+            "publish": "产品页联动",
+        }
+        for step, phrase in expectations.items():
+            status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}?step={step}", cookie=self.admin)
+            self.assertEqual(status, 200)
+            self.assertIn(phrase, page)
+            stripped = re.sub(r"<style>.*?</style>|<script>.*?</script>", "", page, flags=re.S)
+            self.assertNotIn("字段", stripped)
+            self.assertEqual(page.count("class='flowbar"), 1)
+            bar = re.search(r"<div class='flowbar.*?</div>", page, flags=re.S)
+            self.assertIsNotNone(bar)
+            bar_text = re.sub(r"href='[^']*'", "", bar.group(0))
+            self.assertIsNone(re.search(r"[0-9]", bar_text), f"模块条不应含数字: step={step}")
+        # 管理员的编辑区带「操作记录」入口；员工没有
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}", cookie=self.admin)
+        self.assertIn("/admin/audit?type=template", page)
+        self.assertIn("操作记录", page)
+        status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}", cookie=self.emp)
+        self.assertNotIn("/admin/audit?type=template", page)
 
 
 if __name__ == "__main__":

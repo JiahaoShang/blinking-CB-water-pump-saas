@@ -3292,7 +3292,7 @@ class Database:
         self.conn.commit()
         return template_id
 
-    def save_template_draft(self, tenant_id: str, template_id: str, draft: dict, actor: str) -> None:
+    def save_template_draft(self, tenant_id: str, template_id: str, draft: dict, actor: str, detail: str = "") -> None:
         """保存展示页改动（自动保存入口）；只影响草稿，不触碰线上。"""
         if not self.get_template(tenant_id, template_id):
             raise ValueError("展示页不存在")
@@ -3301,7 +3301,20 @@ class Database:
             "UPDATE templates SET draft_json=?, draft_updated_by=?, draft_updated_at=?, updated_at=? WHERE tenant_id=? AND id=?",
             (json.dumps(draft, ensure_ascii=False), actor, now, now, tenant_id, template_id),
         )
-        self._audit(tenant_id, "template", template_id, "template_draft_saved", actor, "")
+        self._audit(tenant_id, "template", template_id, "template_draft_saved", actor, detail)
+        self.conn.commit()
+
+    def restore_template_defaults(self, tenant_id: str, template_id: str, actor: str = "demo-admin") -> None:
+        """恢复默认：草稿的参数与板块重置为平台标准推荐组合（已发布版本不受影响）。"""
+        if not self.get_template(tenant_id, template_id):
+            raise ValueError("展示页不存在")
+        now = now_iso()
+        draft = standard_template_draft()
+        self.conn.execute(
+            "UPDATE templates SET draft_json=?, draft_updated_by=?, draft_updated_at=?, updated_at=? WHERE tenant_id=? AND id=?",
+            (json.dumps(draft, ensure_ascii=False), actor, now, now, tenant_id, template_id),
+        )
+        self._audit(tenant_id, "template", template_id, "template_restored_defaults", actor, "")
         self.conn.commit()
 
     def list_template_versions(self, tenant_id: str, template_id: str) -> list[sqlite3.Row]:
@@ -5393,6 +5406,11 @@ def creative_blocks_step(template: sqlite3.Row, versions: list[sqlite3.Row]) -> 
 <p style='margin-top:10px'><button class='secondary'>保存</button></p>
 </form></div></details>
 <details class='card'><summary>版本记录 — 每次「确认上线」都会留档</summary><div class='inner'>{version_rows}</div></details>
+<details class='card'><summary>恢复默认设置（进阶）— 回到平台推荐组合</summary><div class='inner'>
+<p class='muted' style='margin:0 0 8px'>把参数与板块全部恢复为平台标准推荐（相当于重新开始排版）。已上线的版本不受影响；这个操作会留下操作记录。</p>
+<form method='post' action='/admin/creative/{template_id}/restore_defaults'>
+<p style='margin:0'><button class='warn'>恢复默认设置</button></p>
+</form></div></details>
 <div class='step-cta'><a class='button' href='/admin/creative/{template_id}?step=preview'>下一步 · 看效果 →</a></div>
 """
 
@@ -5458,6 +5476,7 @@ AUDIT_ACTION_LABELS = {
     "milestone_completed": "节点完成", "milestone_reopened": "节点重开",
     "template_created": "创建展示页", "template_draft_saved": "保存展示页改动",
     "template_submitted": "提交展示页给管理员", "template_published": "确认上线展示页", "template_withdrawn": "撤回展示页",
+    "template_restored_defaults": "恢复默认设置",
 }
 
 
@@ -7029,6 +7048,10 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 self.admin_creative_publish_action(match.group(1), match.group(2))
                 return
+            match = re.fullmatch(r"/admin/creative/([a-f0-9]+)/restore_defaults", path)
+            if match:
+                self.admin_creative_restore_defaults(match.group(1))
+                return
             if path == "/admin/settings/stages":
                 self.admin_settings_save_stages(form)
                 return
@@ -8367,6 +8390,7 @@ class Handler(BaseHTTPRequestHandler):
             "created": "<div class='notice'>展示页已创建。建议顺序：选参数 → 排内容 → 看效果。</div>",
             "existing": "<div class='notice'>该品类已有展示页，已直接打开现有页。</div>",
             "submitted": "<div class='notice'>已提交给管理员，等待确认上线。</div>",
+            "restored": "<div class='notice'>已恢复为标准默认设置——参数与板块都回到推荐组合；已上线的版本不受影响。</div>",
         }
         notice_key = query.get("notice", [""])[0]
         notice_html = notices.get(notice_key, "")
@@ -8385,9 +8409,10 @@ class Handler(BaseHTTPRequestHandler):
             content = self.creative_preview_step(template_id, template)
         else:
             content = self.creative_publish_step(template)
+        audit_link = "<a class='button secondary' href='/admin/audit?type=template'>操作记录</a>" if self.user_role == "admin" else ""
         body = f"""
 <div class='toolbar'><div><h1>{esc(template['category'])} · 产品展示页 {badge}</h1>
-<div class='muted'>{line}{saved_line}</div></div></div>
+<div class='muted'>{line}{saved_line}</div></div><div class='actions'>{audit_link}</div></div>
 {notice_html}
 {creative_flowbar(step, template_id=template_id)}
 {content}
@@ -8597,6 +8622,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         raise ValueError("未知操作")
 
+    def admin_creative_restore_defaults(self, template_id: str) -> None:
+        """恢复默认（草稿动作）：参数与板块重置为平台标准推荐；已发布版本不受影响。"""
+        self.db.restore_template_defaults(self.tenant_id, template_id, self.actor)
+        self.redirect(f"/admin/creative/{template_id}?step=blocks&notice=restored")
+
     def admin_creative_params_action(self, template_id: str, action: str, form: dict) -> None:
         """选参数改动（自动保存）：推荐池/自定义新增、开关、排序、行内编辑、删除。"""
         template = self.db.get_template(self.tenant_id, template_id)
@@ -8651,7 +8681,7 @@ class Handler(BaseHTTPRequestHandler):
         elif action == "delete":
             params.pop(index)
         draft["params"] = params
-        self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor)
+        self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor, detail=f"params.{action}")
         self.redirect(f"/admin/creative/{template_id}?step=params")
 
     def admin_creative_blocks_action(self, template_id: str, action: str, form: dict) -> None:
@@ -8667,14 +8697,14 @@ class Handler(BaseHTTPRequestHandler):
             ai_prompts["locate"] = str(form.get("ai_locate", "")).strip()[:500]
             advanced["ai_prompts"] = ai_prompts
             draft["advanced"] = advanced
-            self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor)
+            self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor, detail="blocks.advanced")
             self.redirect(f"/admin/creative/{template_id}?step=blocks")
             return
         if action == "group":
             group_zh = str(form.get("group_zh", "")).strip()[:40] or "规格参数"
             group_en = str(form.get("group_en", "")).strip()[:60]
             draft["groups"] = [{"key": "default", "label_zh": group_zh, "label_en": group_en}]
-            self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor)
+            self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor, detail="blocks.group")
             self.redirect(f"/admin/creative/{template_id}?step=blocks")
             return
         blocks = resolved_template_blocks(draft)
@@ -8697,7 +8727,7 @@ class Handler(BaseHTTPRequestHandler):
             blocks[index]["title_zh"] = str(form.get("title_zh", "")).strip()[:40]
             blocks[index]["title_en"] = str(form.get("title_en", "")).strip()[:60]
         draft["blocks"] = blocks
-        self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor)
+        self.db.save_template_draft(self.tenant_id, template_id, draft, self.actor, detail=f"blocks.{action}")
         self.redirect(f"/admin/creative/{template_id}?step=blocks")
 
     def admin_users(self, query: dict[str, list[str]]) -> None:
