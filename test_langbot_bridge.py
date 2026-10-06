@@ -207,6 +207,15 @@ class LangBotBridgeTests(unittest.TestCase):
         reply_row = self.last_message(conversation_id, "channel-requirements")
         self.assertEqual(reply_row["delivery_status"], "sent")
 
+    def test_platform_label_normalization_weixin(self):
+        """微信系适配器名归一：openclaw-weixin / WeChatPad / 类名风格 → 「微信」。"""
+        from app import normalize_platform_label
+
+        self.assertEqual(normalize_platform_label("openclaw-weixin"), "微信")
+        self.assertEqual(normalize_platform_label("OpenClawWeixinAdapter"), "微信")
+        self.assertEqual(normalize_platform_label("wechatpad"), "微信")
+        self.assertEqual(normalize_platform_label("TelegramAdapter"), "Telegram")
+
     def test_question_asks_human_via_channel(self):
         """提问样文本（资料外）→ 转人工提示直达渠道。"""
         status, body = self.post_event(self.event_for(7302, "你们能出口到德国吗？", "ev-0002"))

@@ -5659,6 +5659,7 @@ _CHANNEL_PLATFORM_LABELS = {
     "telegram": "Telegram", "discord": "Discord", "line": "LINE", "slack": "Slack", "matrix": "Matrix",
     "lark": "飞书", "dingtalk": "钉钉", "kook": "KOOK", "qqofficial": "QQ",
     "wecom": "企业微信", "wecombot": "企业微信机器人", "wecomcs": "微信客服", "officialaccount": "微信公众号",
+    "openclaw-weixin": "微信", "openclawweixin": "微信", "openclaw_weixin": "微信", "wechatpad": "微信", "wechatpadpro": "微信",
 }
 
 
