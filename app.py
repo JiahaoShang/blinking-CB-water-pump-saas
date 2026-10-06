@@ -872,6 +872,13 @@ class Database:
         if "platform_meta" not in identity_columns:
             # LangBot 接入：记录消息来自哪个社交平台（adapter）与机器人标识，供收件箱按平台展示。
             self.conn.execute("ALTER TABLE channel_identities ADD COLUMN platform_meta TEXT NOT NULL DEFAULT ''")
+        # 第二波（Dify）：知识库同步台账（产品 → 文档映射 + 内容哈希；幂等同步与失败重试的依据）。
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS kb_sync_state (tenant_id TEXT NOT NULL, product_id TEXT NOT NULL, "
+            "document_id TEXT NOT NULL DEFAULT '', content_hash TEXT NOT NULL DEFAULT '', "
+            "synced_at TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '', "
+            "PRIMARY KEY (tenant_id, product_id))"
+        )
         recommendation_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(recommendations)")}
         if "tentative_viewed" not in recommendation_columns:
             self.conn.execute("ALTER TABLE recommendations ADD COLUMN tentative_viewed INTEGER NOT NULL DEFAULT 0")
@@ -5398,6 +5405,208 @@ CHANNEL_OFFICIAL_API_BASE = {"telegram": "https://api.telegram.org/bot", "langbo
 # 渠道内提示文案（入库即不可变：只描述可用动作，不作状态承诺）
 CHANNEL_HUMAN_HINT = "如需工程师人工核实，请回复「人工」。"
 CHANNEL_HUMAN_GUIDE = "还没有待核实的问题。请先发送您想核实的具体问题，再回复「人工」转交工程师。"
+
+
+# ── Dify 问答引擎（第二波）：资料问答由 Dify 承担，平台仍是唯一主脑 ──────────
+# 环境变量：DIFY_QA_URL（默认 http://127.0.0.1:8090/v1）、DIFY_QA_APP_KEY（问答应用密钥）；
+# 知识库同步：DIFY_KB_DATASET_ID、DIFY_KB_API_KEY（DIFY_KB_URL 可选，默认从 DIFY_QA_URL 推导）。
+# 机密凭证一律只从本机环境变量读取：页面不显示、数据库不保存、不进 Git。
+DIFY_NO_ANSWER_SENTINEL = "[[NO_ANSWER]]"
+DIFY_REASONING_MARKER = "<!--dify-deepseek-reasoning-->"
+
+
+class DifyQAUnavailableError(RuntimeError):
+    """Dify 问答引擎不可用（网络/超时/服务错误）；由调用方决定回落策略。"""
+
+
+def dify_qa_config() -> tuple[str, str]:
+    """问答应用配置：URL 与密钥都来自环境变量；未配置密钥时返回空。"""
+    base = os.environ.get("DIFY_QA_URL", "http://127.0.0.1:8090/v1").strip().rstrip("/")
+    key = os.environ.get("DIFY_QA_APP_KEY", "").strip()
+    return base, key
+
+
+def strip_reasoning_blocks(text: str) -> str:
+    """剥掉模型推理块与渠道标记（Dify 回答 → 买方可见文本）。"""
+    cleaned = re.sub(r"<think\b[^>]*>.*?</think\s*>", "", str(text or ""), flags=re.S | re.I)
+    cleaned = re.sub(r"</?think\b[^>]*>", "", cleaned, flags=re.I)
+    return cleaned.replace(DIFY_REASONING_MARKER, "").strip()
+
+
+def _dify_retriever_resources(data: dict) -> list:
+    """Dify 响应中的检索引用：兼容顶层 retriever_resources 与 1.17 的 metadata.retriever_resources。"""
+    resources = data.get("retriever_resources")
+    if not resources:
+        meta = data.get("metadata")
+        if isinstance(meta, dict):
+            resources = meta.get("retriever_resources")
+    return [item for item in resources or [] if isinstance(item, dict)]
+
+
+def dify_ask_question(question: str, user_label: str, timeout: int = 45) -> dict:
+    """调用 Dify 问答应用（阻塞模式）；返回 {status, answer, citations}；不可用抛 DifyQAUnavailableError。"""
+    base, key = dify_qa_config()
+    if not key:
+        raise DifyQAUnavailableError("未配置 DIFY_QA_APP_KEY")
+    payload = {
+        "inputs": {}, "query": str(question), "response_mode": "blocking",
+        "conversation_id": "", "user": str(user_label)[:64] or "channel",
+    }
+    try:
+        data = channel_http_json(f"{base}/chat-messages", payload, timeout=timeout, headers={"Authorization": f"Bearer {key}"})
+    except ChannelSendError as error:
+        raise DifyQAUnavailableError(str(error)) from error
+    answer = strip_reasoning_blocks(str(data.get("answer") or ""))
+    if not answer or DIFY_NO_ANSWER_SENTINEL in answer:
+        return {"status": "no_answer", "answer": "", "citations": []}
+    citations = []
+    for item in _dify_retriever_resources(data):
+        position = item.get("position")
+        citations.append({
+            "label": "知识库",
+            "filename": str(item.get("document_name") or "知识库资料"),
+            "location": f"检索片段 {position if position is not None else 1}",
+            "product_version": "",
+            "field": str(item.get("dataset_name") or ""),
+        })
+    return {"status": "grounded", "answer": answer, "citations": citations}
+
+
+def dify_kb_config() -> tuple[str, str, str]:
+    """知识库同步配置：基地址、数据集 ID、服务密钥（后两个未配置时同步整体跳过）。"""
+    base = os.environ.get("DIFY_KB_URL", os.environ.get("DIFY_QA_URL", "http://127.0.0.1:8090/v1")).strip().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return base, os.environ.get("DIFY_KB_DATASET_ID", "").strip(), os.environ.get("DIFY_KB_API_KEY", "").strip()
+
+
+def _dify_kb_request(base: str, api_key: str, method: str, path: str, payload: dict | None = None, timeout: int = 30) -> dict | None:
+    """知识库服务 API 调用（create/update/delete 共用）；失败转 ChannelSendError。"""
+    request = urllib_request.Request(
+        f"{base}{path}",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method=method,
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except urllib_error.HTTPError as error:
+        raise ChannelSendError(f"知识库接口返回 HTTP {error.code}") from error
+    except (urllib_error.URLError, TimeoutError, OSError) as error:
+        raise ChannelSendError(f"知识库接口网络请求失败：{error}") from error
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ChannelSendError("知识库接口返回内容无法解析") from error
+    return data if isinstance(data, dict) else None
+
+
+def collect_kb_documents(db: Database, tenant_id: str) -> list[dict]:
+    """把「已核准且已发布」的产品资料整理为知识库文档；来源被禁用的字段不进入知识库。"""
+    documents: list[dict] = []
+    for product in db.list_products(tenant_id):
+        if product["status"] == "withdrawn":
+            continue
+        version = db.get_published_version(tenant_id, product["id"])
+        if not version:
+            continue
+        snapshot = json.loads(version["snapshot_json"])
+        lines: list[str] = []
+        use_case = str(product["use_case"] or "").strip() if "use_case" in product.keys() else ""
+        if use_case:
+            lines.append(f"用途：{use_case}")
+        field_count = 0
+        for field in snapshot.get("fields", []):
+            if not isinstance(field, dict):
+                continue
+            value = str(field.get("value", "")).strip()
+            if not value or source_is_restricted(db, tenant_id, field):
+                continue
+            unit = str(field.get("unit", "")).strip()
+            label = str(field.get("label") or field.get("field_key") or "")
+            lines.append(f"· {label}：{value}{(' ' + unit) if unit else ''}")
+            field_count += 1
+        if not field_count:
+            continue
+        text = "\n".join([f"【产品】{product['model']} · {product['name']}", *lines, f"资料版本：v{version['version']}（已核准字段 {field_count} 项）"])
+        documents.append({"product_id": product["id"], "name": f"{product['model']} · {product['name']}", "text": text})
+    return documents
+
+
+def sync_kb_to_dify(db: Database, tenant_id: str, actor: str = "demo-admin", force: bool = False) -> dict:
+    """已核准资料 → Dify 知识库（新增/更新/删除 + 内容哈希跳过）。返回统计；未配置时 configured=False 直接返回。"""
+    base, dataset_id, api_key = dify_kb_config()
+    stats = {"configured": bool(dataset_id and api_key), "created": 0, "updated": 0, "deleted": 0, "skipped": 0, "failed": 0, "error": ""}
+    if not stats["configured"]:
+        return stats
+    documents = collect_kb_documents(db, tenant_id)
+    current_ids = {doc["product_id"] for doc in documents}
+    state_rows = {
+        row["product_id"]: row
+        for row in db.conn.execute("SELECT * FROM kb_sync_state WHERE tenant_id=?", (tenant_id,)).fetchall()
+    }
+
+    def upsert_state(product_id: str, document_id: str, digest: str, error: str) -> None:
+        db.conn.execute(
+            "INSERT INTO kb_sync_state(tenant_id, product_id, document_id, content_hash, synced_at, last_error) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(tenant_id, product_id) DO UPDATE SET document_id=excluded.document_id, content_hash=excluded.content_hash, synced_at=excluded.synced_at, last_error=excluded.last_error",
+            (tenant_id, product_id, document_id, digest, now_iso(), error),
+        )
+
+    for doc in documents:
+        digest = hashlib.sha256(doc["text"].encode("utf-8")).hexdigest()
+        state = state_rows.get(doc["product_id"])
+        try:
+            if state and state["document_id"] and state["content_hash"] == digest and not force:
+                stats["skipped"] += 1
+                continue
+            if state and state["document_id"]:
+                _dify_kb_request(base, api_key, "POST", f"/v1/datasets/{dataset_id}/documents/{state['document_id']}/update-by-text",
+                                 {"name": doc["name"], "text": doc["text"], "process_rule": {"mode": "automatic"}})
+                upsert_state(doc["product_id"], state["document_id"], digest, "")
+                stats["updated"] += 1
+            else:
+                created = _dify_kb_request(base, api_key, "POST", f"/v1/datasets/{dataset_id}/document/create-by-text",
+                                           {"name": doc["name"], "text": doc["text"], "indexing_technique": "high_quality", "process_rule": {"mode": "automatic"}})
+                document_id = str(((created or {}).get("document") or {}).get("id") or "")
+                if not document_id:
+                    raise ChannelSendError("创建知识库文档未返回 document.id")
+                upsert_state(doc["product_id"], document_id, digest, "")
+                stats["created"] += 1
+        except ChannelSendError as error:
+            stats["failed"] += 1
+            stats["error"] = str(error)[:200]
+            upsert_state(doc["product_id"], (state["document_id"] if state else ""), (state["content_hash"] if state else ""), str(error)[:200])
+        db.conn.commit()
+
+    for product_id, state in state_rows.items():
+        if product_id in current_ids or not state["document_id"]:
+            continue
+        try:
+            _dify_kb_request(base, api_key, "DELETE", f"/v1/datasets/{dataset_id}/documents/{state['document_id']}")
+            db.conn.execute("DELETE FROM kb_sync_state WHERE tenant_id=? AND product_id=?", (tenant_id, product_id))
+            stats["deleted"] += 1
+        except ChannelSendError as error:
+            stats["failed"] += 1
+            stats["error"] = str(error)[:200]
+            db.conn.execute("UPDATE kb_sync_state SET last_error=?, synced_at=? WHERE tenant_id=? AND product_id=?", (str(error)[:200], now_iso(), tenant_id, product_id))
+        db.conn.commit()
+
+    db._audit(tenant_id, "kb_sync", "dify", "synced", actor,
+              json.dumps({key: stats[key] for key in ("created", "updated", "deleted", "skipped", "failed")}, ensure_ascii=False))
+    db.conn.commit()
+    return stats
+
+
+def try_sync_kb_quietly(db: Database, tenant_id: str, actor: str) -> None:
+    """发布/撤回后的知识库自动同步：任何失败都不阻断主流程（台账与操作记录留痕，可用手动按钮重试）。"""
+    try:
+        sync_kb_to_dify(db, tenant_id, actor=actor)
+    except Exception:
+        pass
 CHANNEL_RFQ_ACK = "您的询价信息已收到；您可以随时重新打开链接更新内容。"
 CHANNEL_CONFIRM_WORDS = ("确认", "确定", "confirm", "confirmed", "ok")
 CHANNEL_HUMAN_WORDS = ("人工", "转人工", "工程师", "人工核实", "engineer", "human", "agent")
@@ -5795,6 +6004,26 @@ def process_channel_message(db: Database, ai, tenant_id: str, channel: str, exte
             first = next((item for item in results if item.get("status") in {"candidate", "needs_confirmation"}), None)
             if first:
                 product_id = first.get("product_id")
+        # 第二波：LangBot 渠道的资料问答优先走 Dify 引擎（平台仍是唯一主脑：落库、转人工、出站都在平台）。
+        dify_outcome = None
+        if channel == "langbot" and dify_qa_config()[1]:
+            try:
+                dify_outcome = dify_ask_question(text, f"langbot:{external_user_id}")
+            except DifyQAUnavailableError:
+                dify_outcome = None  # 引擎不可用：回落到本地资料问答，通道不中断
+        if dify_outcome is not None:
+            if dify_outcome["status"] == "grounded":
+                status, answer_text, answer_product_id, version_id, citations = "grounded", dify_outcome["answer"], None, None, dify_outcome["citations"]
+            else:
+                status, answer_text, answer_product_id, version_id, citations = "needs_human", NO_APPROVED_BASIS_ANSWER, None, None, []
+            db.save_answer(tenant_id, conversation_id, message_id, answer_product_id, version_id, status, answer_text, citations)
+            if status == "grounded":
+                channel_send_stored(db, tenant_id, conversation, answer_text, "grounded-answer")
+            else:
+                channel_send_stored(db, tenant_id, conversation, f"{answer_text}\n\n{CHANNEL_HUMAN_HINT}", "unresolved-question")
+            result["action"] = "answered" if status == "grounded" else "answer_unresolved"
+            result["qa_source"] = "dify"
+            return result
         status, answer_text, answer_product_id, version_id, citations, _reason = answer_question_with_mode(db, ai, tenant_id, conversation_id, text, product_id)
         db.save_answer(tenant_id, conversation_id, message_id, answer_product_id, version_id, status, answer_text, citations)
         if status == "grounded":
@@ -5802,6 +6031,7 @@ def process_channel_message(db: Database, ai, tenant_id: str, channel: str, exte
         else:
             channel_send_stored(db, tenant_id, conversation, f"{answer_text}\n\n{CHANNEL_HUMAN_HINT}", "unresolved-question")
         result["action"] = "answered" if status == "grounded" else "answer_unresolved"
+        result["qa_source"] = "local"
         return result
     # ⑥ 其余：需求识别与整理（没有新内容时不重复播报）。
     previous_values = json.loads(latest["values_json"]) if latest else {}
@@ -8004,6 +8234,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.db.set_channel_enabled(self.tenant_id, channel, enabled, self.actor)
                 self.redirect(f"/admin/channels?notice={'enabled' if enabled else 'disabled'}")
                 return
+            if path == "/admin/channels/sync-dify-kb":
+                if self.user_role != "admin":
+                    self.send_html(self.console_page("无权操作", permission_notice("同步知识库", "员工", "管理员", "知识库同步会改动对外知识库内容，只对管理员开放。"), "channels"), 403)
+                    return
+                stats = sync_kb_to_dify(self.db, self.tenant_id, actor=self.actor)
+                if not stats.get("configured"):
+                    self.redirect("/admin/channels?notice=kb_not_configured")
+                else:
+                    self.redirect(
+                        "/admin/channels?notice=kb_synced"
+                        f"&created={stats['created']}&updated={stats['updated']}&deleted={stats['deleted']}&skipped={stats['skipped']}&failed={stats['failed']}"
+                    )
+                return
             match = re.fullmatch(r"/admin/inbox/(web|telegram|whatsapp|langbot)/([a-f0-9]+)/(reply|ai-toggle)", path)
             if match:
                 if match.group(3) == "reply":
@@ -8128,8 +8371,11 @@ class Handler(BaseHTTPRequestHandler):
                     self.db.finalize_product_review(self.tenant_id, product_id, self.actor)
                 elif action == "publish":
                     self.db.publish_product(self.tenant_id, product_id, self.actor)
+                    # 第二波：发布新版本 → 知识库自动同步（未配置时静默跳过；失败不阻断发布，可在渠道页手动重试）。
+                    try_sync_kb_quietly(self.db, self.tenant_id, f"{self.actor}@publish")
                 else:
                     self.db.withdraw_product(self.tenant_id, product_id, self.actor)
+                    try_sync_kb_quietly(self.db, self.tenant_id, f"{self.actor}@withdraw")
                 notice = "approve" if action == "finalize-review" else action
                 self.redirect(f"/admin/products/{product_id}?notice={notice}")
                 return
@@ -8612,7 +8858,16 @@ class Handler(BaseHTTPRequestHandler):
         tasks_by_question = {task["question_message_id"]: task for task in tasks}
         for answer in answers:
             citations = json.loads(answer["citations_json"])
-            citation_html = "".join(f"<div class='field-state'>引用：{esc(citation.get('filename'))} · {esc(citation.get('location'))} · 产品版本 {esc(citation.get('product_version'))}</div>" for citation in citations)
+            citation_html = "".join(
+                "<div class='field-state'>引用：" + " · ".join(
+                    part for part in (
+                        esc(citation.get("filename") or ""),
+                        esc(citation.get("location") or ""),
+                        f"产品版本 {esc(citation.get('product_version'))}" if citation.get("product_version") else "",
+                    ) if part
+                ) + "</div>"
+                for citation in citations
+            )
             task = tasks_by_question.get(answer["question_message_id"])
             state_label = "有据回答" if answer["answer_status"] == "grounded" else "待核实" if not task else "已请求工程师"
             request_button = f"<form method='post' action='/inquiry/{conversation_id}/human-request'><input type='hidden' name='answer_id' value='{esc(answer['id'])}'><button class='secondary'>Ask an engineer / 请求工程师核实</button></form>" if answer["answer_status"] == "needs_human" and not task else ""
@@ -9107,7 +9362,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             self.send_json({"status": "error", "error": "processing_failed"}, 500)
             return
-        self.send_json({"status": "ok", "outcome": (outcome or {}).get("action", "ignored"), "skip_pipeline": True}, 200)
+        self.send_json({"status": "ok", "outcome": (outcome or {}).get("action", "ignored"), "qa_source": (outcome or {}).get("qa_source", ""), "skip_pipeline": True}, 200)
 
     def _rfq_link_context(self, token: str) -> tuple[sqlite3.Row | None, sqlite3.Row | None, str]:
         """RFQ 链接公共解析：令牌 →（会话, 渠道 slug）。无效返回 (None, None, \"\")。"""
@@ -9493,7 +9748,16 @@ class Handler(BaseHTTPRequestHandler):
             "enabled": "<div class='notice'>渠道已启用。凭证就绪后，收信与发送将在对应切片上线时开始工作。</div>",
             "disabled": "<div class='notice'>渠道已停用，不会收发任何消息。</div>",
         }
-        notice = notices.get(query.get("notice", [""])[0], "")
+        notice_code = query.get("notice", [""])[0]
+        notice = notices.get(notice_code, "")
+        if notice_code == "kb_synced":
+            notice = (
+                "<div class='notice'>知识库同步完成：新增 "
+                f"{esc(query.get('created', ['0'])[0])} · 更新 {esc(query.get('updated', ['0'])[0])} · 删除 {esc(query.get('deleted', ['0'])[0])}"
+                f" · 跳过 {esc(query.get('skipped', ['0'])[0])} · 失败 {esc(query.get('failed', ['0'])[0])}。</div>"
+            )
+        elif notice_code == "kb_not_configured":
+            notice = "<div class='notice'>知识库同步尚未配置（需本机变量 DIFY_KB_DATASET_ID 与 DIFY_KB_API_KEY）。</div>"
         guides = {
             "telegram": "在 Telegram 里找 @BotFather 新建机器人 → 把机器人令牌写进本机环境变量 TELEGRAM_BOT_TOKEN（服务端读取，不入库、不回显）→ 回到这里填写机器人用户名并启用。收信两种方式都可用：本地长轮询（下方命令，无需公网地址）或 Webhook（需再设置一个密钥变量并注册下方地址）。",
             "whatsapp": "走 Twilio：开通 WhatsApp 沙箱（手机发送加入码即可参与测试）→ 把 Account SID、Auth Token、（whatsapp: 前缀的）发送号码写进本机环境变量 TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM → 回到这里填写显示名称并启用。收信需要一条公网回调地址，联调时使用临时隧道。",
@@ -9521,6 +9785,7 @@ class Handler(BaseHTTPRequestHandler):
             toggle_label = "停用" if enabled else "启用"
             toggle_class = "warn" if enabled else ""
             receive_block = ""
+            kb_block = ""
             if channel == "telegram":
                 webhook_id = str(config.get("webhook_id", ""))
                 hook_secret_ok = bool(os.environ.get(CHANNEL_WEBHOOK_SECRET_ENV["telegram"], "").strip())
@@ -9537,6 +9802,23 @@ class Handler(BaseHTTPRequestHandler):
                     f"<div class='field-state' style='margin-top:8px'><b>链路状态（试验）</b>：把下面的地址登记到 LangBot「API 集成 › Webhooks」并启用，消息即进入本平台收件箱（本机 LangBot 在 Docker 内，故用 host.docker.internal；其它部署换成可达地址）。<br>"
                     f"收信地址 <code>{esc(hook_url)}</code>；发送 API Key 状态：{esc(api_label)}。<br><b>已支持</b>：与 Telegram 同口径（自动问答、转人工、卖家回复直达、询价链接）。</div>"
                 )
+                qa_ok = bool(os.environ.get("DIFY_QA_APP_KEY", "").strip())
+                kb_ok = bool(os.environ.get("DIFY_KB_DATASET_ID", "").strip() and os.environ.get("DIFY_KB_API_KEY", "").strip())
+                synced_docs = self.db.conn.execute(
+                    "SELECT COUNT(*) AS n FROM kb_sync_state WHERE tenant_id=? AND document_id <> ''", (self.tenant_id,)
+                ).fetchone()["n"]
+                last_sync = self.db.conn.execute(
+                    "SELECT MAX(synced_at) AS t FROM kb_sync_state WHERE tenant_id=?", (self.tenant_id,)
+                ).fetchone()["t"] or "（尚未同步）"
+                sync_control = (
+                    "<form method='post' action='/admin/channels/sync-dify-kb' style='margin-top:8px'><button class='secondary'>同步已核准资料到知识库</button></form>"
+                    if kb_ok
+                    else "<p class='field-state'>知识库同步未配置（需本机变量 DIFY_KB_DATASET_ID / DIFY_KB_API_KEY）。</p>"
+                )
+                kb_block = (
+                    f"<div class='field-state' style='margin-top:8px'><b>问答引擎（Dify）</b>：{'已接通' if qa_ok else '未配置（需本机变量 DIFY_QA_APP_KEY）'}；"
+                    f"知识库已同步 {synced_docs} 篇 · 最近同步 {esc(last_sync)}。</div>{sync_control}"
+                )
             cards.append(f"""<section class='card' style='margin-top:16px'>
 <div class='panel-title'><h2>{esc(CHANNEL_LABELS[channel])} {badge} {secret_badge}</h2></div>
 <form method='post' action='/admin/channels/{channel}'>
@@ -9547,6 +9829,7 @@ class Handler(BaseHTTPRequestHandler):
 <p style='margin:0'><button class='{toggle_class}'>{toggle_label}渠道</button></p>
 </form>
 {receive_block}
+{kb_block}
 <p class='guide'>{esc(guides[channel])}</p>
 <p class='field-state'>机密凭证只从本机环境变量读取：页面不显示、数据库不保存、不进 Git；启用/停用与配置变更全部写入操作记录。</p>
 </section>""")
@@ -9554,7 +9837,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class='toolbar'><div><h1>渠道接入</h1><div class='muted'>把 Telegram / WhatsApp 变成买方入口：消息进「会话收件箱」，回复从平台发出。</div></div></div>
 {notice}
 <section class='card'><div class='panel-title'><h2>如何工作</h2></div>
-<p class='muted' style='margin:0'>启用并配置凭证后：买方在渠道里的消息会进入「会话收件箱」，与网站聊天走同一批处理（需求确认、有据问答、人工接管、RFQ 填写链接）；卖家在平台里的回复会经渠道直达买方。收信与发送已支持 Telegram 与 LangBot（试验）；WhatsApp 待后续切片上线。新渠道默认关闭，启用与凭证变更全部留痕。</p></section>
+<p class='muted' style='margin:0'>启用并配置凭证后：买方在渠道里的消息会进入「会话收件箱」，与网站聊天走同一批处理（需求确认、有据问答、人工接管、RFQ 填写链接）；卖家在平台里的回复会经渠道直达买方。收信与发送已支持 Telegram 与 LangBot（试验，LangBot 渠道的资料问答由本机 Dify 引擎承担）；WhatsApp 待后续切片上线。新渠道默认关闭，启用与凭证变更全部留痕。</p></section>
 {''.join(cards)}"""
         self.send_html(self.console_page("渠道接入", body, "channels"))
 
