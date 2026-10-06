@@ -145,7 +145,7 @@ class LangBotBridgeTests(unittest.TestCase):
                 os.environ[name] = value
 
     # ── 辅助 ───────────────────────────────────────────────────────────────
-    def event_for(self, sender_id, text, uuid, adapter="telegram", name="Ivan"):
+    def event_for(self, sender_id, text, uuid, adapter="TelegramAdapter", name="Ivan"):
         return {
             "uuid": uuid,
             "event_type": "bot.person_message",
@@ -197,7 +197,7 @@ class LangBotBridgeTests(unittest.TestCase):
             "SELECT * FROM channel_identities WHERE tenant_id='demo-tenant' AND conversation_id=?", (conversation_id,)
         ).fetchone()
         self.assertEqual(identity["display_name"], "Ivan")
-        self.assertEqual(json.loads(identity["platform_meta"])["adapter"], "telegram")
+        self.assertEqual(json.loads(identity["platform_meta"])["adapter"], "Telegram")
         # 自动分流：工况整理回复经 LangBot 发送（target = 平台侧用户 ID；X-API-Key 正确）
         sent = self.mock.sent_messages()
         self.assertTrue(sent)
@@ -305,7 +305,7 @@ class LangBotBridgeTests(unittest.TestCase):
         # 详情页：平台 + 用户ID
         status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{conversation_id}", cookie=self.admin)
         self.assertEqual(status, 200)
-        self.assertIn("平台 telegram", page)
+        self.assertIn("平台 Telegram", page)
         self.assertIn("用户ID 7307", page)
         # 渠道接入页：LangBot 卡片
         status, _, page = form_request(self.server, "GET", "/admin/channels", cookie=self.admin)
@@ -316,6 +316,26 @@ class LangBotBridgeTests(unittest.TestCase):
         # 导航入口
         status, _, page = form_request(self.server, "GET", "/admin", cookie=self.admin)
         self.assertIn("/admin/inbox/langbot", page)
+
+    def test_platform_label_normalization_and_name_fallback(self):
+        """适配器名归一化（TelegramAdapter/telegram→Telegram）与无姓名回退（「Telegram 用户 <ID>」）。"""
+        status, _body = self.post_event(self.event_for(7308, "hello", "ev-label-1", adapter="telegram", name=""))
+        self.assertEqual(status, 200)
+        conv = self.conversation_for(7308)
+        identity = self.db.conn.execute(
+            "SELECT * FROM channel_identities WHERE tenant_id='demo-tenant' AND conversation_id=?", (conv,)
+        ).fetchone()
+        self.assertEqual(identity["display_name"], "Telegram 用户 7308")
+        self.assertEqual(json.loads(identity["platform_meta"])["adapter"], "Telegram")
+        # 未知适配器：去掉 Adapter 后缀原样保留
+        status, _body = self.post_event(self.event_for(7309, "hello", "ev-label-2", adapter="WeirdPlatformAdapter", name=""))
+        self.assertEqual(status, 200)
+        conv2 = self.conversation_for(7309)
+        ident2 = self.db.conn.execute(
+            "SELECT * FROM channel_identities WHERE tenant_id='demo-tenant' AND conversation_id=?", (conv2,)
+        ).fetchone()
+        self.assertEqual(ident2["display_name"], "WeirdPlatform 用户 7309")
+        self.assertEqual(json.loads(ident2["platform_meta"])["adapter"], "WeirdPlatform")
 
     def test_channel_save_generates_stable_token(self):
         """保存配置：首次生成 webhook_token，再次保存保持稳定。"""

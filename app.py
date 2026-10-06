@@ -5417,6 +5417,24 @@ def channel_looks_like_question(text: str) -> bool:
     return any(hint in value for hint in _CHANNEL_QUESTION_HINTS)
 
 
+# LangBot 推送的适配器名为类名风格（如 TelegramAdapter）；统一归一成展示名（如 Telegram）。
+_CHANNEL_PLATFORM_LABELS = {
+    "telegram": "Telegram", "discord": "Discord", "line": "LINE", "slack": "Slack", "matrix": "Matrix",
+    "lark": "飞书", "dingtalk": "钉钉", "kook": "KOOK", "qqofficial": "QQ",
+    "wecom": "企业微信", "wecombot": "企业微信机器人", "wecomcs": "微信客服", "officialaccount": "微信公众号",
+}
+
+
+def normalize_platform_label(raw: str) -> str:
+    """把 LangBot 适配器名（TelegramAdapter / telegram / …）归一成展示名；未知值去掉 Adapter 后缀原样保留。"""
+    value = str(raw or "").strip()
+    if value.endswith("Adapter"):
+        value = value[: -len("Adapter")].strip()
+    if not value:
+        return ""
+    return _CHANNEL_PLATFORM_LABELS.get(value.lower(), value)
+
+
 class ChannelSendError(RuntimeError):
     """渠道发送失败（原因可直接展示给卖家界面）。"""
 
@@ -5859,10 +5877,11 @@ def handle_langbot_event(db: Database, ai, tenant_id: str, event: dict) -> dict 
     text = "\n".join(text_parts).strip()
     if not text:
         return {"action": "ignored_non_text"}
-    display_name = str(sender.get("name") or "").strip() or f"LangBot {external_user_id}"
+    platform_label = normalize_platform_label(str(data.get("adapter_name") or "")) or "LangBot"
+    display_name = str(sender.get("name") or "").strip() or f"{platform_label} 用户 {external_user_id}"
     result = process_channel_message(db, ai, tenant_id, "langbot", external_user_id, display_name, text, external_message_id)
     if result.get("action") != "duplicate":
-        meta = {"adapter": str(data.get("adapter_name") or "").strip() or "langbot"}
+        meta = {"adapter": platform_label}
         bot_uuid = str(data.get("bot_uuid") or "").strip()
         if bot_uuid:
             meta["bot_uuid"] = bot_uuid
@@ -9371,6 +9390,7 @@ class Handler(BaseHTTPRequestHandler):
                     adapter = str((json.loads(identity["platform_meta"] or "{}") or {}).get("adapter") or "")
                 except json.JSONDecodeError:
                     adapter = ""
+                adapter = normalize_platform_label(adapter)
                 ext_bits = ([f"平台 {esc(adapter)}"] if adapter else []) + [f"用户ID {esc(identity['external_user_id'])}"]
                 ext_meta_html = " · " + " · ".join(ext_bits)
         if channel == "web":
