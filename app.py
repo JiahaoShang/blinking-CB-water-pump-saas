@@ -20,6 +20,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 import hmac
 from datetime import datetime, timedelta, timezone
 from email.parser import BytesParser
@@ -4903,14 +4904,45 @@ h1{font-size:21px}
 .console .step-form{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0 0}
 .console .step-form label{display:flex;gap:6px;align-items:center;margin:0;font-weight:500;color:var(--text-2);font-size:12.5px}
 .console .step-form select{max-width:340px;min-width:200px}
-/* ── 渠道收件箱：消息记录（AI/人工标注）与回复 ── */
-.console .msgrow{margin:0 0 10px;display:flex;flex-direction:column;gap:4px}
-.console .msgrow .meta{display:flex;gap:10px;align-items:baseline;font-size:11.5px;color:var(--text-3)}
-.console .msgrow .who{font-weight:600;color:var(--text-2)}
-.console .msgrow .bubble{max-width:720px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-md);padding:8px 12px;white-space:pre-wrap;font-size:12.5px;line-height:1.65;color:var(--text-1)}
-.console .msgrow.buyer .bubble{background:var(--accent-soft);border-color:var(--accent-border)}
-.console .msgrow.system .bubble{color:var(--text-3)}
-.console .msgrow.human .bubble{border-color:var(--ok-border)}
+/* ── 会话详情：主流聊天界面（左=买方 / 右=AI·人工 / 中=系统）+ iOS 滑块开关 ── */
+.console .card.chat-shell{padding:0;overflow:hidden}
+.console .chat-head{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid var(--border);background:var(--surface-2)}
+.console .chat-avatar{width:38px;height:38px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:15px;flex:none}
+.console .chat-id{min-width:0;display:flex;flex-direction:column;gap:2px}
+.console .chat-id strong{font-size:14.5px;color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.console .chat-id small{font-size:11.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.console .chat-tools{margin-left:auto;flex:none}
+.console .chat-chips{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 18px;border-bottom:1px solid var(--border)}
+.console .chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border:1px solid var(--border);border-radius:999px;font-size:12px;color:var(--text-2);background:var(--surface-2);text-decoration:none}
+.console .chip:hover{border-color:var(--accent-border);color:var(--text-1)}
+.console .chat-chips form.inline{margin:0}
+.console .chat-log{display:flex;flex-direction:column;gap:12px;padding:18px;min-height:320px;max-height:56vh;overflow-y:auto}
+.console .chat-msg{display:flex;flex-direction:column;max-width:76%}
+.console .chat-msg.left{align-self:flex-start;align-items:flex-start}
+.console .chat-msg.right{align-self:flex-end;align-items:flex-end}
+.console .chat-msg.center{align-self:center;align-items:center;max-width:100%}
+.console .chat-bubble{padding:9px 13px;border-radius:14px;background:var(--surface-2);border:1px solid var(--border);font-size:13px;line-height:1.65;color:var(--text-1);white-space:pre-wrap;word-break:break-word}
+.console .chat-msg.left .chat-bubble{border-top-left-radius:4px}
+.console .chat-msg.right .chat-bubble{border-top-right-radius:4px;background:var(--accent-soft);border-color:var(--accent-border)}
+.console .chat-msg.right.human .chat-bubble{background:var(--surface-2);border-color:var(--ok-border)}
+.console .chat-msg.center .chat-bubble{background:transparent;border:0;color:var(--text-3);font-size:12px;padding:0 8px;text-align:center}
+.console .chat-meta{display:flex;gap:8px;align-items:baseline;font-size:11px;color:var(--text-3);padding:3px 2px 0;flex-wrap:wrap}
+.console .chat-meta .who{font-weight:600;color:var(--text-2)}
+.console .chat-composer{display:flex;gap:10px;align-items:flex-end;padding:12px 18px;border-top:1px solid var(--border)}
+.console .chat-composer textarea{flex:1;min-height:44px;max-height:140px;margin:0;resize:vertical}
+.console .chat-composer button{flex:none;height:40px;padding:0 22px}
+.console .chat-hint{margin:0;padding:0 18px 12px;font-size:11.5px;color:var(--text-3)}
+/* iOS 风格滑块开关（AI 自动回复） */
+.console .ai-switch-form{display:flex;align-items:center;gap:8px;margin:0}
+.console .ios-switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin:0;font-weight:500}
+.console .ios-switch input{position:absolute;opacity:0;width:0;height:0}
+.console .ios-slider{position:relative;width:46px;height:28px;border-radius:999px;background:var(--border);transition:background .18s ease;flex:none}
+.console .ios-slider::after{content:"";position:absolute;top:2px;left:2px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.28);transition:transform .18s ease}
+.console .ios-switch input:checked + .ios-slider{background:var(--accent)}
+.console .ios-switch input:checked + .ios-slider::after{transform:translateX(18px)}
+.console .ios-switch input:focus-visible + .ios-slider{outline:2px solid var(--accent-border);outline-offset:2px}
+.console .ios-text{font-size:12.5px;color:var(--text-2);white-space:nowrap}
+.console .ios-state{color:var(--warn,#c2410c);font-weight:600}
 """
 
 
@@ -4943,6 +4975,14 @@ CONSOLE_ICONS = """<svg width="0" height="0" style="position:absolute" aria-hidd
 <symbol id="i-send" viewBox="0 0 24 24"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></symbol>
 <symbol id="i-phone" viewBox="0 0 24 24"><path d="M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384"/></symbol>
 <symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></symbol>
+<symbol id="i-plat-telegram" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
+<symbol id="i-plat-whatsapp" viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-7.7 13.6L3 21l4.6-1.2A9 9 0 1 0 12 3z"/><path d="M9.1 7.9c-.5 1.3-.1 2.7.9 4 1 1.2 2.5 2 3.8 2.2.7.1 1.3-.1 1.7-.4l.4-.4a.6.6 0 0 0 0-.8l-1.3-1.2a.6.6 0 0 0-.8 0l-.4.4c-.7-.3-1.5-1-2-1.8l.4-.4a.6.6 0 0 0 0-.8L10.6 7.9a.6.6 0 0 0-.8 0z"/></symbol>
+<symbol id="i-plat-wechat" viewBox="0 0 24 24"><path d="M9.3 3.8C5.8 3.8 3 6.2 3 9.2c0 1.7.9 3.1 2.3 4l-.6 2 2.4-1c.7.2 1.4.3 2.2.3"/><path d="M14.7 8.6c3.3 0 6 2.2 6 5s-2.7 5-6 5c-.5 0-1-.1-1.5-.2l-2.3.9.5-1.7c-1.6-.9-2.7-2.3-2.7-4 0-2.8 2.7-5 6-5z"/></symbol>
+<symbol id="i-plat-wecom" viewBox="0 0 24 24"><path d="M21 11.5c0-3.6-4-6.5-9-6.5s-9 2.9-9 6.5c0 1.9 1.1 3.6 2.8 4.7L5 19.5l3.4-1.5c.8.2 1.7.3 2.6.3 5 0 9-2.9 9-6.8z"/><path d="m8.8 11.3 2.1 2.1 4.2-4.2"/></symbol>
+<symbol id="i-plat-discord" viewBox="0 0 24 24"><path d="M7.5 5.9C9 5.4 10.5 5.2 12 5.2s3 .2 4.5.7c2 .8 3.3 3 3.8 6.3.2 1.2.2 2.3 0 3.1-1.4 1-2.8 1.7-4.2 2l-.8-1.5c-.9.2-1.8.3-2.8.3s-1.9-.1-2.8-.3l-.8 1.5c-1.4-.3-2.8-1-4.2-2-.2-.8-.2-1.9 0-3.1.5-3.3 1.8-5.5 3.8-6.3z"/><path d="M9.7 12h.01"/><path d="M14.3 12h.01"/></symbol>
+<symbol id="i-plat-line" viewBox="0 0 24 24"><path d="M21 10.9c0 3.5-4 6.3-9 6.3-1 0-2-.1-2.9-.3L5 18.7l.9-2.9C4.1 14.7 3 12.9 3 10.9 3 7.4 7 4.6 12 4.6s9 2.8 9 6.3z"/><path d="M8.6 9v3.6h2.2"/><path d="M13.2 9v3.6"/></symbol>
+<symbol id="i-plat-feishu" viewBox="0 0 24 24"><path d="M20 4c-8.5.5-14 5-15.5 12.5l-.5 3.5 3.3-.6C15 18 19 12.5 20 4z"/><path d="M6 17c3-4.5 7-8 12-10"/></symbol>
+<symbol id="i-plat-generic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3.6 9.2h16.8"/><path d="M3.6 14.8h16.8"/><path d="M12 3a14 14 0 0 1 0 18"/><path d="M12 3a14 14 0 0 0 0 18"/></symbol>
 </defs></svg>"""
 
 
@@ -5274,7 +5314,7 @@ def auth_layout(title: str, body: str) -> str:
 </body></html>"""
 
 
-def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path: str = "/admin", actor: str = "", role: str = "", tenant: str = "", nav_counts: dict[str, int] | None = None, nav_keys: set[str] | None = None) -> str:
+def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path: str = "/admin", actor: str = "", role: str = "", tenant: str = "", nav_counts: dict[str, int] | None = None, nav_keys: set[str] | None = None, inbox_items: list[tuple[str, str, str, str]] | None = None) -> str:
     """卖家控制台外壳：左侧按业务分组的工具架 + 右侧工作区（顶栏面包屑）。"""
     groups = (
         ("我的工作", (("admin", "/admin", "home", "管理概览"),)),
@@ -5283,11 +5323,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("rfqs", "/admin/rfqs", "file", "RFQ 询价"),
             ("tasks", "/admin/tasks", "tool", "人工任务"),
         )),
-        ("会话收件箱", (
-            ("inbox_web", "/admin/inbox/web", "chat", "网站聊天"),
-            ("inbox_whatsapp", "/admin/inbox/whatsapp", "phone", "WhatsApp"),
-            ("inbox_langbot", "/admin/inbox/langbot", "send", "LangBot"),
-        )),
+        ("会话收件箱", tuple(inbox_items or ())),
         ("产品经营", (("products", "/admin/products", "box", "产品管理"),)),
         ("创意中心", (("creative", "/admin/creative", "palette", "产品展示页"),)),
         ("经营分析", (("analytics", "/admin/analytics", "chart", "分析报表"),)),
@@ -5301,7 +5337,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("audit", "/admin/audit", "history", "操作记录"),
         )),
     )
-    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "creative": "创意中心", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "channels": "设置与治理", "audit": "设置与治理", "analytics": "经营分析", "inbox_web": "会话收件箱", "inbox_whatsapp": "会话收件箱", "inbox_langbot": "会话收件箱"}
+    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "creative": "创意中心", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "channels": "设置与治理", "audit": "设置与治理", "analytics": "经营分析"}
     role_label = "管理员" if role == "admin" else ("员工" if role else "未登录")
     lang_target = f"{esc(path)}?lang={'en' if lang == 'zh' else 'zh'}"
     counts = nav_counts or {}
@@ -5315,7 +5351,10 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
         return f"<span class='side-count{hot}' data-nav-count='{key}' data-count='{value}'{hidden}><span class='n'>{text}</span></span>"
     sections = []
     for heading, items in groups:
-        visible_items = tuple(item for item in items if nav_keys is None or item[0] in nav_keys)
+        if heading == "会话收件箱":
+            visible_items = tuple(items)  # 由 console_page 按权限与数据预过滤（含"已接入未收消息"平台空态）
+        else:
+            visible_items = tuple(item for item in items if nav_keys is None or item[0] in nav_keys)
         if not visible_items:
             continue
         links = "".join(
@@ -5323,7 +5362,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             for key, url, icon, label in visible_items
         )
         sections.append(f"<div class='side-heading'>{heading}</div>{links}")
-    crumb = f"{group_of.get(active, '卖家系统')} / <b>{esc(title)}</b>"
+    crumb = f"{group_of.get(active, '会话收件箱' if str(active).startswith('inbox_') else '卖家系统')} / <b>{esc(title)}</b>"
     account = f"当前账号：{esc(actor)}（{esc(role_label)}）" if actor else "未登录"
     tenant_name = tenant or "当前企业"
     return f"""<!doctype html>
@@ -5403,9 +5442,115 @@ LEGACY_ROLE_MODULES = {"sales": ("rfqs", "sales"), "engineer": ("tasks", "rfqs",
 CHANNEL_KEYS = ("whatsapp", "langbot")
 CHANNEL_LABELS = {"whatsapp": "WhatsApp", "langbot": "LangBot"}
 # 会话收件箱的子模块（导航分别展示；web=网站聊天；langbot=LangBot 接入的社交平台）
-INBOX_SECTIONS = (("inbox_web", "web", "网站聊天"), ("inbox_whatsapp", "whatsapp", "WhatsApp"), ("inbox_langbot", "langbot", "LangBot"))
-INBOX_SECTION_CHANNELS = {key: channel for key, channel, _label in INBOX_SECTIONS}
-INBOX_SECTION_LABELS = {key: label for key, _channel, label in INBOX_SECTIONS}
+# ── 收件箱来源平台（2026-10 信息架构调整）──
+# 模块 = 真实来源平台：LangBot 仅作信息路由，平台侧按事件的 adapter（已归一）把会话归入对应平台模块；
+# whatsapp 为平台原生通道（Twilio 直连）；registry 之外的来源自动生成通用模块；已接入但无消息的平台显示空态指引。
+INBOX_PLATFORM_REGISTRY = (
+    {"slug": "telegram", "label": "Telegram", "icon": "plat-telegram", "adapters": ("telegram",), "order": 10},
+    {"slug": "whatsapp", "label": "WhatsApp", "icon": "plat-whatsapp", "adapters": (), "native": True, "order": 20},
+    {"slug": "wechat", "label": "微信", "icon": "plat-wechat", "adapters": ("微信", "openclaw-weixin", "openclaw", "wechatpad", "wechatpadpro"), "order": 30},
+    {"slug": "wecom", "label": "企业微信", "icon": "plat-wecom", "adapters": ("企业微信", "wecom", "wecombot"), "order": 40},
+    {"slug": "wecomcs", "label": "微信客服", "icon": "plat-wecom", "adapters": ("微信客服", "wecomcs"), "order": 45},
+    {"slug": "discord", "label": "Discord", "icon": "plat-discord", "adapters": ("discord",), "order": 50},
+    {"slug": "line", "label": "LINE", "icon": "plat-line", "adapters": ("line",), "order": 60},
+    {"slug": "feishu", "label": "飞书", "icon": "plat-feishu", "adapters": ("飞书", "lark"), "order": 70},
+)
+_LANGBOT_PLATFORMS_CACHE: dict = {"at": 0.0, "items": []}
+
+
+def _platform_key(raw: str) -> str:
+    return str(raw or "").strip().lower()
+
+
+def inbox_platform_entry(raw_adapter: str) -> dict:
+    """adapter（原样或归一后）→ 平台注册表条目；未知来源自动生成通用条目（确定性 slug）。"""
+    key = _platform_key(raw_adapter)
+    if not key:
+        return {"slug": "other", "label": "其他来源", "icon": "plat-generic", "adapters": ("",), "order": 999}
+    for entry in INBOX_PLATFORM_REGISTRY:
+        candidate = {_platform_key(a) for a in entry["adapters"]} | {entry["label"].lower(), entry["slug"]}
+        if key in candidate:
+            return entry
+    label = normalize_platform_label(raw_adapter) or "其他来源"
+    ascii_slug = re.sub(r"[^a-z0-9]+", "-", key).strip("-")
+    slug = ascii_slug or "p-" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+    return {"slug": slug, "label": label, "icon": "plat-generic", "adapters": (key,), "order": 500}
+
+
+def langbot_enabled_platforms(timeout: int = 2) -> list:
+    """LangBot 已启用的机器人适配器（用于“已接入但无消息”平台模块）；30 秒缓存，失败静默为空。"""
+    now = time.time()
+    if now - _LANGBOT_PLATFORMS_CACHE["at"] < 30:
+        return list(_LANGBOT_PLATFORMS_CACHE["items"])
+    items: list = []
+    api_key = os.environ.get("LANGBOT_API_KEY", "").strip()
+    if api_key:
+        try:
+            base = channel_api_base("langbot", {})
+            request = urllib_request.Request(base + "/api/v1/platform/bots", headers={"X-API-Key": api_key}, method="GET")
+            with urllib_request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            for bot in ((payload.get("data") or {}).get("bots") or []):
+                if isinstance(bot, dict) and bot.get("enable") and bot.get("adapter"):
+                    items.append(str(bot["adapter"]))
+        except Exception:
+            items = []
+    items = sorted(set(items))
+    _LANGBOT_PLATFORMS_CACHE["at"] = now
+    _LANGBOT_PLATFORMS_CACHE["items"] = items
+    return list(items)
+
+
+def inbox_sections(db, tenant_id: str) -> list:
+    """收件箱模块列表：网站聊天 + 来源平台（有数据 ∪ LangBot 已接入 ∪ 原生渠道）；含过滤所需元数据。"""
+    aggregate: dict = {}
+
+    def register(raw_adapter, has_data: bool = False, last_at: str = "") -> None:
+        entry = inbox_platform_entry(raw_adapter)
+        item = aggregate.setdefault(entry["slug"], {"entry": entry, "has_data": False, "last_at": ""})
+        item["has_data"] = item["has_data"] or has_data
+        if last_at and last_at > (item["last_at"] or ""):
+            item["last_at"] = last_at
+
+    rows = db.conn.execute(
+        "SELECT CASE WHEN json_valid(i.platform_meta) THEN json_extract(i.platform_meta,'$.adapter') END AS adapter, MAX(c.updated_at) AS last_at "
+        "FROM channel_identities i JOIN conversations c ON c.id = i.conversation_id "
+        "WHERE i.tenant_id=? AND c.source='langbot' GROUP BY 1",
+        (tenant_id,),
+    ).fetchall()
+    for row in rows:
+        register(row["adapter"], has_data=True, last_at=row["last_at"] or "")
+    for adapter in langbot_enabled_platforms():
+        register(adapter)
+    for entry in INBOX_PLATFORM_REGISTRY:
+        if not entry.get("native"):
+            continue
+        register(entry["label"])
+        native_count = db.conn.execute(
+            "SELECT COUNT(*) AS n FROM conversations WHERE tenant_id=? AND source=?", (tenant_id, entry["slug"])
+        ).fetchone()
+        if native_count and native_count["n"]:
+            aggregate[entry["slug"]]["has_data"] = True
+
+    with_data = [item for item in aggregate.values() if item["has_data"]]
+    without_data = [item for item in aggregate.values() if not item["has_data"]]
+    with_data.sort(key=lambda item: item["last_at"], reverse=True)
+    without_data.sort(key=lambda item: item["entry"].get("order", 999))
+    sections: list = [{"slug": "web", "label": "网站聊天", "icon": "chat", "kind": "web", "adapters": (), "native_channel": "", "has_data": True}]
+    for item in with_data + without_data:
+        entry = item["entry"]
+        aliases = {_platform_key(a) for a in entry["adapters"]} | {entry["label"].lower(), entry["slug"].lower()}
+        sections.append({
+            "slug": entry["slug"],
+            "label": entry["label"],
+            "icon": entry["icon"],
+            "kind": "native" if entry.get("native") else "platform",
+            "native_channel": entry["slug"] if entry.get("native") else "",
+            "adapters": tuple(sorted(aliases)),
+            "has_data": item["has_data"],
+        })
+    return sections
+
 CHANNEL_SECRET_ENV = {
     "whatsapp": ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM"),
     "langbot": ("LANGBOT_API_KEY",),
@@ -6770,6 +6915,7 @@ class Handler(BaseHTTPRequestHandler):
             tenant=(tenant["name"] if tenant else self.tenant_id),
             nav_counts=self.nav_badge_counts(),
             nav_keys=self.console_nav_keys(),
+            inbox_items=self.inbox_nav_items(),
         )
 
     def tenant_display_name(self) -> str:
@@ -6783,6 +6929,17 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return module in getattr(self, "user_modules", set())
 
+    def inbox_nav_items(self) -> list[tuple[str, str, str, str]]:
+        """侧栏「会话收件箱」子模块：网站聊天 + 来源平台（按数据与接入状态动态生成；无权限时为空）。"""
+        if not self.has_module("inbox"):
+            return []
+        items = [("inbox_web", "/admin/inbox/web", "chat", "网站聊天")]
+        for section in inbox_sections(self.db, self.tenant_id):
+            if section["slug"] == "web":
+                continue
+            items.append((f"inbox_{section['slug']}", f"/admin/inbox/{section['slug']}", section["icon"], section["label"]))
+        return items
+
     def console_nav_keys(self) -> set[str]:
         """侧栏可见集：概览人人可见；管理员另见成员管理/渠道接入等；员工按已授权模块。"""
         keys = {"admin"}
@@ -6795,9 +6952,7 @@ class Handler(BaseHTTPRequestHandler):
         for module_key in GRANTABLE_MODULE_KEYS:
             if self.has_module(module_key):
                 keys.add(module_key)
-        # 会话收件箱一个模块对应三个导航子模块（网站聊天 / WhatsApp / LangBot）。
-        if self.has_module("inbox"):
-            keys.update({"inbox_web", "inbox_whatsapp", "inbox_langbot"})
+        # 会话收件箱子模块（网站聊天 + 来源平台）由 inbox_nav_items 按权限与数据动态生成，此处不宣告固定键。
         return keys
 
     def login_page(self, query: dict[str, list[str]], error: str = "") -> None:
@@ -6996,13 +7151,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/audit":
             self.admin_audit(query)
             return
-        match = re.fullmatch(r"/admin/inbox/(web|whatsapp|langbot)", path)
+        match = re.fullmatch(r"/admin/inbox/([a-z0-9_-]{1,40})", path)
         if match:
-            self.admin_inbox(f"inbox_{match.group(1)}", query)
+            self.admin_inbox(match.group(1), query)
             return
-        match = re.fullmatch(r"/admin/inbox/(web|whatsapp|langbot)/([a-f0-9]+)", path)
+        match = re.fullmatch(r"/admin/inbox/([a-z0-9_-]{1,40})/([a-f0-9]+)", path)
         if match:
-            self.admin_inbox_conversation(f"inbox_{match.group(1)}", match.group(2), query)
+            self.admin_inbox_conversation(match.group(1), match.group(2), query)
             return
         if path == "/admin/channels":
             self.admin_channels(query)
@@ -8208,20 +8363,20 @@ class Handler(BaseHTTPRequestHandler):
                         f"&created={stats['created']}&updated={stats['updated']}&deleted={stats['deleted']}&skipped={stats['skipped']}&failed={stats['failed']}"
                     )
                 return
-            match = re.fullmatch(r"/admin/inbox/(web|whatsapp|langbot)/([a-f0-9]+)/(reply|ai-toggle)", path)
+            match = re.fullmatch(r"/admin/inbox/([a-z0-9_-]{1,40})/([a-f0-9]+)/(reply|ai-toggle)", path)
             if match:
                 if match.group(3) == "reply":
-                    self.admin_inbox_reply(f"inbox_{match.group(1)}", match.group(2), form)
+                    self.admin_inbox_reply(match.group(1), match.group(2), form)
                 else:
-                    self.admin_inbox_ai_toggle(f"inbox_{match.group(1)}", match.group(2))
+                    self.admin_inbox_ai_toggle(match.group(1), match.group(2))
                 return
-            match = re.fullmatch(r"/admin/inbox/(whatsapp|langbot)/([a-f0-9]+)/rfq-link", path)
+            match = re.fullmatch(r"/admin/inbox/([a-z0-9_-]{1,40})/([a-f0-9]+)/rfq-link", path)
             if match:
                 self.admin_inbox_rfq_link(match.group(1), match.group(2))
                 return
-            match = re.fullmatch(r"/admin/inbox/(web|whatsapp|langbot)/([a-f0-9]+)/messages/([a-f0-9]+)/retry", path)
+            match = re.fullmatch(r"/admin/inbox/([a-z0-9_-]{1,40})/([a-f0-9]+)/messages/([a-f0-9]+)/retry", path)
             if match:
-                self.admin_inbox_message_retry(f"inbox_{match.group(1)}", match.group(2), match.group(3))
+                self.admin_inbox_message_retry(match.group(1), match.group(2), match.group(3))
                 return
             if path == "/admin/settings/stages":
                 self.admin_settings_save_stages(form)
@@ -9202,12 +9357,32 @@ class Handler(BaseHTTPRequestHandler):
         self.redirect("/admin/settings?notice=notify")
 
     # ── V1-04 外部渠道接入：会话收件箱（列表 / 详情 / 回复 / AI 开关） ──────────
-    def _inbox_conversation_in_section(self, channel: str, conversation: sqlite3.Row) -> bool:
-        """会话是否属于该收件箱子模块（网站聊天=web+website_api；渠道=对应 source；演示夹具不进收件箱）。"""
+    def inbox_section(self, slug: str) -> dict | None:
+        """按 URL 段 slug 解析收件箱模块（web / 来源平台 slug）；未知返回 None。"""
+        slug = str(slug or "").strip()
+        for section in inbox_sections(self.db, self.tenant_id):
+            if section["slug"] == slug:
+                return section
+        return None
+
+    def _inbox_conversation_in_section(self, section: dict, conversation: sqlite3.Row) -> bool:
+        """会话是否属于该收件箱模块：网站聊天=web+website_api；原生=对应 source；平台=LangBot 轨按 adapter 归属。"""
         source = conversation["source"] or ""
-        if channel == "web":
+        kind = section.get("kind")
+        if kind == "web":
             return source in ("web", "website_api")
-        return source == channel
+        if kind == "native":
+            return source == (section.get("native_channel") or "")
+        if source != "langbot":
+            return False
+        identity = self.db.get_channel_identity_by_conversation(self.tenant_id, "langbot", conversation["id"])
+        adapter = ""
+        if identity:
+            try:
+                adapter = str((json.loads(identity["platform_meta"] or "{}") or {}).get("adapter") or "")
+            except json.JSONDecodeError:
+                adapter = ""
+        return inbox_platform_entry(adapter)["slug"] == section["slug"]
 
     def _inbox_message_view(self, message: sqlite3.Row) -> tuple[str, str, str]:
         """单条消息 →（标注、正文、样式类）。AI 与人工分开标注；人工显示回复人。"""
@@ -9397,15 +9572,16 @@ class Handler(BaseHTTPRequestHandler):
         if row:
             dispatch_outbound(self.db, self.tenant_id, row["id"])
 
-    def admin_inbox_rfq_link(self, channel: str, conversation_id: str) -> None:
-        """给渠道会话主动发送「RFQ 填写链接」消息（停止主动联系时拒绝）。"""
+    def admin_inbox_rfq_link(self, slug: str, conversation_id: str) -> None:
+        """给平台会话主动发送「RFQ 填写链接」消息（停止主动联系时拒绝）。"""
+        section = self.inbox_section(slug)
         conversation = self.db.get_conversation(self.tenant_id, conversation_id)
-        if not conversation or (conversation["source"] or "") != channel:
+        if not section or not conversation or not self._inbox_conversation_in_section(section, conversation):
             raise ValueError("会话不存在或不属于这个渠道")
-        if channel == "whatsapp":
+        if section["kind"] != "platform":
             raise ValueError("该渠道的发送通道尚未开通")
         if conversation["stop_proactive_contact"]:
-            self.redirect(f"/admin/inbox/{channel}/{conversation_id}?notice=link_stopped")
+            self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice=link_stopped")
             return
         token = self.db.create_rfq_form_token(self.tenant_id, conversation_id, self.actor)
         host = self.headers.get("Host", "127.0.0.1:8137")
@@ -9415,22 +9591,30 @@ class Handler(BaseHTTPRequestHandler):
             _message_id, sent, _error = channel_send_stored(self.db, self.tenant_id, conversation, text, "rfq-link", actor_email=self.actor, proactive=True)
         except ValueError:
             # 主动发送门控（停止主动联系）在总线入口兜底拦截
-            self.redirect(f"/admin/inbox/{channel}/{conversation_id}?notice=link_stopped")
+            self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice=link_stopped")
             return
-        self.redirect(f"/admin/inbox/{channel}/{conversation_id}?notice={'link_sent' if sent else 'link_failed'}")
+        self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice={'link_sent' if sent else 'link_failed'}")
 
-    def admin_inbox(self, section: str, query: dict[str, list[str]]) -> None:
-        """会话收件箱子模块：列表（按渠道分开，一眼看清来源）。"""
-        channel = INBOX_SECTION_CHANNELS.get(section)
-        if not channel:
+    def admin_inbox(self, slug: str, query: dict[str, list[str]]) -> None:
+        """会话收件箱模块列表：按来源平台分开（平台从消息里识别；已接入未收消息的平台显示空态）。"""
+        section = self.inbox_section(slug)
+        if not section:
             self.send_html(self.console_page("未找到", "<div class='error'>页面不存在。</div>", ""), 404)
             return
-        slug = section.removeprefix("inbox_")  # URL 段只用 web/whatsapp/langbot（section=inbox_web 仅供内部导航键）
-        label = INBOX_SECTION_LABELS[section]
-        if channel == "web":
+        label = section["label"]
+        if section["kind"] == "web":
             source_where, params = "c.source IN ('web','website_api')", ()
+        elif section["kind"] == "native":
+            source_where, params = "c.source=?", (section["native_channel"],)
         else:
-            source_where, params = "c.source=?", (channel,)
+            aliases = list(section["adapters"])
+            placeholders = ",".join("?" for _ in aliases)
+            source_where = (
+                "c.source='langbot' AND EXISTS (SELECT 1 FROM channel_identities i "
+                "WHERE i.tenant_id=c.tenant_id AND i.conversation_id=c.id "
+                f"AND CASE WHEN json_valid(i.platform_meta) THEN lower(COALESCE(json_extract(i.platform_meta,'$.adapter'),'')) ELSE '' END IN ({placeholders}))"
+            )
+            params = tuple(aliases)
         rows = self.db.conn.execute(
             f"""SELECT c.*,
                 (SELECT COUNT(*) FROM messages m WHERE m.tenant_id=c.tenant_id AND m.conversation_id=c.id) AS message_count,
@@ -9446,10 +9630,10 @@ class Handler(BaseHTTPRequestHandler):
         ).fetchall()
         items = []
         for row in rows:
-            if channel == "web":
+            if section["kind"] == "web":
                 title = f"网站访客 · {row['id'][:6]}"
             else:
-                title = row["ext_name"] or row["ext_id"] or f"渠道访客 · {row['id'][:6]}"
+                title = row["ext_name"] or row["ext_id"] or f"平台访客 · {row['id'][:6]}"
             contact = row["rfq_email"] or row["lead_email"] or ""
             meta_parts = [f"消息 {row['message_count']} 条", f"最后活动 {esc((row['updated_at'] or '')[:16].replace('T', ' '))}"]
             if contact:
@@ -9466,36 +9650,41 @@ class Handler(BaseHTTPRequestHandler):
                 f"<small>最后一条：{esc(preview)}</small><small>{' · '.join(meta_parts)}</small></div>"
                 f"<div class='actions'><a class='button secondary' href='/admin/inbox/{slug}/{esc(row['id'])}'>查看会话</a></div></div>"
             )
-        if channel == "web":
+        if section["kind"] == "web":
             empty = "还没有网站聊天会话；买方在官网窗口发起咨询后，会在这里统一查看与回复。"
-        else:
+        elif section["kind"] == "native":
+            channel = section["native_channel"]
             account = self.db.get_channel_account(self.tenant_id, channel)
             secret = channel_secret_status(channel)
             if not account or account["status"] != "enabled":
-                empty = "渠道未启用——管理员可在「设置与治理 › 渠道接入」完成配置并启用。"
+                empty = "该渠道未启用——管理员可在「设置与治理 › 渠道接入」完成配置并启用。"
             elif not secret["configured"]:
                 empty = f"渠道已启用，但本机凭证未配置（缺少 {'、'.join(secret['missing'])}）；凭证就绪前不会收发任何消息。"
             else:
-                empty = "渠道已启用且凭证就绪；买方在渠道里发来的消息会出现在这里。"
+                empty = "渠道已启用且凭证就绪；买方发来的消息会出现在这里。"
+        elif section["has_data"]:
+            empty = "暂时没有会话。"
+        else:
+            empty = f"{label} 已接入（LangBot），还没有消息；确认 LangBot 中对应平台的机器人已启用、并把平台收信地址登记为 Webhook。"
         list_html = "".join(items) or f"<div class='muted-block'>{esc(empty)}</div>"
         body = f"""
-<div class='toolbar'><div><h1>{esc(label)}</h1><div class='muted'>会话收件箱 · 同一批会话对象，按来源渠道分开展示，一眼看清消息来自哪里。</div></div></div>
+<div class='toolbar'><div><h1>{esc(label)}</h1><div class='muted'>会话收件箱 · 按来源平台分开；消息经 LangBot 或原生通道进入平台后自动归入对应平台模块。</div></div></div>
 <section class='card'><div class='panel-title'><h2>最近会话</h2><span class='muted'>按最后活动倒序 · 最多 50 条</span></div>
 <div class='simple-list'>{list_html}</div></section>"""
-        self.send_html(self.console_page(f"{label} · 会话", body, section))
+        self.send_html(self.console_page(f"{label} · 会话", body, f"inbox_{slug}"))
 
-    def admin_inbox_conversation(self, section: str, conversation_id: str, query: dict[str, list[str]]) -> None:
-        """会话详情：全部聊天记录（AI/人工标注＋回复人）、关联询价/线索、回复与 AI 开关。"""
-        channel = INBOX_SECTION_CHANNELS.get(section)
-        label = INBOX_SECTION_LABELS.get(section, "会话")
-        slug = section.removeprefix("inbox_")
-        conversation = channel and self.db.get_conversation(self.tenant_id, conversation_id)
-        if not conversation or not self._inbox_conversation_in_section(channel, conversation):
-            self.send_html(self.console_page("未找到", "<div class='error'>会话不存在或不属于这个渠道。</div>", section if channel else ""), 404)
+    def admin_inbox_conversation(self, slug: str, conversation_id: str, query: dict[str, list[str]]) -> None:
+        """会话详情（聊天视图）：左买方 / 右 AI·人工 / 中系统；顶部 AI 滑块开关 + 底部输入栏。"""
+        section = self.inbox_section(slug)
+        conversation = self.db.get_conversation(self.tenant_id, conversation_id)
+        if not section or not conversation or not self._inbox_conversation_in_section(section, conversation):
+            self.send_html(self.console_page("未找到", "<div class='error'>会话不存在或不属于这个平台。</div>", ""), 404)
             return
+        label = section["label"]
+        is_web = section["kind"] == "web"
         sent_html = (
             "<div class='notice'>回复已发送——买方在网站聊天窗口里可见。</div>"
-            if channel == "web"
+            if is_web
             else f"<div class='notice'>回复已发送——已经由 {esc(label)} 直达买方。</div>"
         )
         notices = {
@@ -9518,7 +9707,7 @@ class Handler(BaseHTTPRequestHandler):
             when = esc((message["created_at"] or "")[:16].replace("T", " "))
             delivery_html = ""
             delivery_status = message["delivery_status"] or ""
-            if channel != "web" and delivery_status:
+            if not is_web and delivery_status:
                 attempts = message["delivery_attempts"] or 0
                 if delivery_status == "failed":
                     delivery_label = f"发送失败：{message['delivery_error'] or '原因未知'}"
@@ -9532,9 +9721,10 @@ class Handler(BaseHTTPRequestHandler):
                         f"<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/messages/{esc(message['id'])}/retry' class='inline' style='margin-left:8px'>"
                         f"<button class='secondary'>重试发送</button></form>"
                     )
+            side = {"buyer": "left", "system": "center"}.get(css, "right")
             message_rows.append(
-                f"<div class='msgrow {css}'><div class='meta'><span class='who'>{esc(who)}</span><span class='when'>{when}</span>{delivery_html}</div>"
-                f"<div class='bubble'>{esc(body_text)}</div></div>"
+                f"<div class='chat-msg {side} {css}'><div class='chat-bubble'>{esc(body_text)}</div>"
+                f"<div class='chat-meta'><span class='who'>{esc(who)}</span><span class='when'>{when}</span>{delivery_html}</div></div>"
             )
         transcript = "".join(message_rows) or "<div class='muted-block'>这个会话还没有消息。</div>"
         rfq_rows = self.db.conn.execute(
@@ -9545,78 +9735,73 @@ class Handler(BaseHTTPRequestHandler):
             "SELECT id FROM leads WHERE tenant_id=? AND conversation_id=? AND merged_into IS NULL ORDER BY created_at DESC LIMIT 1",
             (self.tenant_id, conversation_id),
         ).fetchone()
-        related_parts = []
+        chips = []
         for rfq_row in rfq_rows:
-            related_parts.append(
-                f"<div class='simple-item'><div><strong>询价单 {esc(rfq_row['id'][:8])}</strong>"
-                f"<small>状态 {esc(rfq_row['status'])} · 数量 {esc(rfq_row['quantity'] or '未填')} · {esc((rfq_row['created_at'] or '')[:16].replace('T', ' '))}</small></div>"
-                f"<div class='actions'><a class='button secondary' href='/admin/rfqs/{esc(rfq_row['id'])}'>查看询价</a></div></div>"
-            )
+            chips.append(f"<a class='chip' href='/admin/rfqs/{esc(rfq_row['id'])}'>询价单 {esc(rfq_row['id'][:8])} · {esc(rfq_row['status'])}</a>")
         if lead_row:
-            related_parts.append(
-                f"<div class='simple-item'><div><strong>关联线索</strong><small>这个会话已形成销售线索</small></div>"
-                f"<div class='actions'><a class='button secondary' href='/admin/leads/{esc(lead_row['id'])}'>查看线索</a></div></div>"
+            chips.append(f"<a class='chip' href='/admin/leads/{esc(lead_row['id'])}'>关联线索</a>")
+        if section["kind"] == "platform":
+            chips.append(
+                f"<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/rfq-link' class='inline'>"
+                f"<button class='secondary'>发送询价填写链接</button></form>"
             )
-        related_html = "".join(related_parts) or "<div class='muted-block'>这个会话还没有关联询价或线索。</div>"
-        ai_badge = "<span class='badge pending_review'>AI 自动回复已暂停</span>" if conversation["ai_paused"] else "<span class='badge approved'>AI 自动回复开启</span>"
-        ai_action_label = "恢复 AI 自动回复" if conversation["ai_paused"] else "暂停 AI 自动回复"
         stop_badge = "<span class='badge withdrawn'>停止主动联系</span>" if conversation["stop_proactive_contact"] else ""
-        ext_meta_html = ""
-        if channel != "web":
-            identity = self.db.get_channel_identity_by_conversation(self.tenant_id, channel, conversation_id)
-            if identity:
-                adapter = ""
-                try:
-                    adapter = str((json.loads(identity["platform_meta"] or "{}") or {}).get("adapter") or "")
-                except json.JSONDecodeError:
-                    adapter = ""
-                adapter = normalize_platform_label(adapter)
-                ext_bits = ([f"平台 {esc(adapter)}"] if adapter else []) + [f"用户ID {esc(identity['external_user_id'])}"]
-                ext_meta_html = " · " + " · ".join(ext_bits)
-        if channel == "web":
-            reply_html = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>回复买方</h2><span class='muted'>立即出现在买方网站聊天窗口</span></div>
-<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/reply'><textarea name='body' required maxlength='4000' placeholder='输入回复内容…'></textarea>
-<p style='margin-top:10px'><button>发送回复</button></p></form></section>"""
-        elif channel == "langbot":
-            reply_html = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>回复买方</h2><span class='muted'>经 {esc(label)} 直达买方聊天窗口</span></div>
-<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/reply'><textarea name='body' required maxlength='4000' placeholder='输入回复内容…'></textarea>
-<p style='margin-top:10px'><button>发送回复</button></p></form></section>"""
+        identity = None
+        if not is_web:
+            channel_key = "langbot" if section["kind"] == "platform" else section["native_channel"]
+            identity = self.db.get_channel_identity_by_conversation(self.tenant_id, channel_key, conversation_id)
+        ext_id = identity["external_user_id"] if identity else ""
+        title_name = identity["display_name"] if identity and identity["display_name"] else (ext_id or f"会话 {conversation_id[:10]}")
+        meta_bits = [f"{esc(label)}"]
+        if ext_id:
+            meta_bits.append(f"用户ID {esc(ext_id)}")
+        meta_bits.append(f"消息 {len(messages)} 条")
+        meta_bits.append(f"开始 {esc((conversation['created_at'] or '')[:16].replace('T', ' '))}")
+        meta_line = " · ".join(meta_bits)
+        initial = (title_name.strip()[:1] or "对").upper()
+        paused = bool(conversation["ai_paused"])
+        paused_note = "<span class='ios-state'>已暂停</span>" if paused else ""
+        ai_switch = (
+            f"<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/ai-toggle' class='ai-switch-form'>"
+            f"<label class='ios-switch'><input type='checkbox'{'' if paused else ' checked'} onchange='this.form.submit()'>"
+            f"<span class='ios-slider' aria-hidden='true'></span></label>"
+            f"<span class='ios-text'>AI 自动回复 {paused_note}</span></form>"
+        )
+        if is_web:
+            hint = "回复将立即出现在买方网站聊天窗口。"
+        elif section["kind"] == "native":
+            hint = f"回复将经 {esc(label)} 发送；发送通道未就绪时消息会标记「发送失败」并支持重试。"
         else:
-            reply_html = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>回复买方</h2></div>
-<div class='muted-block'>{esc(label)} 的发送通道将在后续切片上线后开放；当前阶段可以查看记录与调整 AI 开关。</div>
-<textarea disabled placeholder='发送通道未开通'></textarea></section>"""
-        if channel == "langbot":
-            rfq_card = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>询价填写链接</h2><span class='muted'>买方点开后可随时填写与修改</span></div>
-<p class='muted' style='margin:0 0 10px'>给买方发送一条带链接的消息；买方打开填写后，询价进入销售工作台。</p>
-<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/rfq-link'><p style='margin:0'><button class='secondary'>发送询价填写链接</button></p></form></section>"""
-        elif channel == "whatsapp":
-            rfq_card = "<section class='card' style='margin-top:16px'><div class='panel-title'><h2>询价填写链接</h2></div><div class='muted-block'>该渠道的发送通道将在后续切片上线后开放。</div></section>"
-        else:
-            rfq_card = ""
+            hint = f"回复将经 {esc(label)} 直达买方；发送失败会标记并可重试。"
         body = f"""
-<div class='toolbar'><div><a href='/admin/inbox/{slug}'>← 返回{esc(label)}列表</a><h1 style='margin-top:6px'>{esc(label)}会话</h1>
-<div class='muted'>会话 {esc(conversation_id[:10])} · 开始 {esc((conversation['created_at'] or '')[:16].replace('T', ' '))} · 最后活动 {esc((conversation['updated_at'] or '')[:16].replace('T', ' '))} · 消息 {len(messages)} 条{ext_meta_html}</div></div>
-<div class='actions'>{ai_badge} {stop_badge}
-<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/ai-toggle' class='inline'><button class='secondary'>{ai_action_label}</button></form></div></div>
+<div class='toolbar'><div><a class='button secondary' href='/admin/inbox/{slug}'>← 返回{esc(label)}列表</a></div><div class='actions'>{stop_badge}</div></div>
 {notice}
-<section class='card'><div class='panel-title'><h2>关联业务</h2></div><div class='simple-list'>{related_html}</div></section>
-<section class='card' style='margin-top:16px'><div class='panel-title'><h2>全部聊天记录</h2><span class='muted'>AI 与人工分开标注 · 人工显示回复人</span></div>
-{transcript}</section>
-{reply_html}
-{rfq_card}"""
-        self.send_html(self.console_page(f"{label}会话", body, section))
+<section class='card chat-shell'>
+<header class='chat-head'>
+<div class='chat-avatar' aria-hidden='true'>{esc(initial)}</div>
+<div class='chat-id'><strong>{esc(title_name)}</strong><small>{meta_line}</small></div>
+<div class='chat-tools'>{ai_switch}</div>
+</header>
+<div class='chat-chips'>{''.join(chips) or "<span class='muted'>暂无关联业务</span>"}</div>
+<div class='chat-log'>{transcript}</div>
+<form class='chat-composer' method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/reply'>
+<textarea name='body' required maxlength='4000' placeholder='输入回复内容…'></textarea>
+<button>发送</button>
+</form>
+<p class='chat-hint'>{hint}</p>
+</section>"""
+        self.send_html(self.console_page(f"{label} · 会话", body, f"inbox_{slug}"))
 
-    def admin_inbox_reply(self, section: str, conversation_id: str, form: dict) -> None:
+    def admin_inbox_reply(self, slug: str, conversation_id: str, form: dict) -> None:
         """收件箱直接回复：网站聊天即时可见；渠道会话经发送器直达买方（失败可见）。"""
-        channel = INBOX_SECTION_CHANNELS.get(section)
-        slug = section.removeprefix("inbox_")
-        conversation = channel and self.db.get_conversation(self.tenant_id, conversation_id)
-        if not conversation or not self._inbox_conversation_in_section(channel, conversation):
+        section = self.inbox_section(slug)
+        conversation = self.db.get_conversation(self.tenant_id, conversation_id)
+        if not section or not conversation or not self._inbox_conversation_in_section(section, conversation):
             raise ValueError("会话不存在或不属于这个渠道")
         body_text = str(form.get("body", "")).strip()
         if not body_text:
             raise ValueError("回复内容不能为空")
-        if channel == "web":
+        if section["kind"] == "web":
             message_id = self.db.save_message(
                 self.tenant_id, conversation_id, "staff", f"卖家回复：{body_text}", "staff-reply",
                 actor_email=self.actor, delivery_status="sent",
@@ -9631,25 +9816,23 @@ class Handler(BaseHTTPRequestHandler):
         self.db.audit_staff_reply(self.tenant_id, conversation_id, message_id, self.actor)
         self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice={'sent' if sent else 'reply_failed'}")
 
-    def admin_inbox_ai_toggle(self, section: str, conversation_id: str) -> None:
+    def admin_inbox_ai_toggle(self, slug: str, conversation_id: str) -> None:
         """每会话「暂停/恢复 AI 自动回复」开关。"""
-        channel = INBOX_SECTION_CHANNELS.get(section)
-        slug = section.removeprefix("inbox_")
-        conversation = channel and self.db.get_conversation(self.tenant_id, conversation_id)
-        if not conversation or not self._inbox_conversation_in_section(channel, conversation):
+        section = self.inbox_section(slug)
+        conversation = self.db.get_conversation(self.tenant_id, conversation_id)
+        if not section or not conversation or not self._inbox_conversation_in_section(section, conversation):
             raise ValueError("会话不存在或不属于这个渠道")
         paused = not conversation["ai_paused"]
         self.db.set_conversation_ai_paused(self.tenant_id, conversation_id, paused, self.actor)
         self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice={'ai_paused' if paused else 'ai_resumed'}")
 
-    def admin_inbox_message_retry(self, section: str, conversation_id: str, message_id: str) -> None:
+    def admin_inbox_message_retry(self, slug: str, conversation_id: str, message_id: str) -> None:
         """收件箱内重试一条发送失败的消息（出站总线幂等：已成功不重发）。"""
-        channel = INBOX_SECTION_CHANNELS.get(section)
-        slug = section.removeprefix("inbox_")
-        conversation = channel and self.db.get_conversation(self.tenant_id, conversation_id)
-        if not channel or not conversation or not self._inbox_conversation_in_section(channel, conversation):
+        section = self.inbox_section(slug)
+        conversation = self.db.get_conversation(self.tenant_id, conversation_id)
+        if not section or not conversation or not self._inbox_conversation_in_section(section, conversation):
             raise ValueError("会话不存在或不属于这个渠道")
-        if channel == "web":
+        if section["kind"] == "web":
             raise ValueError("网站聊天消息无需重试")
         message = self.db.conn.execute(
             "SELECT * FROM messages WHERE tenant_id=? AND id=? AND conversation_id=?",

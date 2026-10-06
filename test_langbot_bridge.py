@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from app import make_server  # noqa: E402
+from app import make_server, _LANGBOT_PLATFORMS_CACHE  # noqa: E402
 
 
 def form_request(server, method, path, fields=None, cookie=None):
@@ -60,31 +60,39 @@ def json_http(server, method, path, payload=None, headers=None):
 
 
 class _LangBotMock:
-    """最小 LangBot 服务模拟：记录请求，send_message 返回 code=0。"""
+    """最小 LangBot 服务模拟：记录请求；send_message 返回 code=0；GET bots 列出已接入机器人。"""
 
-    def __init__(self, api_key="lbk_test_key"):
+    def __init__(self, api_key="lbk_test_key", bots=None):
         state = self
+        self.bots = list(bots or [])
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
 
-            def do_POST(self):
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length).decode("utf-8")
-                state.requests.append({"path": self.path, "headers": dict(self.headers), "body": raw})
-                if self.headers.get("X-API-Key") == api_key:
-                    payload = {"code": 0, "msg": "ok", "data": {"sent": True}}
-                    status = 200
-                else:
-                    payload = {"code": 401, "msg": "invalid api key", "data": None}
-                    status = 401
+            def _respond(self, status, payload):
                 body = json.dumps(payload).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+
+            def do_GET(self):
+                state.requests.append({"path": self.path, "headers": dict(self.headers), "body": ""})
+                if self.path == "/api/v1/platform/bots" and self.headers.get("X-API-Key") == api_key:
+                    self._respond(200, {"code": 0, "msg": "ok", "data": {"bots": state.bots}})
+                else:
+                    self._respond(404, {"code": 404, "msg": "not found", "data": None})
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length).decode("utf-8")
+                state.requests.append({"path": self.path, "headers": dict(self.headers), "body": raw})
+                if self.headers.get("X-API-Key") == api_key:
+                    self._respond(200, {"code": 0, "msg": "ok", "data": {"sent": True}})
+                else:
+                    self._respond(401, {"code": 401, "msg": "invalid api key", "data": None})
 
         self.requests = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -260,7 +268,7 @@ class LangBotBridgeTests(unittest.TestCase):
         self.assertEqual(status, 200)
         conversation_id = self.conversation_for(7305)
         # 成功回复
-        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{conversation_id}/reply", {"body": "您好，已收到您的消息。"}, self.admin)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/reply", {"body": "您好，已收到您的消息。"}, self.admin)
         self.assertEqual(status, 303)
         self.assertIn("notice=sent", headers.get("Location", ""))
         sent = self.mock.sent_messages()
@@ -268,19 +276,19 @@ class LangBotBridgeTests(unittest.TestCase):
         # 失败可见：指向不可达端口
         os.environ["LANGBOT_API_BASE"] = "http://127.0.0.1:9"
         try:
-            status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{conversation_id}/reply", {"body": "这条会失败。"}, self.admin)
+            status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/reply", {"body": "这条会失败。"}, self.admin)
             self.assertEqual(status, 303)
             self.assertIn("notice=reply_failed", headers.get("Location", ""))
             failed_row = self.last_message(conversation_id, "staff-reply")
             self.assertEqual(failed_row["delivery_status"], "failed")
             self.assertIn("网络请求失败", failed_row["delivery_error"])
-            status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{conversation_id}", cookie=self.admin)
+            status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{conversation_id}", cookie=self.admin)
             self.assertIn("发送失败：网络请求失败", page)
             self.assertIn("重试发送", page)
         finally:
             os.environ["LANGBOT_API_BASE"] = self.mock.url
         # 重试成功
-        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{conversation_id}/messages/{failed_row['id']}/retry", {}, self.admin)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/messages/{failed_row['id']}/retry", {}, self.admin)
         self.assertEqual(status, 303)
         self.assertIn("notice=retried_ok", headers.get("Location", ""))
         refreshed = self.db.conn.execute("SELECT * FROM messages WHERE id=?", (failed_row["id"],)).fetchone()
@@ -292,7 +300,7 @@ class LangBotBridgeTests(unittest.TestCase):
             status, _body = self.post_event(self.event_for(7306, "hello", "ev-0006"))
             self.assertEqual(status, 200)
             conversation_id = self.conversation_for(7306)
-            status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{conversation_id}/reply", {"body": "测试。"}, self.admin)
+            status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/reply", {"body": "测试。"}, self.admin)
             self.assertEqual(status, 303)
             self.assertIn("notice=reply_failed", headers.get("Location", ""))
             failed_row = self.last_message(conversation_id, "staff-reply")
@@ -308,13 +316,13 @@ class LangBotBridgeTests(unittest.TestCase):
         self.assertEqual(status, 200)
         conversation_id = self.conversation_for(7307)
         # 列表页
-        status, _, page = form_request(self.server, "GET", "/admin/inbox/langbot", cookie=self.admin)
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/telegram", cookie=self.admin)
         self.assertEqual(status, 200)
         self.assertIn("Maya L", page)
         # 详情页：平台 + 用户ID
-        status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{conversation_id}", cookie=self.admin)
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{conversation_id}", cookie=self.admin)
         self.assertEqual(status, 200)
-        self.assertIn("平台 Telegram", page)
+        self.assertIn("Telegram", page)
         self.assertIn("用户ID 7307", page)
         # 渠道接入页：LangBot 卡片
         status, _, page = form_request(self.server, "GET", "/admin/channels", cookie=self.admin)
@@ -322,9 +330,32 @@ class LangBotBridgeTests(unittest.TestCase):
         for text in ("LangBot", "bot_uuid", "LANGBOT_API_KEY", "host.docker.internal"):
             self.assertIn(text, page)
         self.assertIn(self.token, page)
-        # 导航入口
+        # 导航入口：来源平台模块（旧「LangBot」模块已退役）
         status, _, page = form_request(self.server, "GET", "/admin", cookie=self.admin)
-        self.assertIn("/admin/inbox/langbot", page)
+        self.assertIn("/admin/inbox/telegram", page)
+        self.assertNotIn("/admin/inbox/langbot", page)
+
+    def test_inbox_platform_modules_connected_and_empty_state(self):
+        """来源平台重构：LangBot 已接入（启用）的平台即使无消息也显示模块（空态指引）；未启用的不显示。"""
+        self.mock.bots = [
+            {"uuid": "b-tg", "name": "TG", "adapter": "telegram", "enable": True},
+            {"uuid": "b-dc", "name": "DC", "adapter": "discord", "enable": True},
+            {"uuid": "b-off", "name": "Off", "adapter": "slack", "enable": False},
+        ]
+        _LANGBOT_PLATFORMS_CACHE["at"] = 0.0
+        try:
+            status, _, page = form_request(self.server, "GET", "/admin", cookie=self.admin)
+            self.assertEqual(status, 200)
+            self.assertIn("/admin/inbox/discord", page)
+            self.assertIn("i-plat-discord", page)
+            self.assertNotIn("/admin/inbox/slack", page)  # 未启用的机器人平台不显示
+            self.assertNotIn("/admin/inbox/langbot", page)  # 路由节点不再是模块
+            status, _, page = form_request(self.server, "GET", "/admin/inbox/discord", cookie=self.admin)
+            self.assertEqual(status, 200)
+            self.assertIn("已接入（LangBot），还没有消息", page)
+        finally:
+            self.mock.bots = []
+            _LANGBOT_PLATFORMS_CACHE["at"] = 0.0
 
     def test_platform_label_normalization_and_name_fallback(self):
         """适配器名归一化（TelegramAdapter/telegram→Telegram）与无姓名回退（「Telegram 用户 <ID>」）。"""

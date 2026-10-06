@@ -47,6 +47,7 @@ from app import (  # noqa: E402
 )
 import mock_whatsapp  # noqa: E402
 from test_langbot_bridge import _LangBotMock  # noqa: E402
+from app import _LANGBOT_PLATFORMS_CACHE  # noqa: E402
 
 
 def form_request(server, method, path, fields=None, cookie=None):
@@ -294,6 +295,7 @@ class ChannelConsoleTests(unittest.TestCase):
         # 凭证环境变量在用例内受控：默认清空，避免本机残留影响断言。
         self._env_names = ("LANGBOT_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM")
         self._saved_env = {name: os.environ.pop(name, None) for name in self._env_names}
+        _LANGBOT_PLATFORMS_CACHE["at"] = 0.0  # LangBot 平台接入缓存清零，保证断言确定性
 
     def tearDown(self):
         for name, value in self._saved_env.items():
@@ -305,12 +307,14 @@ class ChannelConsoleTests(unittest.TestCase):
     def test_nav_modules_and_channels_entry(self):
         status, _, page = form_request(self.server, "GET", "/admin", cookie=self.admin)
         self.assertEqual(status, 200)
-        for text in ("会话收件箱", "网站聊天", "WhatsApp", "LangBot", "渠道接入"):
+        for text in ("会话收件箱", "网站聊天", "WhatsApp", "渠道接入"):
             self.assertIn(text, page)
         status, _, page = form_request(self.server, "GET", "/admin", cookie=self.inbox_emp)
         self.assertEqual(status, 200)
         self.assertIn("会话收件箱", page)
-        self.assertIn("/admin/inbox/langbot", page)
+        self.assertIn("/admin/inbox/web", page)
+        self.assertIn("/admin/inbox/whatsapp", page)  # 原生渠道模块常显（未接入 → 空态指引）
+        self.assertNotIn("/admin/inbox/langbot", page)  # 路由节点不再是收件箱模块
         self.assertNotIn("渠道接入", page)  # 渠道接入仅管理员可见
         status, _, page = form_request(self.server, "GET", "/admin", cookie=self.nomod)
         self.assertNotIn("会话收件箱", page)
@@ -319,17 +323,27 @@ class ChannelConsoleTests(unittest.TestCase):
         # 渠道状态在用例间共享：先统一关到「未启用」，避免依赖执行顺序。
         self.db.set_channel_enabled("demo-tenant", "langbot", False, "setup")
         self.db.set_channel_enabled("demo-tenant", "whatsapp", False, "setup")
-        for section, marker in (("web", "网站聊天"), ("langbot", "渠道未启用"), ("whatsapp", "渠道未启用")):
+        # 来源平台重构：旧「LangBot」模块 URL 已退役；WhatsApp 为原生模块（未启用 → 空态指引）
+        status, _, _ = form_request(self.server, "GET", "/admin/inbox/langbot", cookie=self.inbox_emp)
+        self.assertEqual(status, 404)
+        for section, marker in (("web", "网站聊天"), ("whatsapp", "渠道未启用")):
             status, _, page = form_request(self.server, "GET", f"/admin/inbox/{section}", cookie=self.inbox_emp)
             self.assertEqual(status, 200, section)
             self.assertIn(marker, page)
         status, _, body = form_request(self.server, "GET", "/admin/inbox/web", cookie=self.nomod)
         self.assertEqual(status, 403)
         self.assertIn("会话收件箱", body)
-        # 管理员可见全部三个子模块
-        for section in ("web", "langbot", "whatsapp"):
+        # 造一个 Telegram 平台会话：平台模块从消息里识别并出现在导航与列表
+        tg_conv = self.db.create_conversation("demo-tenant", "langbot", "en")
+        self.db.bind_channel_identity("demo-tenant", "langbot", "nav-tg-1", "Nav Buyer", tg_conv)
+        self.db.update_channel_identity_meta("demo-tenant", "langbot", "nav-tg-1", {"adapter": "Telegram"})
+        self.db.save_message("demo-tenant", tg_conv, "buyer", "hi from telegram", "buyer_web", channel="langbot", external_message_id="nav-tg-1")
+        for section in ("web", "whatsapp", "telegram"):
             status, _, _ = form_request(self.server, "GET", f"/admin/inbox/{section}", cookie=self.admin)
             self.assertEqual(status, 200, section)
+        status, _, page = form_request(self.server, "GET", "/admin", cookie=self.admin)
+        self.assertIn("/admin/inbox/telegram", page)
+        self.assertIn("i-plat-telegram", page)
         status, _, _ = form_request(self.server, "GET", "/admin/inbox/nonsense", cookie=self.admin)
         self.assertEqual(status, 404)
 
@@ -367,11 +381,17 @@ class ChannelConsoleTests(unittest.TestCase):
             )
         ]
         self.assertEqual(actions, ["channel_configured", "channel_enabled", "channel_disabled"])
-        # 渠道启用后的收件箱状态联动（无凭证 → 如实提示缺少的变量名）
+        # 渠道启用与来源平台模块解耦：LangBot 是接入通道，不再是收件箱模块；平台模块在出现第一个会话后自动出现。
         self.db.set_channel_enabled("demo-tenant", "langbot", True, "demo-admin@example.invalid")
-        status, _, page = form_request(self.server, "GET", "/admin/inbox/langbot", cookie=self.inbox_emp)
-        self.assertIn("凭证未配置", page)
-        self.assertIn("LANGBOT_API_KEY", page)
+        status, _, _ = form_request(self.server, "GET", "/admin/inbox/langbot", cookie=self.inbox_emp)
+        self.assertEqual(status, 404)
+        conv = self.db.create_conversation("demo-tenant", "langbot", "en")
+        self.db.bind_channel_identity("demo-tenant", "langbot", "console-tg-1", "Console Buyer", conv)
+        self.db.update_channel_identity_meta("demo-tenant", "langbot", "console-tg-1", {"adapter": "Telegram"})
+        self.db.save_message("demo-tenant", conv, "buyer", "hello", "buyer_web", channel="langbot", external_message_id="console-tg-1")
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/telegram", cookie=self.inbox_emp)
+        self.assertEqual(status, 200)
+        self.assertIn("Console Buyer", page)
 
     def test_secrets_status_without_leaking_values(self):
         os.environ["LANGBOT_API_KEY"] = "«redacted:lbk-…»"
@@ -488,7 +508,13 @@ class ConversationInboxTests(unittest.TestCase):
         cls.db.save_message("demo-tenant", cls.web_b, "buyer", "hello from second visitor", "website_api")
         cls.langbot_conv = cls.db.create_conversation("demo-tenant", "langbot", "en")
         cls.db.bind_channel_identity("demo-tenant", "langbot", "88002", "Maya (LangBot)", cls.langbot_conv)
+        cls.db.update_channel_identity_meta("demo-tenant", "langbot", "88002", {"adapter": "Telegram"})
         cls.db.save_message("demo-tenant", cls.langbot_conv, "buyer", "hi from langbot", "buyer_web", channel="langbot", external_message_id="lb-1")
+        # 未识别来源（旧数据无平台元数据）→ 归入「其他来源」模块（迁移兜底）
+        cls.other_conv = cls.db.create_conversation("demo-tenant", "langbot", "en")
+        cls.db.bind_channel_identity("demo-tenant", "langbot", "88003", "Older Buyer", cls.other_conv)
+        cls.db.save_message("demo-tenant", cls.other_conv, "buyer", "hi from older import", "buyer_web", channel="langbot", external_message_id="lb-2")
+        _LANGBOT_PLATFORMS_CACHE["at"] = 0.0
         cls.fixture_conv = cls.db.create_conversation("demo-tenant", "demo-fixture", "en")
 
     @classmethod
@@ -544,7 +570,11 @@ class ConversationInboxTests(unittest.TestCase):
         self.assertIn("系统 · 已转交工程师", page)
         self.assertNotIn("工程师回复：建议核对工况后选型", page)  # 前缀剥离，以标签+正文呈现
         self.assertIn("建议核对工况后选型。", page)
-        self.assertIn("AI 自动回复开启", page)
+        # 新聊天界面：AI 开关为 iOS 滑块（开启态=checked）+ 聊天容器结构
+        self.assertIn("AI 自动回复", page)
+        self.assertIn("<input type='checkbox' checked", page)
+        self.assertIn("class='chat-log'", page)
+        self.assertIn("class='chat-composer'", page)
         # 关联业务：询价单链接
         self.assertIn(f"/admin/rfqs/{self.rfq_id}", page)
         self.assertIn("询价单", page)
@@ -569,12 +599,18 @@ class ConversationInboxTests(unittest.TestCase):
         self.assertIn(self.web_a[:6], page)
         self.assertTrue(page.find(self.web_b[:6]) < page.find(self.web_a[:6]))  # 最新在前
         self.assertIn(f"/admin/inbox/web/{self.web_b}", page)  # 列表链接用 URL 段 slug
-        # LangBot 列表：显示绑定买方名，不含网站会话
-        status, _, page = form_request(self.server, "GET", "/admin/inbox/langbot", cookie=self.inbox_emp)
+        # Telegram 平台列表：显示绑定买方名，不含网站会话；图标为平台自身样式
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/telegram", cookie=self.inbox_emp)
         self.assertEqual(status, 200)
         self.assertIn("Maya (LangBot)", page)
+        self.assertIn("i-plat-telegram", page)
         self.assertNotIn(self.web_a[:6], page)
-        # WhatsApp：空态
+        # 未识别来源 → 「其他来源」模块
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/other", cookie=self.inbox_emp)
+        self.assertEqual(status, 200)
+        self.assertIn("Older Buyer", page)
+        self.assertIn("i-plat-generic", page)
+        # WhatsApp：原生模块常显 → 未启用空态
         status, _, page = form_request(self.server, "GET", "/admin/inbox/whatsapp", cookie=self.inbox_emp)
         self.assertEqual(status, 200)
         self.assertIn("渠道未启用", page)
@@ -594,13 +630,27 @@ class ConversationInboxTests(unittest.TestCase):
         self.assertEqual(status, 404)
         status, _, _ = form_request(self.server, "GET", f"/admin/inbox/web/{self.langbot_conv}", cookie=self.inbox_emp)
         self.assertEqual(status, 404)
+        status, _, _ = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.web_a}", cookie=self.inbox_emp)
+        self.assertEqual(status, 404)  # 平台串模块：网站会话不属于 Telegram 模块
+        status, _, _ = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.other_conv}", cookie=self.inbox_emp)
+        self.assertEqual(status, 404)  # 其他来源会话不属于 Telegram 模块
+
+    def test_inbox_nav_platform_modules(self):
+        """侧栏收件箱子模块=来源平台：网站聊天 + Telegram（有数据）+ 其他来源 + WhatsApp（原生常显）。"""
+        status, _, page = form_request(self.server, "GET", "/admin", cookie=self.inbox_emp)
+        self.assertEqual(status, 200)
+        for marker in ("/admin/inbox/web", "/admin/inbox/telegram", "/admin/inbox/whatsapp", "/admin/inbox/other"):
+            self.assertIn(marker, page)
+        self.assertIn("i-plat-telegram", page)
+        self.assertIn("i-plat-whatsapp", page)
+        self.assertNotIn("/admin/inbox/langbot", page)
 
     def test_inbox_reply_channel_delivery_gated(self):
         # 渠道回复走真实发送：未启用渠道时消息仍落库并标记「发送失败」（不再直接拒绝）。
         before = self.db.conn.execute(
             "SELECT COUNT(*) FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=?", (self.langbot_conv,)
         ).fetchone()[0]
-        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{self.langbot_conv}/reply", {"body": "hello"}, self.inbox_emp)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{self.langbot_conv}/reply", {"body": "hello"}, self.inbox_emp)
         self.assertEqual(status, 303)
         self.assertIn("notice=reply_failed", headers.get("Location", ""))
         after = self.db.conn.execute(
@@ -612,7 +662,7 @@ class ConversationInboxTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row["delivery_status"], "failed")
         self.assertIn("渠道未启用", row["delivery_error"])
-        status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{self.langbot_conv}?notice=reply_failed", cookie=self.inbox_emp)
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.langbot_conv}?notice=reply_failed", cookie=self.inbox_emp)
         self.assertIn("发送失败", page)
         self.assertIn("回复发送失败", page)
         # WhatsApp：启用渠道但发送通道未开通 → 同样落库并标记失败（UI 目前不提供入口，直连 POST 验证守卫）
@@ -782,7 +832,7 @@ class ChannelPipelineTests(unittest.TestCase):
         conversation_id = self.conversation_for(4405)
         self.assertTrue(conversation_id)
         # 后台坐席发送询价链接（消息直达渠道）
-        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{conversation_id}/rfq-link", {}, self.admin)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/rfq-link", {}, self.admin)
         self.assertEqual(status, 303)
         self.assertIn("notice=link_sent", headers.get("Location", ""))
         link_row = self.last_message(conversation_id, "rfq-link")
@@ -852,25 +902,25 @@ class ChannelPipelineTests(unittest.TestCase):
         status, _body = self.post_event(4407, "hello", "lb-ev-0408")
         self.assertEqual(status, 200)
         conversation_id = self.conversation_for(4407)
-        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{conversation_id}/reply", {"body": "您好，已收到您的消息。"}, self.admin)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/reply", {"body": "您好，已收到您的消息。"}, self.admin)
         self.assertEqual(status, 303)
         self.assertIn("notice=sent", headers.get("Location", ""))
         self.assertIn("您好，已收到您的消息。", self.sent_texts(4407))
         row = self.last_message(conversation_id, "staff-reply")
         self.assertEqual(row["delivery_status"], "sent")
         self.assertEqual(row["actor_email"], "demo-admin@example.invalid")
-        status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{conversation_id}?notice=sent", cookie=self.admin)
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{conversation_id}?notice=sent", cookie=self.admin)
         self.assertIn("已发送", page)
         # 失败可见：临时把模拟地址指向不可达端口
         os.environ["LANGBOT_API_BASE"] = "http://127.0.0.1:9"
         try:
-            status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{conversation_id}/reply", {"body": "这条会失败。"}, self.admin)
+            status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/reply", {"body": "这条会失败。"}, self.admin)
             self.assertEqual(status, 303)
             self.assertIn("notice=reply_failed", headers.get("Location", ""))
             row = self.last_message(conversation_id, "staff-reply")
             self.assertEqual(row["delivery_status"], "failed")
             self.assertIn("网络请求失败", row["delivery_error"])
-            status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{conversation_id}?notice=reply_failed", cookie=self.admin)
+            status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{conversation_id}?notice=reply_failed", cookie=self.admin)
             self.assertIn("发送失败：网络请求失败", page)
         finally:
             os.environ["LANGBOT_API_BASE"] = self.mock.url
@@ -911,6 +961,8 @@ class OutboundBusTests(unittest.TestCase):
         # 会话 C：主动门控（独立，避免串扰）
         cls.conv_c = cls.db.create_conversation("demo-tenant", "langbot", "en")
         cls.db.bind_channel_identity("demo-tenant", "langbot", "71003", "Gate Buyer", cls.conv_c)
+        for ext in ("71001", "71002", "71003"):
+            cls.db.update_channel_identity_meta("demo-tenant", "langbot", ext, {"adapter": "Telegram"})
         # WhatsApp 回执基座：Twilio 状态回调（sent → delivered）为 WhatsApp 落地预留，用合成行验证
         cls.wa_conv = cls.db.create_conversation("demo-tenant", "whatsapp", "en")
         cls.db.bind_channel_identity("demo-tenant", "whatsapp", "wa-bus", "Wa Bus", cls.wa_conv)
@@ -982,24 +1034,24 @@ class OutboundBusTests(unittest.TestCase):
             os.environ["LANGBOT_API_BASE"] = self.mock.url
         self.assertFalse(sent)
         # 列表：显示「N 条发送失败」徽标
-        status, _, page = form_request(self.server, "GET", "/admin/inbox/langbot", cookie=self.admin)
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/telegram", cookie=self.admin)
         self.assertIn("1 条发送失败", page)
         # 详情：失败原因 + 「重试发送」按钮
-        status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{self.conv_a}", cookie=self.admin)
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.conv_a}", cookie=self.admin)
         self.assertIn("发送失败：网络请求失败", page)
         self.assertIn("重试发送", page)
-        self.assertIn(f"/admin/inbox/langbot/{self.conv_a}/messages/{message_id}/retry", page)
+        self.assertIn(f"/admin/inbox/telegram/{self.conv_a}/messages/{message_id}/retry", page)
         # 点重试（真实 UI 表单 POST）→ 成功公告 + 消息可送达
-        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{self.conv_a}/messages/{message_id}/retry", {}, self.admin)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{self.conv_a}/messages/{message_id}/retry", {}, self.admin)
         self.assertEqual(status, 303)
         self.assertIn("notice=retried_ok", headers.get("Location", ""))
         self.assertEqual(self.message_row(message_id)["delivery_status"], "sent")
         self.assertIn("总线测试消息二", self.sent_texts(71001))
-        status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{self.conv_a}?notice=retried_ok", cookie=self.admin)
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.conv_a}?notice=retried_ok", cookie=self.admin)
         self.assertIn("重试成功", page)
         # 已成功消息再点重试（直接 POST）→ 幂等提示，不重发
         before = len(self.mock.sent_messages())
-        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{self.conv_a}/messages/{message_id}/retry", {}, self.admin)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{self.conv_a}/messages/{message_id}/retry", {}, self.admin)
         self.assertIn("notice=retry_already", headers.get("Location", ""))
         self.assertEqual(before, len(self.mock.sent_messages()))
 
