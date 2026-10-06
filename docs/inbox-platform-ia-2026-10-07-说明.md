@@ -1,0 +1,50 @@
+# 收件箱信息架构（来源平台化）+ 会话详情页聊天界面 · 说明（2026-10-07）
+
+## 背景
+用户 UI 意见（两点）：
+1. 收件箱下用「LangBot」当信息来源分类有误导性（它是路由节点，不是业务来源）；
+   应显示消息的**真实来源平台**（Telegram 显示 Telegram 模块），图标沿用现有风格但用平台自身样式；
+2. 会话详情页改成主流社媒聊天界面；AI 自动回复开关改 iOS 滑块。
+
+用户拍板补充（两问）：
+- WhatsApp 模块**保留**（空态指引；不等有数据才出现）
+- 平台模块显示时机：**有数据的 + 已接入但无消息的**都显示（空态页）
+
+## 信息架构（现在）
+```
+会话收件箱
+ ├─ 网站聊天            （固定）
+ ├─ Telegram           （从消息 adapter 识别 / LangBot 已接入）
+ ├─ WhatsApp           （原生渠道，常显；未配置 → 空态指引）
+ ├─ 微信 / Discord / … （接一个出现一个）
+ └─ 其他来源            （旧数据无元数据时兜底）
+```
+- 模块 URL = 平台 slug：`/admin/inbox/telegram`、`/admin/inbox/whatsapp`…
+- 旧 `/admin/inbox/langbot` 退役（404）；LangBot 仅保留在「渠道接入」配置面
+- 权限仍按「会话收件箱」一个模块统一授权
+
+## 平台识别
+- 收信时 adapter 归一后落 `channel_identities.platform_meta.adapter`（既有机制）
+- 模块归属按该字段（SQL 用 `json_valid` 守卫，容忍空串旧数据）
+- LangBot 已接入探测：GET `/api/v1/platform/bots`（启用中的机器人）→ 「已接入未收消息」平台模块；30s 缓存，故障静默
+- 注册表：telegram / whatsapp / wechat / wecom / wecomcs / discord / line / feishu；未知自动生成通用条目
+
+## 会话详情（聊天界面）
+- 结构：会话头（头像 + 名称 + 平台/用户ID/条数/开始时间 + AI 滑块）→ chips（关联业务 + 发送询价链接）→ 消息区 → 底部输入栏
+- 消息朝向：左=买方｜右=AI/人工（人工绿描边 + 回复人标注）｜中=系统
+- AI 开关：iOS 风格滑块（纯 CSS，`onchange` 自动提交，路由与语义不变）
+- 投递状态与「重试发送」保留在消息元信息行
+- 移动端（390 宽）抽查通过
+
+## 运维与回滚
+- 部署形态不变（单进程 + demo 启动器）
+- 回滚：git revert 本波两个提交即可（无数据库迁移）
+- 环境变量：新增无（LangBot 探测复用既有 LANGBOT_API_KEY / LANGBOT_API_BASE）
+
+## 测试
+- 全量 329 项通过（+2：bridge 平台模块/空态口径、channels 侧栏平台模块）
+- 收件箱全部用例从「通道」路径迁移到「平台」路径（telegram/other/whatsapp）
+
+## 诚实边界
+- WhatsApp 尚无真实流量（Twilio 未接入），模块为空态占位——按用户拍板保留
+- 「已接入未收消息」依赖 LangBot 控制面可达；不可达时退回「有数据的平台」列表（静默）
