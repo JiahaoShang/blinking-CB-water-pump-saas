@@ -1,5 +1,4 @@
 """试点校验脚本的冒烟与负例测试：确保每个 check_* 脚本在真库与坏数据上行为正确。"""
-import shutil
 import sqlite3
 import subprocess
 import sys

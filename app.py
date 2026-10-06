@@ -20,7 +20,6 @@ import os
 import re
 import secrets
 import sqlite3
-import tempfile
 import hmac
 from datetime import datetime, timedelta, timezone
 from email.parser import BytesParser
@@ -118,6 +117,7 @@ CONTACT_CONSENT_SOURCE_LABELS = {
     "inquiry": "旧询价页",
     "telegram_link": "Telegram 询价链接",
     "whatsapp_link": "WhatsApp 询价链接",
+    "langbot_link": "LangBot 询价链接",
     "offline": "线下登记（销售已确认）",
 }
 # 跨站会话交接（一次性交接码）：官网聊天（来源 A）与平台产品页（来源 B）不同来源时，
@@ -5285,7 +5285,6 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
         )),
         ("会话收件箱", (
             ("inbox_web", "/admin/inbox/web", "chat", "网站聊天"),
-            ("inbox_telegram", "/admin/inbox/telegram", "send", "Telegram"),
             ("inbox_whatsapp", "/admin/inbox/whatsapp", "phone", "WhatsApp"),
             ("inbox_langbot", "/admin/inbox/langbot", "send", "LangBot"),
         )),
@@ -5302,7 +5301,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("audit", "/admin/audit", "history", "操作记录"),
         )),
     )
-    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "creative": "创意中心", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "channels": "设置与治理", "audit": "设置与治理", "analytics": "经营分析", "inbox_web": "会话收件箱", "inbox_telegram": "会话收件箱", "inbox_whatsapp": "会话收件箱", "inbox_langbot": "会话收件箱"}
+    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "creative": "创意中心", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "channels": "设置与治理", "audit": "设置与治理", "analytics": "经营分析", "inbox_web": "会话收件箱", "inbox_whatsapp": "会话收件箱", "inbox_langbot": "会话收件箱"}
     role_label = "管理员" if role == "admin" else ("员工" if role else "未登录")
     lang_target = f"{esc(path)}?lang={'en' if lang == 'zh' else 'zh'}"
     counts = nav_counts or {}
@@ -5398,22 +5397,21 @@ MODULE_LABELS = dict(GRANTABLE_MODULES)
 # 旧角色名兼容（旧库迁移与既有测试）：等价于"员工 + 对应模块授权"，能力与迁移前一致。
 LEGACY_ROLE_MODULES = {"sales": ("rfqs", "sales"), "engineer": ("tasks", "rfqs", "sales")}
 
-# ── V1-04 外部渠道接入（Telegram / WhatsApp）：渠道账户与会话收件箱 ──────────────
+# ── V1-04 外部渠道接入（WhatsApp / LangBot）：渠道账户与会话收件箱 ──────────────
 # 渠道消息与网页聊天共用同一批会话/消息对象；渠道账户只存公开配置，
 # 机密凭证（bot 令牌 / Twilio 凭据）一律走本机环境变量读取，不入库、不落 Git、不回显。
-CHANNEL_KEYS = ("telegram", "whatsapp", "langbot")
-CHANNEL_LABELS = {"telegram": "Telegram", "whatsapp": "WhatsApp", "langbot": "LangBot"}
+CHANNEL_KEYS = ("whatsapp", "langbot")
+CHANNEL_LABELS = {"whatsapp": "WhatsApp", "langbot": "LangBot"}
 # 会话收件箱的子模块（导航分别展示；web=网站聊天；langbot=LangBot 接入的社交平台）
-INBOX_SECTIONS = (("inbox_web", "web", "网站聊天"), ("inbox_telegram", "telegram", "Telegram"), ("inbox_whatsapp", "whatsapp", "WhatsApp"), ("inbox_langbot", "langbot", "LangBot"))
+INBOX_SECTIONS = (("inbox_web", "web", "网站聊天"), ("inbox_whatsapp", "whatsapp", "WhatsApp"), ("inbox_langbot", "langbot", "LangBot"))
 INBOX_SECTION_CHANNELS = {key: channel for key, channel, _label in INBOX_SECTIONS}
 INBOX_SECTION_LABELS = {key: label for key, _channel, label in INBOX_SECTIONS}
 CHANNEL_SECRET_ENV = {
-    "telegram": ("TELEGRAM_BOT_TOKEN",),
     "whatsapp": ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM"),
     "langbot": ("LANGBOT_API_KEY",),
 }
 # 模拟/测试用基地址（生产不设置即用官方默认）；适配器在后续切片接入。
-CHANNEL_API_BASE_ENV = {"telegram": "TELEGRAM_API_BASE", "whatsapp": "TWILIO_API_BASE", "langbot": "LANGBOT_API_BASE"}
+CHANNEL_API_BASE_ENV = {"whatsapp": "TWILIO_API_BASE", "langbot": "LANGBOT_API_BASE"}
 
 
 def channel_secret_status(channel: str) -> dict:
@@ -5423,13 +5421,12 @@ def channel_secret_status(channel: str) -> dict:
     return {"configured": not missing, "missing": missing}
 
 
-# ── V1-04 切片③：Telegram 全链路（收信 / 自动问答 / 人工转交 / 回复直达 / RFQ 填写链接） ──
-# 收信：本地长轮询（tools/channels/telegram_poller.py）与 Webhook（生产）共用 handle_telegram_update；
+# ── V1-04 切片③④：渠道全链路（收信 / 自动问答 / 人工转交 / 回复直达 / RFQ 填写链接） ──
+# 收信经各渠道入口进入（LangBot Webhook / WhatsApp 回调），统一走 process_channel_message；
 # 出站：发送适配器把已保存的消息投递到渠道（delivery_status = queued → sent / failed，失败原因可见）；
 # 分流：与网页聊天同口径——工程师追问优先、暂停 AI 不自动答复、「人工」转交、「确认」确认工况并匹配、
 #       提问样文本走有据问答（资料外给转人工提示）、其余走需求识别与整理。
-CHANNEL_WEBHOOK_SECRET_ENV = {"telegram": "TELEGRAM_WEBHOOK_SECRET"}
-CHANNEL_OFFICIAL_API_BASE = {"telegram": "https://api.telegram.org/bot", "langbot": "http://127.0.0.1:5300"}
+CHANNEL_OFFICIAL_API_BASE = {"langbot": "http://127.0.0.1:5300"}
 # 渠道内提示文案（入库即不可变：只描述可用动作，不作状态承诺）
 CHANNEL_HUMAN_HINT = "如需工程师人工核实，请回复「人工」。"
 CHANNEL_HUMAN_GUIDE = "还没有待核实的问题。请先发送您想核实的具体问题，再回复「人工」转交工程师。"
@@ -5705,31 +5702,9 @@ def channel_http_json(url: str, payload: dict, timeout: int = 10, headers: dict 
     return data
 
 
-def telegram_api_call(base_url: str, token: str, method: str, payload: dict, timeout: int = 10) -> dict:
-    """调用 Telegram Bot API；非 ok 一律转成可展示的中文错误。token 只在本函数内使用、绝不落库落屏。
-
-    地址约定：base_url 以 /bot 结尾（官方与模拟服务一致），令牌直接拼在其后。
-    """
-    data = channel_http_json(f"{base_url}{token}/{method}", payload, timeout=timeout)
-    if not data.get("ok"):
-        raise ChannelSendError(str(data.get("description") or "渠道接口返回失败"))
-    return data
-
 
 def send_channel_text(channel: str, config: dict, external_user_id: str, text: str) -> str:
     """向渠道发送一条文本，返回外部消息 ID。凭证缺失/未开通时明确报错（fail-closed）。"""
-    if channel == "telegram":
-        token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-        if not token:
-            raise ChannelSendError("缺少环境变量 TELEGRAM_BOT_TOKEN")
-        chat_id: object = external_user_id
-        try:
-            chat_id = int(external_user_id)
-        except (TypeError, ValueError):
-            pass
-        data = telegram_api_call(channel_api_base(channel, config), token, "sendMessage", {"chat_id": chat_id, "text": text})
-        result = data.get("result") or {}
-        return str(result.get("message_id") or "")
     if channel == "langbot":
         # LangBot 纯传输层：经其发送接口把文本投递到原平台（target_id = 平台侧用户 ID）。
         api_key = os.environ.get("LANGBOT_API_KEY", "").strip()
@@ -6073,25 +6048,6 @@ def process_channel_message(db: Database, ai, tenant_id: str, channel: str, exte
     result["action"] = "extracted"
     return result
 
-
-def handle_telegram_update(db: Database, ai, tenant_id: str, update: dict) -> dict | None:
-    """Telegram update → 渠道消息处理（长轮询与 Webhook 共用入口）。"""
-    if not isinstance(update, dict):
-        return None
-    message = update.get("message") or {}
-    if not isinstance(message, dict):
-        return None
-    text = message.get("text")
-    chat = message.get("chat") or {}
-    chat_id = chat.get("id")
-    message_id = message.get("message_id")
-    if not isinstance(text, str) or not text.strip() or chat_id is None or message_id is None:
-        return None
-    sender = message.get("from") or {}
-    display_name = str(sender.get("first_name") or sender.get("username") or f"Telegram {chat_id}").strip()
-    if sender.get("username"):
-        display_name = f"{display_name} (@{sender['username']})"
-    return process_channel_message(db, ai, tenant_id, "telegram", str(chat_id), display_name, text, f"{chat_id}:{message_id}")
 
 
 def handle_langbot_event(db: Database, ai, tenant_id: str, event: dict) -> dict | None:
@@ -6839,9 +6795,9 @@ class Handler(BaseHTTPRequestHandler):
         for module_key in GRANTABLE_MODULE_KEYS:
             if self.has_module(module_key):
                 keys.add(module_key)
-        # 会话收件箱一个模块对应四个导航子模块（网站聊天 / Telegram / WhatsApp / LangBot）。
+        # 会话收件箱一个模块对应三个导航子模块（网站聊天 / WhatsApp / LangBot）。
         if self.has_module("inbox"):
-            keys.update({"inbox_web", "inbox_telegram", "inbox_whatsapp", "inbox_langbot"})
+            keys.update({"inbox_web", "inbox_whatsapp", "inbox_langbot"})
         return keys
 
     def login_page(self, query: dict[str, list[str]], error: str = "") -> None:
@@ -7040,11 +6996,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/audit":
             self.admin_audit(query)
             return
-        match = re.fullmatch(r"/admin/inbox/(web|telegram|whatsapp|langbot)", path)
+        match = re.fullmatch(r"/admin/inbox/(web|whatsapp|langbot)", path)
         if match:
             self.admin_inbox(f"inbox_{match.group(1)}", query)
             return
-        match = re.fullmatch(r"/admin/inbox/(web|telegram|whatsapp|langbot)/([a-f0-9]+)", path)
+        match = re.fullmatch(r"/admin/inbox/(web|whatsapp|langbot)/([a-f0-9]+)", path)
         if match:
             self.admin_inbox_conversation(f"inbox_{match.group(1)}", match.group(2), query)
             return
@@ -7767,10 +7723,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/logout":
             self.logout()
             return
-        telegram_hook_match = re.fullmatch(r"/api/v1/channels/telegram/webhook/([A-Za-z0-9_-]{8,64})", path)
-        if telegram_hook_match:
-            self.handle_telegram_webhook(telegram_hook_match.group(1))
-            return
         langbot_hook_match = re.fullmatch(r"/api/v1/channels/langbot/webhook/([A-Za-z0-9_-]{16,96})", path)
         if langbot_hook_match:
             self.handle_langbot_webhook(langbot_hook_match.group(1))
@@ -8216,21 +8168,10 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 self.admin_creative_restore_defaults(match.group(1))
                 return
-            match = re.fullmatch(r"/admin/channels/(telegram|whatsapp|langbot)", path)
+            match = re.fullmatch(r"/admin/channels/(whatsapp|langbot)", path)
             if match:
                 channel = match.group(1)
-                if channel == "telegram":
-                    existing = self.db.get_channel_account(self.tenant_id, channel)
-                    try:
-                        existing_config = json.loads(existing["config_json"]) if existing else {}
-                    except (json.JSONDecodeError, TypeError):
-                        existing_config = {}
-                    config = {
-                        "bot_username": str(form.get("bot_username", "")).strip()[:64],
-                        # Webhook 收信地址令牌：首次保存时生成、此后保持稳定。
-                        "webhook_id": str(existing_config.get("webhook_id") or secrets.token_hex(16)),
-                    }
-                elif channel == "langbot":
+                if channel == "langbot":
                     existing = self.db.get_channel_account(self.tenant_id, channel)
                     try:
                         existing_config = json.loads(existing["config_json"]) if existing else {}
@@ -8246,7 +8187,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.db.save_channel_account(self.tenant_id, channel, config, self.actor)
                 self.redirect("/admin/channels?notice=saved")
                 return
-            match = re.fullmatch(r"/admin/channels/(telegram|whatsapp|langbot)/toggle", path)
+            match = re.fullmatch(r"/admin/channels/(whatsapp|langbot)/toggle", path)
             if match:
                 channel = match.group(1)
                 account = self.db.get_channel_account(self.tenant_id, channel)
@@ -8267,18 +8208,18 @@ class Handler(BaseHTTPRequestHandler):
                         f"&created={stats['created']}&updated={stats['updated']}&deleted={stats['deleted']}&skipped={stats['skipped']}&failed={stats['failed']}"
                     )
                 return
-            match = re.fullmatch(r"/admin/inbox/(web|telegram|whatsapp|langbot)/([a-f0-9]+)/(reply|ai-toggle)", path)
+            match = re.fullmatch(r"/admin/inbox/(web|whatsapp|langbot)/([a-f0-9]+)/(reply|ai-toggle)", path)
             if match:
                 if match.group(3) == "reply":
                     self.admin_inbox_reply(f"inbox_{match.group(1)}", match.group(2), form)
                 else:
                     self.admin_inbox_ai_toggle(f"inbox_{match.group(1)}", match.group(2))
                 return
-            match = re.fullmatch(r"/admin/inbox/(telegram|whatsapp|langbot)/([a-f0-9]+)/rfq-link", path)
+            match = re.fullmatch(r"/admin/inbox/(whatsapp|langbot)/([a-f0-9]+)/rfq-link", path)
             if match:
                 self.admin_inbox_rfq_link(match.group(1), match.group(2))
                 return
-            match = re.fullmatch(r"/admin/inbox/(web|telegram|whatsapp|langbot)/([a-f0-9]+)/messages/([a-f0-9]+)/retry", path)
+            match = re.fullmatch(r"/admin/inbox/(web|whatsapp|langbot)/([a-f0-9]+)/messages/([a-f0-9]+)/retry", path)
             if match:
                 self.admin_inbox_message_retry(f"inbox_{match.group(1)}", match.group(2), match.group(3))
                 return
@@ -9314,43 +9255,7 @@ class Handler(BaseHTTPRequestHandler):
         ).fetchone()
         return f"（{row['assigned_to']}）" if row and row["assigned_to"] else ""
 
-    # ── V1-04 切片③：Telegram Webhook 收信 / RFQ 填写链接公开页 / 任务回复投递 ──────
-    def handle_telegram_webhook(self, hook_id: str) -> None:
-        """Telegram Webhook 收信：按 hook_id 定位企业，校验密钥头，处理后返回 200。
-
-        - 密钥只从环境变量读取（TELEGRAM_WEBHOOK_SECRET）；未设置或校验失败一律 403（fail-closed）。
-        - 渠道停用时 200 skipped（避免 Telegram 反复重试）；处理失败返回 500 让其按策略重试，
-          同一消息的重试由消息去重兜底。
-        """
-        account = None
-        for row in self.db.conn.execute("SELECT * FROM channel_accounts WHERE channel='telegram'").fetchall():
-            try:
-                config = json.loads(row["config_json"] or "{}")
-            except json.JSONDecodeError:
-                config = {}
-            if config.get("webhook_id") == hook_id:
-                account = row
-                break
-        if not account:
-            self.send_json({"ok": False, "error": "webhook_not_found"}, 404)
-            return
-        secret = os.environ.get(CHANNEL_WEBHOOK_SECRET_ENV["telegram"], "").strip()
-        supplied = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if not secret or not hmac.compare_digest(supplied, secret):
-            self.send_json({"ok": False, "error": "secret_token_mismatch"}, 403)
-            return
-        if account["status"] != "enabled":
-            self.send_json({"ok": True, "skipped": "channel_disabled"}, 200)
-            return
-        payload = self.read_json()
-        if payload is None:
-            return
-        try:
-            outcome = handle_telegram_update(self.db, self.ai, account["tenant_id"], payload)
-        except Exception:
-            self.send_json({"ok": False, "error": "processing_failed"}, 500)
-            return
-        self.send_json({"ok": True, "outcome": (outcome or {}).get("action", "ignored")}, 200)
+    # ── V1-04 切片③④：渠道收信入口（LangBot Webhook）/ RFQ 填写链接公开页 / 任务回复投递 ──
 
     def handle_langbot_webhook(self, token: str) -> None:
         """LangBot Webhook 收信：URL 令牌即凭据（LangBot 不签名，fail-closed）。
@@ -9520,7 +9425,7 @@ class Handler(BaseHTTPRequestHandler):
         if not channel:
             self.send_html(self.console_page("未找到", "<div class='error'>页面不存在。</div>", ""), 404)
             return
-        slug = section.removeprefix("inbox_")  # URL 段只用 web/telegram/whatsapp（section=inbox_web 仅供内部导航键）
+        slug = section.removeprefix("inbox_")  # URL 段只用 web/whatsapp/langbot（section=inbox_web 仅供内部导航键）
         label = INBOX_SECTION_LABELS[section]
         if channel == "web":
             source_where, params = "c.source IN ('web','website_api')", ()
@@ -9672,7 +9577,7 @@ class Handler(BaseHTTPRequestHandler):
             reply_html = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>回复买方</h2><span class='muted'>立即出现在买方网站聊天窗口</span></div>
 <form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/reply'><textarea name='body' required maxlength='4000' placeholder='输入回复内容…'></textarea>
 <p style='margin-top:10px'><button>发送回复</button></p></form></section>"""
-        elif channel in ("telegram", "langbot"):
+        elif channel == "langbot":
             reply_html = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>回复买方</h2><span class='muted'>经 {esc(label)} 直达买方聊天窗口</span></div>
 <form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/reply'><textarea name='body' required maxlength='4000' placeholder='输入回复内容…'></textarea>
 <p style='margin-top:10px'><button>发送回复</button></p></form></section>"""
@@ -9680,7 +9585,7 @@ class Handler(BaseHTTPRequestHandler):
             reply_html = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>回复买方</h2></div>
 <div class='muted-block'>{esc(label)} 的发送通道将在后续切片上线后开放；当前阶段可以查看记录与调整 AI 开关。</div>
 <textarea disabled placeholder='发送通道未开通'></textarea></section>"""
-        if channel in ("telegram", "langbot"):
+        if channel == "langbot":
             rfq_card = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>询价填写链接</h2><span class='muted'>买方点开后可随时填写与修改</span></div>
 <p class='muted' style='margin:0 0 10px'>给买方发送一条带链接的消息；买方打开填写后，询价进入销售工作台。</p>
 <form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/rfq-link'><p style='margin:0'><button class='secondary'>发送询价填写链接</button></p></form></section>"""
@@ -9702,7 +9607,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_html(self.console_page(f"{label}会话", body, section))
 
     def admin_inbox_reply(self, section: str, conversation_id: str, form: dict) -> None:
-        """收件箱直接回复：网站聊天即时可见；Telegram 经发送器直达买方（失败可见）。"""
+        """收件箱直接回复：网站聊天即时可见；渠道会话经发送器直达买方（失败可见）。"""
         channel = INBOX_SECTION_CHANNELS.get(section)
         slug = section.removeprefix("inbox_")
         conversation = channel and self.db.get_conversation(self.tenant_id, conversation_id)
@@ -9761,7 +9666,7 @@ class Handler(BaseHTTPRequestHandler):
         self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice={notice}")
 
     def admin_channels(self, query: dict[str, list[str]]) -> None:
-        """渠道接入页（管理员）：配置与启停 Telegram / WhatsApp；凭证只读环境变量状态、不回显值。"""
+        """渠道接入页（管理员）：配置与启停 WhatsApp / LangBot；凭证只读环境变量状态、不回显值。"""
         accounts = self.db.list_channel_accounts(self.tenant_id)
         notices = {
             "saved": "<div class='notice'>渠道配置已保存。</div>",
@@ -9779,7 +9684,6 @@ class Handler(BaseHTTPRequestHandler):
         elif notice_code == "kb_not_configured":
             notice = "<div class='notice'>知识库同步尚未配置（需本机变量 DIFY_KB_DATASET_ID 与 DIFY_KB_API_KEY）。</div>"
         guides = {
-            "telegram": "【已退役：对客入口统一由 LangBot 单轨承接，本渠道停用保留回滚；以下为历史配置说明。】在 Telegram 里找 @BotFather 新建机器人 → 把机器人令牌写进本机环境变量 TELEGRAM_BOT_TOKEN（服务端读取，不入库、不回显）→ 回到这里填写机器人用户名并启用。收信两种方式都可用：本地长轮询（下方命令，无需公网地址）或 Webhook（需再设置一个密钥变量并注册下方地址）。",
             "whatsapp": "走 Twilio：开通 WhatsApp 沙箱（手机发送加入码即可参与测试）→ 把 Account SID、Auth Token、（whatsapp: 前缀的）发送号码写进本机环境变量 TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM → 回到这里填写显示名称并启用。收信需要一条公网回调地址，联调时使用临时隧道。",
             "langbot": "试验通道（本机）：LangBot 负责对接各社交平台并把消息推送进来，平台处理后的回复经 LangBot 发送接口直达买方。步骤：① 本机环境变量设置 LANGBOT_API_KEY（LangBot 面板「API Keys」生成）② 在 LangBot 面板把上方收信地址登记为 Webhook 并启用 ③ 回到这里填写 bot_uuid 并启用渠道。",
         }
@@ -9796,9 +9700,7 @@ class Handler(BaseHTTPRequestHandler):
                 secret_badge = "<span class='badge approved'>凭证已配置</span>"
             else:
                 secret_badge = f"<span class='badge pending_review'>凭证未配置：{esc('、'.join(secret['missing']))}</span>"
-            if channel == "telegram":
-                field = f"<label>机器人用户名（公开显示）<input name='bot_username' value='{esc(str(config.get('bot_username', '')))}' placeholder='例如 @YourSellerBot'></label>"
-            elif channel == "langbot":
+            if channel == "langbot":
                 field = f"<label>机器人标识 bot_uuid（在 LangBot 面板复制）<input name='bot_uuid' value='{esc(str(config.get('bot_uuid', '')))}' placeholder='例如 78099cc7-…'></label>"
             else:
                 field = f"<label>显示名称（公开显示）<input name='display_name' value='{esc(str(config.get('display_name', '')))}' placeholder='例如 星海泵业'></label>"
@@ -9806,13 +9708,7 @@ class Handler(BaseHTTPRequestHandler):
             toggle_class = "warn" if enabled else ""
             receive_block = ""
             kb_block = ""
-            if channel == "telegram":
-                webhook_id = str(config.get("webhook_id", ""))
-                hook_secret_ok = bool(os.environ.get(CHANNEL_WEBHOOK_SECRET_ENV["telegram"], "").strip())
-                hook_url = f"http://{host}/api/v1/channels/telegram/webhook/{webhook_id}" if webhook_id else "（保存配置后生成）"
-                hook_secret_label = "已设置" if hook_secret_ok else f"未设置（需本机变量 {CHANNEL_WEBHOOK_SECRET_ENV['telegram']}）"
-                receive_block = f"""<div class='field-state' style='margin-top:8px'><b>已退役（2026-10-07）</b>：对客入口统一由 LangBot 单轨承接；本渠道停用、不再收发，历史会话保留，代码保留可回滚。<br><b>历史说明</b>：本地长轮询 <code>python3 tools/channels/telegram_poller.py --db data/demo.db</code>；Webhook 地址 <code>{esc(hook_url)}</code>（密钥状态：{esc(hook_secret_label)}）。</div>"""
-            elif channel == "langbot":
+            if channel == "langbot":
                 token = str(config.get("webhook_token", ""))
                 api_ok = bool(os.environ.get("LANGBOT_API_KEY", "").strip())
                 port = host.split(":")[-1] if ":" in host else "8137"
@@ -9820,7 +9716,7 @@ class Handler(BaseHTTPRequestHandler):
                 api_label = "已设置" if api_ok else "未设置（需本机变量 LANGBOT_API_KEY）"
                 receive_block = (
                     f"<div class='field-state' style='margin-top:8px'><b>链路状态（试验）</b>：把下面的地址登记到 LangBot「API 集成 › Webhooks」并启用，消息即进入本平台收件箱（本机 LangBot 在 Docker 内，故用 host.docker.internal；其它部署换成可达地址）。<br>"
-                    f"收信地址 <code>{esc(hook_url)}</code>；发送 API Key 状态：{esc(api_label)}。<br><b>已支持</b>：与 Telegram 同口径（自动问答、转人工、卖家回复直达、询价链接）。</div>"
+                    f"收信地址 <code>{esc(hook_url)}</code>；发送 API Key 状态：{esc(api_label)}。<br><b>已支持</b>：自动问答、转人工、卖家回复直达、询价链接。</div>"
                 )
                 qa_ok = bool(os.environ.get("DIFY_QA_APP_KEY", "").strip())
                 kb_ok = bool(os.environ.get("DIFY_KB_DATASET_ID", "").strip() and os.environ.get("DIFY_KB_API_KEY", "").strip())
@@ -9854,10 +9750,10 @@ class Handler(BaseHTTPRequestHandler):
 <p class='field-state'>机密凭证只从本机环境变量读取：页面不显示、数据库不保存、不进 Git；启用/停用与配置变更全部写入操作记录。</p>
 </section>""")
         body = f"""
-<div class='toolbar'><div><h1>渠道接入</h1><div class='muted'>把 Telegram / WhatsApp 变成买方入口：消息进「会话收件箱」，回复从平台发出。</div></div></div>
+<div class='toolbar'><div><h1>渠道接入</h1><div class='muted'>把社交平台（经 LangBot）与 WhatsApp 变成买方入口：消息进「会话收件箱」，回复从平台发出。</div></div></div>
 {notice}
 <section class='card'><div class='panel-title'><h2>如何工作</h2></div>
-<p class='muted' style='margin:0'>启用并配置凭证后：买方在渠道里的消息会进入「会话收件箱」，与网站聊天走同一批处理（需求确认、有据问答、人工接管、RFQ 填写链接）；卖家在平台里的回复会经渠道直达买方。对客入口已统一为 LangBot 单轨（试验，资料问答由本机 Dify 引擎承担；旧 Telegram 直连已退役停用、保留回滚）；WhatsApp 与微信系渠道按后续计划接入。新渠道默认关闭，启用与凭证变更全部留痕。</p></section>
+<p class='muted' style='margin:0'>启用并配置凭证后：买方在渠道里的消息会进入「会话收件箱」，与网站聊天走同一批处理（需求确认、有据问答、人工接管、RFQ 填写链接）；卖家在平台里的回复会经渠道直达买方。对客入口已统一为 LangBot 单轨（试验，资料问答由本机 Dify 引擎承担；旧 Telegram 直连代码已按计划撤除）；WhatsApp 接入进行中，微信系渠道随后。新渠道默认关闭，启用与凭证变更全部留痕。</p></section>
 {''.join(cards)}"""
         self.send_html(self.console_page("渠道接入", body, "channels"))
 
@@ -11102,7 +10998,7 @@ class Handler(BaseHTTPRequestHandler):
             f"<form method='post' action='/admin/sales/{rfq_id}/replies'><label>起草回复（保存为未发送草稿）</label>"
             f"<textarea name='body' rows='3' required placeholder='写给买方的回复内容'></textarea>"
             f"<p><button>保存草稿</button></p></form>"
-            f"<p class='field-state'>渠道会话（如 Telegram）可直接「经渠道发送」：draft → queued → sent/failed，失败可重试；其他情况线下发送后回来「记录为已发送」。两种方式发送前都会检查买方「停止主动联系」状态（已停止则阻止发送）。</p>"
+            f"<p class='field-state'>渠道会话可直接「经渠道发送」：draft → queued → sent/failed，失败可重试；其他情况线下发送后回来「记录为已发送」。两种方式发送前都会检查买方「停止主动联系」状态（已停止则阻止发送）。</p>"
         )
         replies_html = replies_new_form + ("".join(reply_parts) or "<p class='muted'>还没有回复记录。</p>")
         followup_cards = (

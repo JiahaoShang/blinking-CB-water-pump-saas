@@ -1,9 +1,14 @@
-"""V1-04 外部渠道接入（切片1）测试：数据层 / 权限与导航 / 渠道接入页 / 双渠道模拟服务。
+"""V1-04 外部渠道接入测试（LangBot 单轨 + WhatsApp 底座）：数据层 / 权限与导航 / 渠道接入页 / 模拟服务 / 收件箱 / 出站总线。
 
-方案口径（grill-me 两轮定稿）：
+背景：旧 Telegram 直连已于 2026-10 按计划撤除（代码/工具/专属用例一并退役，入口统一为 LangBot 单轨）。
+本文件保留的覆盖面：共享渠道数据层、控制台与权限、收件箱通用行为、出站总线与 F-22 状态机、
+WhatsApp（Twilio）模拟器与公开 RFQ 填写页；业务全链路（需求确认/匹配、RFQ 链接往返、坐席回复直达）
+改由 LangBot 传输轨道承载（test_langbot_bridge 提供模拟器）。
+
+口径（原 grill-me 定稿不变）：
 - 渠道消息与网页聊天共用同一批会话/消息对象；按（渠道, 外部消息ID）唯一去重；
 - 渠道账户只存公开配置；机密凭证只从本机环境变量读取（页面不回显值）；
-- 功能默认关闭；「会话收件箱」= 一个可授权模块、三个导航子模块（网站聊天 / Telegram / WhatsApp）；
+- 功能默认关闭；「会话收件箱」= 一个可授权模块、三个导航子模块（网站聊天 / WhatsApp / LangBot）；
 - RFQ 填写链接只存摘要、可撤销；每会话「暂停 AI 自动回复」开关默认不暂停。
 """
 import http.client
@@ -40,8 +45,8 @@ from app import (  # noqa: E402
     mark_outbound_delivered,
     retry_outbound_message,
 )
-import mock_telegram  # noqa: E402
 import mock_whatsapp  # noqa: E402
+from test_langbot_bridge import _LangBotMock  # noqa: E402
 
 
 def form_request(server, method, path, fields=None, cookie=None):
@@ -77,7 +82,7 @@ def json_request(method, url, payload=None):
 
 
 def json_http(server, method, path, payload=None, headers=None):
-    """对测试服务发 JSON 请求（买家 API 等）。"""
+    """对测试服务发 JSON 请求（渠道 Webhook / 买家 API 等）。"""
     conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
     request_headers = {"Content-Type": "application/json", **(headers or {})}
     conn.request(method, path, json.dumps(payload).encode("utf-8") if payload is not None else None, request_headers)
@@ -176,20 +181,20 @@ class ChannelDataTests(unittest.TestCase):
         Database(legacy_path)  # 再次打开不报错（幂等）
 
     def test_channel_account_upsert_unique_isolation_and_audit(self):
-        self.db.save_channel_account("demo-tenant", "telegram", {"bot_username": "@First"}, "demo-admin@example.invalid")
-        self.db.save_channel_account("demo-tenant", "telegram", {"bot_username": "@Second"}, "demo-admin@example.invalid")
+        self.db.save_channel_account("demo-tenant", "langbot", {"bot_uuid": "bot-first"}, "demo-admin@example.invalid")
+        self.db.save_channel_account("demo-tenant", "langbot", {"bot_uuid": "bot-second"}, "demo-admin@example.invalid")
         accounts = self.db.list_channel_accounts("demo-tenant")
         self.assertEqual(len(accounts), 1)  # upsert：同租户同渠道只有一行
-        self.assertEqual(json.loads(accounts["telegram"]["config_json"])["bot_username"], "@Second")
-        self.assertEqual(self.db.get_channel_account("other-tenant", "telegram"), None)
+        self.assertEqual(json.loads(accounts["langbot"]["config_json"])["bot_uuid"], "bot-second")
+        self.assertEqual(self.db.get_channel_account("other-tenant", "langbot"), None)
         with self.assertRaises(ValueError):
             self.db.save_channel_account("demo-tenant", "carrier-pigeon", {}, "demo-admin@example.invalid")
         # 默认关闭 + 启停审计
-        self.assertEqual(self.db.get_channel_account("demo-tenant", "telegram")["status"], "disabled")
-        self.db.set_channel_enabled("demo-tenant", "telegram", True, "demo-admin@example.invalid")
-        self.assertEqual(self.db.get_channel_account("demo-tenant", "telegram")["status"], "enabled")
-        self.db.set_channel_enabled("demo-tenant", "telegram", False, "demo-admin@example.invalid")
-        self.assertEqual(self.db.get_channel_account("demo-tenant", "telegram")["status"], "disabled")
+        self.assertEqual(self.db.get_channel_account("demo-tenant", "langbot")["status"], "disabled")
+        self.db.set_channel_enabled("demo-tenant", "langbot", True, "demo-admin@example.invalid")
+        self.assertEqual(self.db.get_channel_account("demo-tenant", "langbot")["status"], "enabled")
+        self.db.set_channel_enabled("demo-tenant", "langbot", False, "demo-admin@example.invalid")
+        self.assertEqual(self.db.get_channel_account("demo-tenant", "langbot")["status"], "disabled")
         actions = [
             row["action"]
             for row in self.db.conn.execute(
@@ -199,21 +204,21 @@ class ChannelDataTests(unittest.TestCase):
         self.assertEqual(actions, ["channel_configured", "channel_configured", "channel_enabled", "channel_disabled"])
 
     def test_channel_identity_binding_and_message_dedupe(self):
-        conversation_id = self.db.create_conversation("demo-tenant", "telegram", "en")
-        identity_id = self.db.bind_channel_identity("demo-tenant", "telegram", "88001", "Байер", conversation_id)
+        conversation_id = self.db.create_conversation("demo-tenant", "langbot", "en")
+        identity_id = self.db.bind_channel_identity("demo-tenant", "langbot", "88001", "Байер", conversation_id)
         self.assertTrue(identity_id)
-        identity = self.db.get_channel_identity("demo-tenant", "telegram", "88001")
+        identity = self.db.get_channel_identity("demo-tenant", "langbot", "88001")
         self.assertEqual(identity["conversation_id"], conversation_id)
         with self.assertRaises(sqlite3.IntegrityError):
-            self.db.bind_channel_identity("demo-tenant", "telegram", "88001", "重复", conversation_id)
-        self.assertEqual(self.db.get_channel_identity("other-tenant", "telegram", "88001"), None)
+            self.db.bind_channel_identity("demo-tenant", "langbot", "88001", "重复", conversation_id)
+        self.assertEqual(self.db.get_channel_identity("other-tenant", "langbot", "88001"), None)
         # 渠道消息去重：同渠道同一外部消息 ID 只落一次；不同渠道互不影响
-        self.db.save_message("demo-tenant", conversation_id, "buyer", "flow 50", channel="telegram", external_message_id="9001")
-        self.assertIsNotNone(self.db.find_message_by_external("demo-tenant", "telegram", "9001"))
+        self.db.save_message("demo-tenant", conversation_id, "buyer", "flow 50", channel="langbot", external_message_id="9001")
+        self.assertIsNotNone(self.db.find_message_by_external("demo-tenant", "langbot", "9001"))
         with self.assertRaises(sqlite3.IntegrityError):
-            self.db.save_message("demo-tenant", conversation_id, "buyer", "重复投递", channel="telegram", external_message_id="9001")
+            self.db.save_message("demo-tenant", conversation_id, "buyer", "重复投递", channel="langbot", external_message_id="9001")
         self.db.save_message("demo-tenant", conversation_id, "buyer", "同号不同渠道", channel="whatsapp", external_message_id="9001")
-        row = self.db.find_message_by_external("demo-tenant", "telegram", "9001")
+        row = self.db.find_message_by_external("demo-tenant", "langbot", "9001")
         self.assertEqual(row["content"], "flow 50")
 
     def test_rfq_form_token_and_ai_pause_switch(self):
@@ -254,6 +259,8 @@ class ChannelDataTests(unittest.TestCase):
             self.assertEqual(AUDIT_ACTION_LABELS.get(action), label, action)
         self.assertEqual(AUDIT_ENTITY_LABELS.get("channel"), "渠道")
         self.assertIn("inbox", GRANTABLE_MODULE_KEYS)
+        # 2026-10 撤除旧 Telegram 直连后：渠道集合收敛为 WhatsApp + LangBot 单轨
+        self.assertEqual(CHANNEL_KEYS, ("whatsapp", "langbot"))
 
 
 class ChannelConsoleTests(unittest.TestCase):
@@ -285,7 +292,7 @@ class ChannelConsoleTests(unittest.TestCase):
 
     def setUp(self):
         # 凭证环境变量在用例内受控：默认清空，避免本机残留影响断言。
-        self._env_names = ("TELEGRAM_BOT_TOKEN", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM")
+        self._env_names = ("LANGBOT_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM")
         self._saved_env = {name: os.environ.pop(name, None) for name in self._env_names}
 
     def tearDown(self):
@@ -298,21 +305,21 @@ class ChannelConsoleTests(unittest.TestCase):
     def test_nav_modules_and_channels_entry(self):
         status, _, page = form_request(self.server, "GET", "/admin", cookie=self.admin)
         self.assertEqual(status, 200)
-        for text in ("会话收件箱", "网站聊天", "Telegram", "WhatsApp", "渠道接入"):
+        for text in ("会话收件箱", "网站聊天", "WhatsApp", "LangBot", "渠道接入"):
             self.assertIn(text, page)
         status, _, page = form_request(self.server, "GET", "/admin", cookie=self.inbox_emp)
         self.assertEqual(status, 200)
         self.assertIn("会话收件箱", page)
-        self.assertIn("/admin/inbox/telegram", page)
+        self.assertIn("/admin/inbox/langbot", page)
         self.assertNotIn("渠道接入", page)  # 渠道接入仅管理员可见
         status, _, page = form_request(self.server, "GET", "/admin", cookie=self.nomod)
         self.assertNotIn("会话收件箱", page)
 
     def test_inbox_pages_and_permission(self):
         # 渠道状态在用例间共享：先统一关到「未启用」，避免依赖执行顺序。
-        self.db.set_channel_enabled("demo-tenant", "telegram", False, "setup")
+        self.db.set_channel_enabled("demo-tenant", "langbot", False, "setup")
         self.db.set_channel_enabled("demo-tenant", "whatsapp", False, "setup")
-        for section, marker in (("web", "网站聊天"), ("telegram", "渠道未启用"), ("whatsapp", "渠道未启用")):
+        for section, marker in (("web", "网站聊天"), ("langbot", "渠道未启用"), ("whatsapp", "渠道未启用")):
             status, _, page = form_request(self.server, "GET", f"/admin/inbox/{section}", cookie=self.inbox_emp)
             self.assertEqual(status, 200, section)
             self.assertIn(marker, page)
@@ -320,7 +327,7 @@ class ChannelConsoleTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn("会话收件箱", body)
         # 管理员可见全部三个子模块
-        for section in ("web", "telegram", "whatsapp"):
+        for section in ("web", "langbot", "whatsapp"):
             status, _, _ = form_request(self.server, "GET", f"/admin/inbox/{section}", cookie=self.admin)
             self.assertEqual(status, 200, section)
         status, _, _ = form_request(self.server, "GET", "/admin/inbox/nonsense", cookie=self.admin)
@@ -331,24 +338,27 @@ class ChannelConsoleTests(unittest.TestCase):
         self.assertEqual(status, 403)
         status, _, page = form_request(self.server, "GET", "/admin/channels", cookie=self.admin)
         self.assertEqual(status, 200)
-        for text in ("Telegram", "WhatsApp", "凭证未配置", "TELEGRAM_BOT_TOKEN", "TWILIO_ACCOUNT_SID", "默认关闭", "渠道接入"):
+        for text in ("LangBot", "WhatsApp", "凭证未配置", "LANGBOT_API_KEY", "TWILIO_ACCOUNT_SID", "默认关闭", "渠道接入"):
             self.assertIn(text, page)
+        # 旧直连已撤除：不再有 Telegram 渠道卡与操作入口（历史说明文案除外）
+        self.assertNotIn("/admin/channels/telegram", page)
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", page)
         # 保存配置（管理员）→ 审计 + 页面回显
-        status, headers, _ = form_request(self.server, "POST", "/admin/channels/telegram", {"bot_username": "@SellerBot"}, self.admin)
+        status, headers, _ = form_request(self.server, "POST", "/admin/channels/langbot", {"bot_uuid": "bot-test-1"}, self.admin)
         self.assertEqual(status, 303)
         self.assertIn("notice=saved", headers.get("Location", ""))
         status, _, page = form_request(self.server, "GET", "/admin/channels", cookie=self.admin)
-        self.assertIn("@SellerBot", page)
+        self.assertIn("bot-test-1", page)
         # 员工不能改
-        status, _, _ = form_request(self.server, "POST", "/admin/channels/telegram", {"bot_username": "@Hack"}, self.inbox_emp)
+        status, _, _ = form_request(self.server, "POST", "/admin/channels/langbot", {"bot_uuid": "bot-hack"}, self.inbox_emp)
         self.assertEqual(status, 403)
         # 启停 + 审计
-        status, headers, _ = form_request(self.server, "POST", "/admin/channels/telegram/toggle", {}, self.admin)
+        status, headers, _ = form_request(self.server, "POST", "/admin/channels/langbot/toggle", {}, self.admin)
         self.assertEqual(status, 303)
         self.assertIn("notice=enabled", headers.get("Location", ""))
         status, _, page = form_request(self.server, "GET", "/admin/channels", cookie=self.admin)
         self.assertIn("已启用", page)
-        status, headers, _ = form_request(self.server, "POST", "/admin/channels/telegram/toggle", {}, self.admin)
+        status, headers, _ = form_request(self.server, "POST", "/admin/channels/langbot/toggle", {}, self.admin)
         self.assertIn("notice=disabled", headers.get("Location", ""))
         actions = [
             row["action"]
@@ -358,18 +368,18 @@ class ChannelConsoleTests(unittest.TestCase):
         ]
         self.assertEqual(actions, ["channel_configured", "channel_enabled", "channel_disabled"])
         # 渠道启用后的收件箱状态联动（无凭证 → 如实提示缺少的变量名）
-        self.db.set_channel_enabled("demo-tenant", "telegram", True, "demo-admin@example.invalid")
-        status, _, page = form_request(self.server, "GET", "/admin/inbox/telegram", cookie=self.inbox_emp)
+        self.db.set_channel_enabled("demo-tenant", "langbot", True, "demo-admin@example.invalid")
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/langbot", cookie=self.inbox_emp)
         self.assertIn("凭证未配置", page)
-        self.assertIn("TELEGRAM_BOT_TOKEN", page)
+        self.assertIn("LANGBOT_API_KEY", page)
 
     def test_secrets_status_without_leaking_values(self):
-        os.environ["TELEGRAM_BOT_TOKEN"] = "sk-telegram-secret-xyz"
+        os.environ["LANGBOT_API_KEY"] = "«redacted:lbk-…»"
         status, _, page = form_request(self.server, "GET", "/admin/channels", cookie=self.admin)
         self.assertEqual(status, 200)
         self.assertIn("凭证已配置", page)
-        self.assertNotIn("sk-telegram-secret-xyz", page)
-        self.assertTrue(channel_secret_status("telegram")["configured"])
+        self.assertNotIn("«redacted:lbk-…»", page)
+        self.assertTrue(channel_secret_status("langbot")["configured"])
         whatsapp = channel_secret_status("whatsapp")
         self.assertFalse(whatsapp["configured"])
         self.assertEqual(set(whatsapp["missing"]), {"TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM"})
@@ -382,30 +392,7 @@ class ChannelConsoleTests(unittest.TestCase):
 
 
 class ChannelMockTests(unittest.TestCase):
-    """模拟服务：Telegram 轮询/发送往返；Twilio 发送/入站签名/状态回调。"""
-
-    def test_mock_telegram_roundtrip(self):
-        server = mock_telegram.MockTelegramServer()
-        try:
-            base = server.base_url()
-            token = "123:TEST"
-            server.inject_message(77, "flow 50 m3/h", first_name="Maya")
-            status, payload = json_request("POST", f"{base}{token}/getUpdates", {"offset": 0, "timeout": 0})
-            self.assertEqual(status, 200)
-            self.assertTrue(payload["ok"])
-            self.assertEqual(payload["result"][0]["message"]["text"], "flow 50 m3/h")
-            self.assertEqual(payload["result"][0]["message"]["from"]["first_name"], "Maya")
-            status, payload = json_request("POST", f"{base}{token}/sendMessage", {"chat_id": 77, "text": "Hello from seller"})
-            self.assertTrue(payload["ok"])
-            self.assertTrue(payload["result"]["message_id"])
-            sent = server.sent_messages()
-            self.assertEqual(len(sent), 1)
-            self.assertEqual(sent[0]["text"], "Hello from seller")
-            status, payload = json_request("POST", f"{base}{token}/setWebhook", {"url": "https://example.test/tg"})
-            self.assertTrue(payload["ok"])
-            self.assertEqual(server.webhook_url(), "https://example.test/tg")
-        finally:
-            server.stop()
+    """模拟服务：Twilio 发送/入站签名/状态回调（WhatsApp 底座）。"""
 
     def test_mock_twilio_send_inbound_signature_and_status(self):
         server = mock_whatsapp.MockTwilioServer(auth_token="unit-secret")
@@ -414,7 +401,7 @@ class ChannelMockTests(unittest.TestCase):
             form = urllib.parse.urlencode(
                 {
                     "To": "whatsapp:+491234",
-                    "From": "whatsapp:+14155238886",
+                    "From": "whatsapp:+141****8886",
                     "Body": "buyer hello",
                     "StatusCallback": f"{receiver.url}/status",
                 }
@@ -455,7 +442,7 @@ class ChannelMockTests(unittest.TestCase):
 
 
 class ConversationInboxTests(unittest.TestCase):
-    """会话收件箱（切片2）：列表分渠道、详情标注与回复人、直接回复、AI 开关、权限。"""
+    """会话收件箱：列表分渠道、详情标注与回复人、直接回复、AI 开关、权限。"""
 
     maxDiff = None
 
@@ -499,9 +486,9 @@ class ConversationInboxTests(unittest.TestCase):
         # 第二个网站会话（列表排序用）与渠道会话、演示夹具会话（应被排除）
         cls.web_b = cls.db.create_conversation("demo-tenant", "web", "en")
         cls.db.save_message("demo-tenant", cls.web_b, "buyer", "hello from second visitor", "website_api")
-        cls.telegram_conv = cls.db.create_conversation("demo-tenant", "telegram", "en")
-        cls.db.bind_channel_identity("demo-tenant", "telegram", "88002", "Maya (Telegram)", cls.telegram_conv)
-        cls.db.save_message("demo-tenant", cls.telegram_conv, "buyer", "hi from telegram", "buyer_web", channel="telegram", external_message_id="tg-1")
+        cls.langbot_conv = cls.db.create_conversation("demo-tenant", "langbot", "en")
+        cls.db.bind_channel_identity("demo-tenant", "langbot", "88002", "Maya (LangBot)", cls.langbot_conv)
+        cls.db.save_message("demo-tenant", cls.langbot_conv, "buyer", "hi from langbot", "buyer_web", channel="langbot", external_message_id="lb-1")
         cls.fixture_conv = cls.db.create_conversation("demo-tenant", "demo-fixture", "en")
 
     @classmethod
@@ -576,16 +563,16 @@ class ConversationInboxTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("网站访客", page)
         self.assertIn("buyer@example.invalid", page)  # 联系方式来自关联询价
-        self.assertNotIn(self.telegram_conv[:6], page)  # 渠道会话不进网站聊天列表
+        self.assertNotIn(self.langbot_conv[:6], page)  # 渠道会话不进网站聊天列表
         self.assertNotIn(self.fixture_conv[:6], page)  # 演示夹具不进收件箱
         self.assertIn(self.web_b[:6], page)
         self.assertIn(self.web_a[:6], page)
         self.assertTrue(page.find(self.web_b[:6]) < page.find(self.web_a[:6]))  # 最新在前
         self.assertIn(f"/admin/inbox/web/{self.web_b}", page)  # 列表链接用 URL 段 slug
-        # Telegram 列表：显示绑定买方名，不含网站会话
-        status, _, page = form_request(self.server, "GET", "/admin/inbox/telegram", cookie=self.inbox_emp)
+        # LangBot 列表：显示绑定买方名，不含网站会话
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/langbot", cookie=self.inbox_emp)
         self.assertEqual(status, 200)
-        self.assertIn("Maya (Telegram)", page)
+        self.assertIn("Maya (LangBot)", page)
         self.assertNotIn(self.web_a[:6], page)
         # WhatsApp：空态
         status, _, page = form_request(self.server, "GET", "/admin/inbox/whatsapp", cookie=self.inbox_emp)
@@ -605,27 +592,27 @@ class ConversationInboxTests(unittest.TestCase):
         other_conv = self.db.create_conversation("other-tenant", "website_api", "en")
         status, _, _ = form_request(self.server, "GET", f"/admin/inbox/web/{other_conv}", cookie=self.inbox_emp)
         self.assertEqual(status, 404)
-        status, _, _ = form_request(self.server, "GET", f"/admin/inbox/web/{self.telegram_conv}", cookie=self.inbox_emp)
+        status, _, _ = form_request(self.server, "GET", f"/admin/inbox/web/{self.langbot_conv}", cookie=self.inbox_emp)
         self.assertEqual(status, 404)
 
     def test_inbox_reply_channel_delivery_gated(self):
-        # 切片③起 Telegram 回复走真实发送：未启用渠道时消息仍落库并标记「发送失败」（不再直接拒绝）。
+        # 渠道回复走真实发送：未启用渠道时消息仍落库并标记「发送失败」（不再直接拒绝）。
         before = self.db.conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=?", (self.telegram_conv,)
+            "SELECT COUNT(*) FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=?", (self.langbot_conv,)
         ).fetchone()[0]
-        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{self.telegram_conv}/reply", {"body": "hello"}, self.inbox_emp)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{self.langbot_conv}/reply", {"body": "hello"}, self.inbox_emp)
         self.assertEqual(status, 303)
         self.assertIn("notice=reply_failed", headers.get("Location", ""))
         after = self.db.conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=?", (self.telegram_conv,)
+            "SELECT COUNT(*) FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=?", (self.langbot_conv,)
         ).fetchone()[0]
         self.assertEqual(before + 1, after)
         row = self.db.conn.execute(
-            "SELECT * FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=? ORDER BY rowid DESC LIMIT 1", (self.telegram_conv,)
+            "SELECT * FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=? ORDER BY rowid DESC LIMIT 1", (self.langbot_conv,)
         ).fetchone()
         self.assertEqual(row["delivery_status"], "failed")
         self.assertIn("渠道未启用", row["delivery_error"])
-        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.telegram_conv}?notice=reply_failed", cookie=self.inbox_emp)
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{self.langbot_conv}?notice=reply_failed", cookie=self.inbox_emp)
         self.assertIn("发送失败", page)
         self.assertIn("回复发送失败", page)
         # WhatsApp：启用渠道但发送通道未开通 → 同样落库并标记失败（UI 目前不提供入口，直连 POST 验证守卫）
@@ -685,8 +672,8 @@ class ConversationInboxTests(unittest.TestCase):
         self.assertEqual(AUDIT_ACTION_LABELS["staff_replied"], "发送卖家回复")
 
 
-class TelegramPipelineTests(unittest.TestCase):
-    """切片③：Telegram 全链路——收信（Webhook / 长轮询）、自动问答、人工转交、回复直达、RFQ 填写链接。"""
+class ChannelPipelineTests(unittest.TestCase):
+    """业务全链路（LangBot 传输轨道）：需求确认与匹配、RFQ 链接往返、表单字段三态、坐席回复直达与失败可见。"""
 
     maxDiff = None
 
@@ -694,20 +681,19 @@ class TelegramPipelineTests(unittest.TestCase):
     def setUpClass(cls):
         cls.temp_dir = tempfile.TemporaryDirectory()
         cls.db_path = Path(cls.temp_dir.name) / "app.db"
-        cls.mock = mock_telegram.MockTelegramServer()
-        cls.env_backup = {name: os.environ.get(name) for name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_API_BASE", "TELEGRAM_WEBHOOK_SECRET")}
-        os.environ["TELEGRAM_BOT_TOKEN"] = "123:TEST-TOKEN"
-        os.environ["TELEGRAM_API_BASE"] = cls.mock.base_url()
-        os.environ["TELEGRAM_WEBHOOK_SECRET"] = "hook-secret-test"
+        cls.mock = _LangBotMock()
+        cls.env_backup = {name: os.environ.get(name) for name in ("LANGBOT_API_KEY", "LANGBOT_API_BASE")}
+        os.environ["LANGBOT_API_KEY"] = "lbk_test_key"
+        os.environ["LANGBOT_API_BASE"] = cls.mock.url
         cls.server = make_server(cls.db_path, port=0)
         cls.db = cls.server.RequestHandlerClass.db
         cls.db.seed_demo_users()
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
-        cls.hook_id = "hook-test-12345678"
-        cls.db.save_channel_account("demo-tenant", "telegram", {"bot_username": "@demo_seller_bot", "webhook_id": cls.hook_id}, "demo-admin@example.invalid")
-        cls.db.set_channel_enabled("demo-tenant", "telegram", True, "demo-admin@example.invalid")
+        cls.token = "tok_pipeline_test_0001_abcdef"
+        cls.db.save_channel_account("demo-tenant", "langbot", {"bot_uuid": "bot-pipe-1", "webhook_token": cls.token}, "demo-admin@example.invalid")
+        cls.db.set_channel_enabled("demo-tenant", "langbot", True, "demo-admin@example.invalid")
         # 已发布产品（有据问答 / 产品匹配用）
         cls.product_id = cls.db.create_product("demo-tenant", "TG-100", "渠道测试泵", "清水")
         source_id = cls.db.add_source("demo-tenant", cls.product_id, "manual.pdf", "PDF", "第 2 页")
@@ -731,31 +717,31 @@ class TelegramPipelineTests(unittest.TestCase):
                 os.environ[name] = value
 
     # ── 辅助 ───────────────────────────────────────────────────────────────
-    def post_update(self, update, secret="hook-secret-test"):
-        headers = {"X-Telegram-Bot-Api-Secret-Token": secret} if secret is not None else {}
-        return json_http(self.server, "POST", f"/api/v1/channels/telegram/webhook/{self.hook_id}", update, headers=headers)
-
-    def update_for(self, chat_id, text, message_id, first_name="Maya", username="maya_t"):
-        return {
-            "update_id": message_id,
-            "message": {
-                "message_id": message_id,
-                "date": 1759500000,
-                "chat": {"id": chat_id, "type": "private"},
-                "from": {"id": chat_id, "first_name": first_name, "username": username, "language_code": "en"},
-                "text": text,
+    def post_event(self, sender_id, text, uuid):
+        return json_http(
+            self.server, "POST", f"/api/v1/channels/langbot/webhook/{self.token}",
+            {
+                "uuid": uuid,
+                "event_type": "bot.person_message",
+                "data": {
+                    "bot_uuid": "bot-pipe-1",
+                    "adapter_name": "TelegramAdapter",
+                    "sender": {"id": sender_id, "name": "Maya"},
+                    "message": [{"type": "Plain", "text": text}],
+                    "timestamp": 1759500000,
+                },
             },
-        }
+        )
 
-    def conversation_for(self, chat_id):
+    def conversation_for(self, sender_id):
         row = self.db.conn.execute(
-            "SELECT conversation_id FROM channel_identities WHERE tenant_id='demo-tenant' AND channel='telegram' AND external_user_id=?",
-            (str(chat_id),),
+            "SELECT conversation_id FROM channel_identities WHERE tenant_id='demo-tenant' AND channel='langbot' AND external_user_id=?",
+            (str(sender_id),),
         ).fetchone()
         return row["conversation_id"] if row else None
 
-    def sent_texts(self, chat_id):
-        return [item["text"] for item in self.mock.sent_messages() if int(item["chat"]["id"]) == int(chat_id)]
+    def sent_texts(self, sender_id):
+        return [item["text"] for item in self.mock.sent_messages() if item["target_id"] == str(sender_id)]
 
     def last_message(self, conversation_id, source=None):
         if source:
@@ -769,103 +755,14 @@ class TelegramPipelineTests(unittest.TestCase):
         ).fetchone()
 
     # ── 用例 ───────────────────────────────────────────────────────────────
-    def test_check_live_script_against_mock(self):
-        env = os.environ.copy()
-        result = subprocess.run(
-            [sys.executable, "tools/channels/check_telegram_live.py", "--chat-id", "999"],
-            cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=30,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("getMe 成功", result.stdout)
-        self.assertIn("sendMessage 成功", result.stdout)
-        self.assertNotIn("TEST-TOKEN", result.stdout)  # 令牌不回显
-        env_no_token = {key: value for key, value in env.items() if key != "TELEGRAM_BOT_TOKEN"}
-        result2 = subprocess.run(
-            [sys.executable, "tools/channels/check_telegram_live.py"],
-            cwd=str(ROOT), env=env_no_token, capture_output=True, text=True, timeout=30,
-        )
-        self.assertEqual(result2.returncode, 2)
-        self.assertIn("缺少环境变量", result2.stdout + result2.stderr)
-
-    def test_duplicate_update_processed_once(self):
-        update = self.update_for(4301, "Who are you?", 901)
-        status, body = self.post_update(update)
-        self.assertEqual(status, 200)
-        self.assertEqual(body["ok"], True)
-        conversation_id = self.conversation_for(4301)
-        self.assertTrue(conversation_id)
-        count_before = self.db.conn.execute("SELECT COUNT(*) AS n FROM messages WHERE conversation_id=?", (conversation_id,)).fetchone()["n"]
-        sent_before = len(self.mock.sent_messages())
-        status, _body = self.post_update(update)
-        self.assertEqual(status, 200)
-        count_after = self.db.conn.execute("SELECT COUNT(*) AS n FROM messages WHERE conversation_id=?", (conversation_id,)).fetchone()["n"]
-        self.assertEqual(count_before, count_after)
-        self.assertEqual(sent_before, len(self.mock.sent_messages()))
-
-    def test_human_request_and_engineer_reply_reaches_channel(self):
-        status, _body = self.post_update(self.update_for(4302, "你们能发到德国吗？价格是多少？", 902))
-        self.assertEqual(status, 200)
-        conversation_id = self.conversation_for(4302)
-        texts = self.sent_texts(4302)
-        self.assertTrue(any("「人工」" in text for text in texts))
-        answer = self.db.conn.execute(
-            "SELECT * FROM answers WHERE tenant_id='demo-tenant' AND conversation_id=? AND answer_status='needs_human'", (conversation_id,)
-        ).fetchone()
-        self.assertTrue(answer)
-        # 买方回复「人工」→ 创建人工任务 + 转交播报直达渠道（不自动建任务，需买方明确要求）
-        status, body = self.post_update(self.update_for(4302, "人工", 903))
-        self.assertEqual(status, 200)
-        self.assertEqual(body["outcome"], "human_requested")
-        task = self.db.conn.execute(
-            "SELECT * FROM human_tasks WHERE tenant_id='demo-tenant' AND conversation_id=?", (conversation_id,)
-        ).fetchone()
-        self.assertTrue(task)
-        self.assertTrue(any("已转交工程师核实" in text for text in self.sent_texts(4302)))
-        # 工程师在后台答复 → 经渠道直达买方（去掉「工程师回复：」前缀）
-        status, headers, _ = form_request(self.server, "POST", f"/admin/tasks/{task['id']}/reply", {"response": "可以为德国交付，细节以销售报价为准。"}, self.admin)
-        self.assertEqual(status, 303)
-        self.assertIn("可以为德国交付，细节以销售报价为准。", self.sent_texts(4302))
-        reply_row = self.last_message(conversation_id, "human-engineer")
-        self.assertEqual(reply_row["delivery_status"], "sent")
-        self.assertTrue(reply_row["external_message_id"])
-
-    def test_poller_script_once_consumes_updates(self):
-        self.mock.inject_message(4303, "flow 5 m3/h, head 10 m", first_name="Poller")
-        env = os.environ.copy()
-        result = subprocess.run(
-            [sys.executable, "tools/channels/telegram_poller.py", "--db", str(self.db_path), "--once"],
-            cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=60,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("本轮完成", result.stdout)
-        conversation_id = self.conversation_for(4303)
-        self.assertTrue(conversation_id)
-        self.assertTrue(any("流量" in text for text in self.sent_texts(4303)))
-
-    def test_poller_skips_when_channel_disabled(self):
-        # 停用渠道：轮询器不消费、不落库（与 Webhook 的 200 skipped 口径一致）
-        self.mock.inject_message(4310, "disabled channel message", first_name="Offline")
-        self.db.set_channel_enabled("demo-tenant", "telegram", False, "demo-admin@example.invalid")
-        try:
-            env = os.environ.copy()
-            result = subprocess.run(
-                [sys.executable, "tools/channels/telegram_poller.py", "--db", str(self.db_path), "--once"],
-                cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=60,
-            )
-        finally:
-            self.db.set_channel_enabled("demo-tenant", "telegram", True, "demo-admin@example.invalid")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("渠道未启用", result.stdout)
-        self.assertIsNone(self.conversation_for(4310))
-
     def test_requirement_confirm_and_match(self):
-        status, _body = self.post_update(self.update_for(4304, "请报价：flow 15 m3/h, head 30 m, medium clean water，用于冷却水系统", 904))
+        status, _body = self.post_event(4404, "请报价：flow 15 m3/h, head 30 m, medium clean water，用于冷却水系统", "lb-ev-0404")
         self.assertEqual(status, 200)
-        conversation_id = self.conversation_for(4304)
-        self.assertTrue(any("已记录以下工况" in text for text in self.sent_texts(4304)))
-        self.assertTrue(any("「确认」" in text for text in self.sent_texts(4304)))
+        conversation_id = self.conversation_for(4404)
+        self.assertTrue(any("已记录以下工况" in text for text in self.sent_texts(4404)))
+        self.assertTrue(any("「确认」" in text for text in self.sent_texts(4404)))
         # 「确认」→ 确认工况并按同口径匹配（TG-100 覆盖 15 m³/h、30 m、清水）
-        status, _body = self.post_update(self.update_for(4304, "确认", 905))
+        status, _body = self.post_event(4404, "确认", "lb-ev-0405")
         self.assertEqual(status, 200)
         latest_revision = self.db.conn.execute(
             "SELECT * FROM requirement_revisions WHERE tenant_id='demo-tenant' AND conversation_id=? ORDER BY revision DESC LIMIT 1",
@@ -876,21 +773,21 @@ class TelegramPipelineTests(unittest.TestCase):
             "SELECT * FROM recommendations WHERE tenant_id='demo-tenant' AND conversation_id=? AND status<>'invalidated'", (conversation_id,)
         ).fetchone()
         self.assertTrue(recommendation)
-        self.assertTrue(any("TG-100" in text for text in self.sent_texts(4304)))
-        self.assertTrue(any("根据已确认工况" in text for text in self.sent_texts(4304)))
+        self.assertTrue(any("TG-100" in text for text in self.sent_texts(4404)))
+        self.assertTrue(any("根据已确认工况" in text for text in self.sent_texts(4404)))
 
     def test_rfq_link_and_form_roundtrip(self):
-        status, _body = self.post_update(self.update_for(4305, "hello", 906))
+        status, _body = self.post_event(4405, "hello", "lb-ev-0406")
         self.assertEqual(status, 200)
-        conversation_id = self.conversation_for(4305)
+        conversation_id = self.conversation_for(4405)
         self.assertTrue(conversation_id)
         # 后台坐席发送询价链接（消息直达渠道）
-        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/rfq-link", {}, self.admin)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{conversation_id}/rfq-link", {}, self.admin)
         self.assertEqual(status, 303)
         self.assertIn("notice=link_sent", headers.get("Location", ""))
         link_row = self.last_message(conversation_id, "rfq-link")
         self.assertEqual(link_row["delivery_status"], "sent")
-        link_texts = [text for text in self.sent_texts(4305) if "/rfq/" in text]
+        link_texts = [text for text in self.sent_texts(4405) if "/rfq/" in text]
         self.assertTrue(link_texts)
         token = re.search(r"/rfq/([A-Za-z0-9_-]+)", link_texts[-1]).group(1)
         # 公开填写页（无登录即可打开）
@@ -903,18 +800,18 @@ class TelegramPipelineTests(unittest.TestCase):
         status, _, page = form_request(self.server, "POST", f"/rfq/{token}", {"contact_email": "tg@example.invalid", "contact_phone": "+49", "quantity": "2", "destination": "Germany", "notes": ""})
         self.assertEqual(status, 400)
         self.assertIn("请先勾选确认", page)
-        # 提交成功 → 建单（入口=telegram_link、会话绑定、联系同意来源）+ 渠道回执 + 会话留痕
+        # 提交成功 → 建单（入口=langbot_link、会话绑定、联系同意来源）+ 渠道回执 + 会话留痕
         status, _, page = form_request(self.server, "POST", f"/rfq/{token}", {"contact_email": "tg@example.invalid", "contact_phone": "+49", "quantity": "2", "destination": "Germany", "notes": "需要 CE", "contact_confirmed": "1"})
         self.assertEqual(status, 200)
         self.assertIn("已提交", page)
         rfq = self.db.conn.execute(
-            "SELECT * FROM rfqs WHERE tenant_id='demo-tenant' AND conversation_id=? AND entry_surface='telegram_link'", (conversation_id,)
+            "SELECT * FROM rfqs WHERE tenant_id='demo-tenant' AND conversation_id=? AND entry_surface='langbot_link'", (conversation_id,)
         ).fetchone()
         self.assertTrue(rfq)
         self.assertEqual(rfq["quantity"], "2")
-        self.assertEqual(rfq["contact_consent_source"], "telegram_link")
+        self.assertEqual(rfq["contact_consent_source"], "langbot_link")
         self.assertEqual(self.db.get_rfq("demo-tenant", rfq["id"])["current_revision"], 1)
-        self.assertTrue(any("您的询价信息已收到" in text for text in self.sent_texts(4305)))
+        self.assertTrue(any("您的询价信息已收到" in text for text in self.sent_texts(4405)))
         self.assertTrue(self.last_message(conversation_id, "rfq-form-submitted"))
         # 重新打开：回显既有内容 + 提示更新同一张单；再次提交 → 版本 +1
         status, _, page = form_request(self.server, "GET", f"/rfq/{token}")
@@ -929,9 +826,9 @@ class TelegramPipelineTests(unittest.TestCase):
     def test_rfq_form_field_states_follow_settings(self):
         self.db.set_tenant_setting("demo-tenant", "rfq_fields", {"email": "required", "phone": "hidden", "quantity": "required", "destination": "optional", "notes": "optional"}, "demo-admin@example.invalid")
         try:
-            status, _body = self.post_update(self.update_for(4306, "hello", 907))
+            status, _body = self.post_event(4406, "hello", "lb-ev-0407")
             self.assertEqual(status, 200)
-            conversation_id = self.conversation_for(4306)
+            conversation_id = self.conversation_for(4406)
             token = self.db.create_rfq_form_token("demo-tenant", conversation_id, "demo-admin@example.invalid")
             status, _, page = form_request(self.server, "GET", f"/rfq/{token}")
             self.assertEqual(status, 200)
@@ -945,102 +842,42 @@ class TelegramPipelineTests(unittest.TestCase):
             status, _, page = form_request(self.server, "POST", f"/rfq/{token}", {"contact_email": "states@example.invalid", "contact_phone": "should-not-store", "quantity": "1", "contact_confirmed": "1"})
             self.assertEqual(status, 200)
             rfq = self.db.conn.execute(
-                "SELECT * FROM rfqs WHERE tenant_id='demo-tenant' AND conversation_id=? AND entry_surface='telegram_link'", (conversation_id,)
+                "SELECT * FROM rfqs WHERE tenant_id='demo-tenant' AND conversation_id=? AND entry_surface='langbot_link'", (conversation_id,)
             ).fetchone()
             self.assertEqual(rfq["contact_phone"], "")
         finally:
             self.db.set_tenant_setting("demo-tenant", "rfq_fields", dict(DEFAULT_RFQ_FIELDS), "demo-admin@example.invalid")
 
     def test_staff_reply_from_inbox_reaches_channel(self):
-        status, _body = self.post_update(self.update_for(4307, "hello", 908))
+        status, _body = self.post_event(4407, "hello", "lb-ev-0408")
         self.assertEqual(status, 200)
-        conversation_id = self.conversation_for(4307)
-        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/reply", {"body": "您好，已收到您的消息。"}, self.admin)
+        conversation_id = self.conversation_for(4407)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{conversation_id}/reply", {"body": "您好，已收到您的消息。"}, self.admin)
         self.assertEqual(status, 303)
         self.assertIn("notice=sent", headers.get("Location", ""))
-        self.assertIn("您好，已收到您的消息。", self.sent_texts(4307))
+        self.assertIn("您好，已收到您的消息。", self.sent_texts(4407))
         row = self.last_message(conversation_id, "staff-reply")
         self.assertEqual(row["delivery_status"], "sent")
         self.assertEqual(row["actor_email"], "demo-admin@example.invalid")
-        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{conversation_id}?notice=sent", cookie=self.admin)
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{conversation_id}?notice=sent", cookie=self.admin)
         self.assertIn("已发送", page)
         # 失败可见：临时把模拟地址指向不可达端口
-        os.environ["TELEGRAM_API_BASE"] = "http://127.0.0.1:9/bot"
+        os.environ["LANGBOT_API_BASE"] = "http://127.0.0.1:9"
         try:
-            status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/reply", {"body": "这条会失败。"}, self.admin)
+            status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{conversation_id}/reply", {"body": "这条会失败。"}, self.admin)
             self.assertEqual(status, 303)
             self.assertIn("notice=reply_failed", headers.get("Location", ""))
             row = self.last_message(conversation_id, "staff-reply")
             self.assertEqual(row["delivery_status"], "failed")
             self.assertIn("网络请求失败", row["delivery_error"])
-            status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{conversation_id}?notice=reply_failed", cookie=self.admin)
+            status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{conversation_id}?notice=reply_failed", cookie=self.admin)
             self.assertIn("发送失败：网络请求失败", page)
         finally:
-            os.environ["TELEGRAM_API_BASE"] = self.mock.base_url()
-
-    def test_webhook_receives_and_answers_question(self):
-        # 先走需求→确认（拿到推荐，提问将绑定推荐首型号——与网页聊天同口径）
-        status, _body = self.post_update(self.update_for(4308, "flow 15 m3/h, head 30 m, medium clean water", 909))
-        self.assertEqual(status, 200)
-        status, _body = self.post_update(self.update_for(4308, "确认", 910))
-        self.assertEqual(status, 200)
-        # 现在提问命中已发布产品（TG-100）→ 有据回答直达渠道
-        status, body = self.post_update(self.update_for(4308, "What is the flow range?", 911))
-        self.assertEqual(status, 200)
-        self.assertEqual(body["ok"], True)
-        self.assertEqual(body["outcome"], "answered")
-        conversation_id = self.conversation_for(4308)
-        self.assertTrue(conversation_id)
-        identity = self.db.conn.execute(
-            "SELECT * FROM channel_identities WHERE tenant_id='demo-tenant' AND conversation_id=?", (conversation_id,)
-        ).fetchone()
-        self.assertEqual(identity["display_name"], "Maya (@maya_t)")
-        conversation = self.db.get_conversation("demo-tenant", conversation_id)
-        self.assertEqual(conversation["source"], "telegram")
-        buyer_row = self.last_message(conversation_id, "telegram")
-        self.assertEqual(buyer_row["role"], "buyer")
-        self.assertEqual(buyer_row["external_message_id"], "4308:911")
-        answer_row = self.last_message(conversation_id, "grounded-answer")
-        self.assertTrue(answer_row)
-        self.assertEqual(answer_row["delivery_status"], "sent")
-        texts = self.sent_texts(4308)
-        self.assertTrue(any("10-30" in text for text in texts))
-        self.assertTrue(any("流量范围" in text for text in texts))
-        # 收件箱 Telegram 子模块可见这个会话（含绑定显示名）
-        status, _, page = form_request(self.server, "GET", "/admin/inbox/telegram", cookie=self.admin)
-        self.assertEqual(status, 200)
-        self.assertIn("Maya (@maya_t)", page)
-
-    def test_webhook_secret_and_disabled_channel(self):
-        update = self.update_for(4309, "hello", 910)
-        # 错误密钥 → 403 且不落库
-        status, body = self.post_update(update, secret="wrong-secret")
-        self.assertEqual(status, 403)
-        self.assertEqual(body.get("error"), "secret_token_mismatch")
-        self.assertIsNone(self.conversation_for(4309))
-        # 密钥环境变量缺失 → 403（fail-closed）
-        backup = os.environ.pop("TELEGRAM_WEBHOOK_SECRET", None)
-        try:
-            status, _body = self.post_update(update)
-            self.assertEqual(status, 403)
-        finally:
-            os.environ["TELEGRAM_WEBHOOK_SECRET"] = backup if backup is not None else "hook-secret-test"
-        # 渠道停用 → 200 skipped 且不处理
-        self.db.set_channel_enabled("demo-tenant", "telegram", False, "demo-admin@example.invalid")
-        try:
-            status, body = self.post_update(update)
-            self.assertEqual(status, 200)
-            self.assertEqual(body.get("skipped"), "channel_disabled")
-            self.assertIsNone(self.conversation_for(4309))
-        finally:
-            self.db.set_channel_enabled("demo-tenant", "telegram", True, "demo-admin@example.invalid")
-        # 未知 hook_id → 404
-        status, _body = json_http(self.server, "POST", "/api/v1/channels/telegram/webhook/unknown-hook-123", update, headers={"X-Telegram-Bot-Api-Secret-Token": "hook-secret-test"})
-        self.assertEqual(status, 404)
+            os.environ["LANGBOT_API_BASE"] = self.mock.url
 
 
 class OutboundBusTests(unittest.TestCase):
-    """切片④：出站总线与 F-22 状态机——重试幂等、回执、销售侧真发、补投工人、主动门控。"""
+    """出站总线与 F-22 状态机——重试幂等、回执、销售侧真发、补投工人、主动门控（LangBot 轨道）。"""
 
     maxDiff = None
 
@@ -1048,33 +885,35 @@ class OutboundBusTests(unittest.TestCase):
     def setUpClass(cls):
         cls.temp_dir = tempfile.TemporaryDirectory()
         cls.db_path = Path(cls.temp_dir.name) / "app.db"
-        cls.mock = mock_telegram.MockTelegramServer()
-        cls.env_backup = {name: os.environ.get(name) for name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_API_BASE", "TELEGRAM_WEBHOOK_SECRET")}
-        os.environ["TELEGRAM_BOT_TOKEN"] = "123:BUS-TOKEN"
-        os.environ["TELEGRAM_API_BASE"] = cls.mock.base_url()
-        os.environ["TELEGRAM_WEBHOOK_SECRET"] = "bus-hook-secret"
+        cls.mock = _LangBotMock()
+        cls.env_backup = {name: os.environ.get(name) for name in ("LANGBOT_API_KEY", "LANGBOT_API_BASE")}
+        os.environ["LANGBOT_API_KEY"] = "lbk_test_key"
+        os.environ["LANGBOT_API_BASE"] = cls.mock.url
         cls.server = make_server(cls.db_path, port=0)
         cls.db = cls.server.RequestHandlerClass.db
         cls.db.seed_demo_users()
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
-        cls.db.save_channel_account("demo-tenant", "telegram", {"bot_username": "@bus_bot", "webhook_id": "bus-hook-12345678"}, "demo-admin@example.invalid")
-        cls.db.set_channel_enabled("demo-tenant", "telegram", True, "demo-admin@example.invalid")
+        cls.db.save_channel_account("demo-tenant", "langbot", {"bot_uuid": "bot-bus-1", "webhook_token": "bus-token-1234567890"}, "demo-admin@example.invalid")
+        cls.db.set_channel_enabled("demo-tenant", "langbot", True, "demo-admin@example.invalid")
         # 会话 A：总线重试/回执/收件箱重试用
-        cls.conv_a = cls.db.create_conversation("demo-tenant", "telegram", "en")
-        cls.db.bind_channel_identity("demo-tenant", "telegram", "71001", "Bus Buyer", cls.conv_a)
+        cls.conv_a = cls.db.create_conversation("demo-tenant", "langbot", "en")
+        cls.db.bind_channel_identity("demo-tenant", "langbot", "71001", "Bus Buyer", cls.conv_a)
         # 会话 B：销售侧真发（RFQ→线索自动生成）
-        cls.conv_b = cls.db.create_conversation("demo-tenant", "telegram", "en")
-        cls.db.bind_channel_identity("demo-tenant", "telegram", "71002", "Sales Buyer", cls.conv_b)
+        cls.conv_b = cls.db.create_conversation("demo-tenant", "langbot", "en")
+        cls.db.bind_channel_identity("demo-tenant", "langbot", "71002", "Sales Buyer", cls.conv_b)
         cls.rfq_id, _created = cls.db.create_rfq(
             "demo-tenant", cls.conv_b, "sub-bus-1",
             {"contact_email": "bus@example.invalid", "contact_phone": "+49", "quantity": "1", "region": "Germany"},
             "总线测试询价",
         )
         # 会话 C：主动门控（独立，避免串扰）
-        cls.conv_c = cls.db.create_conversation("demo-tenant", "telegram", "en")
-        cls.db.bind_channel_identity("demo-tenant", "telegram", "71003", "Gate Buyer", cls.conv_c)
+        cls.conv_c = cls.db.create_conversation("demo-tenant", "langbot", "en")
+        cls.db.bind_channel_identity("demo-tenant", "langbot", "71003", "Gate Buyer", cls.conv_c)
+        # WhatsApp 回执基座：Twilio 状态回调（sent → delivered）为 WhatsApp 落地预留，用合成行验证
+        cls.wa_conv = cls.db.create_conversation("demo-tenant", "whatsapp", "en")
+        cls.db.bind_channel_identity("demo-tenant", "whatsapp", "wa-bus", "Wa Bus", cls.wa_conv)
 
     @classmethod
     def tearDownClass(cls):
@@ -1090,16 +929,16 @@ class OutboundBusTests(unittest.TestCase):
     def message_row(self, message_id):
         return self.db.conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
 
-    def sent_texts(self, chat_id):
-        return [item["text"] for item in self.mock.sent_messages() if int(item["chat"]["id"]) == int(chat_id)]
+    def sent_texts(self, sender_id):
+        return [item["text"] for item in self.mock.sent_messages() if item["target_id"] == str(sender_id)]
 
     def test_dispatch_retry_idempotent_and_delivered_receipt(self):
         conversation = self.db.get_conversation("demo-tenant", self.conv_a)
-        os.environ["TELEGRAM_API_BASE"] = "http://127.0.0.1:9/bot"  # 先制造一次失败
+        os.environ["LANGBOT_API_BASE"] = "http://127.0.0.1:9"  # 先制造一次失败
         try:
             message_id, sent, error = enqueue_outbound(self.db, "demo-tenant", conversation, "assistant", "总线测试消息一", "channel-guidance")
         finally:
-            os.environ["TELEGRAM_API_BASE"] = self.mock.base_url()
+            os.environ["LANGBOT_API_BASE"] = self.mock.url
         self.assertFalse(sent)
         self.assertIn("网络请求失败", error)
         row = self.message_row(message_id)
@@ -1111,7 +950,6 @@ class OutboundBusTests(unittest.TestCase):
         row = self.message_row(message_id)
         self.assertEqual(row["delivery_status"], "sent")
         self.assertEqual(row["delivery_attempts"], 2)
-        self.assertTrue(row["external_message_id"])
         self.assertIn("总线测试消息一", self.sent_texts(71001))
         audits = [item["action"] for item in self.db.conn.execute(
             "SELECT action FROM audit_log WHERE tenant_id='demo-tenant' AND entity_id=? ORDER BY id", (message_id,)
@@ -1122,42 +960,46 @@ class OutboundBusTests(unittest.TestCase):
         sent, _ = retry_outbound_message(self.db, "demo-tenant", message_id, "demo-admin@example.invalid")
         self.assertTrue(sent)
         self.assertEqual(before, len(self.mock.sent_messages()))
-        # 回执推进：sent → delivered（幂等）
-        self.assertTrue(mark_outbound_delivered(self.db, "demo-tenant", "telegram", row["external_message_id"]))
-        self.assertEqual(self.message_row(message_id)["delivery_status"], "delivered")
-        self.assertFalse(mark_outbound_delivered(self.db, "demo-tenant", "telegram", row["external_message_id"]))
+        # 回执推进：sent → delivered（幂等；Twilio 状态回调的落点，用合成行验证）
+        receipt_id = self.db.save_message(
+            "demo-tenant", self.wa_conv, "assistant", "回执基座消息", "channel-guidance",
+            channel="whatsapp", external_message_id="SM-synth-1", delivery_status="sent",
+        )
+        self.assertTrue(mark_outbound_delivered(self.db, "demo-tenant", "whatsapp", "SM-synth-1"))
+        self.assertEqual(self.message_row(receipt_id)["delivery_status"], "delivered")
+        self.assertFalse(mark_outbound_delivered(self.db, "demo-tenant", "whatsapp", "SM-synth-1"))
         # 详情页显示「已送达」，且不再提供重试
-        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.conv_a}", cookie=self.admin)
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/whatsapp/{self.wa_conv}", cookie=self.admin)
         self.assertEqual(status, 200)
         self.assertIn("已送达", page)
 
     def test_inbox_retry_button_flow_and_list_badge(self):
         conversation = self.db.get_conversation("demo-tenant", self.conv_a)
-        os.environ["TELEGRAM_API_BASE"] = "http://127.0.0.1:9/bot"
+        os.environ["LANGBOT_API_BASE"] = "http://127.0.0.1:9"
         try:
             message_id, sent, _error = enqueue_outbound(self.db, "demo-tenant", conversation, "assistant", "总线测试消息二", "channel-guidance")
         finally:
-            os.environ["TELEGRAM_API_BASE"] = self.mock.base_url()
+            os.environ["LANGBOT_API_BASE"] = self.mock.url
         self.assertFalse(sent)
         # 列表：显示「N 条发送失败」徽标
-        status, _, page = form_request(self.server, "GET", "/admin/inbox/telegram", cookie=self.admin)
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/langbot", cookie=self.admin)
         self.assertIn("1 条发送失败", page)
         # 详情：失败原因 + 「重试发送」按钮
-        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.conv_a}", cookie=self.admin)
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{self.conv_a}", cookie=self.admin)
         self.assertIn("发送失败：网络请求失败", page)
         self.assertIn("重试发送", page)
-        self.assertIn(f"/admin/inbox/telegram/{self.conv_a}/messages/{message_id}/retry", page)
+        self.assertIn(f"/admin/inbox/langbot/{self.conv_a}/messages/{message_id}/retry", page)
         # 点重试（真实 UI 表单 POST）→ 成功公告 + 消息可送达
-        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{self.conv_a}/messages/{message_id}/retry", {}, self.admin)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{self.conv_a}/messages/{message_id}/retry", {}, self.admin)
         self.assertEqual(status, 303)
         self.assertIn("notice=retried_ok", headers.get("Location", ""))
         self.assertEqual(self.message_row(message_id)["delivery_status"], "sent")
         self.assertIn("总线测试消息二", self.sent_texts(71001))
-        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.conv_a}?notice=retried_ok", cookie=self.admin)
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/langbot/{self.conv_a}?notice=retried_ok", cookie=self.admin)
         self.assertIn("重试成功", page)
         # 已成功消息再点重试（直接 POST）→ 幂等提示，不重发
         before = len(self.mock.sent_messages())
-        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{self.conv_a}/messages/{message_id}/retry", {}, self.admin)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/langbot/{self.conv_a}/messages/{message_id}/retry", {}, self.admin)
         self.assertIn("notice=retry_already", headers.get("Location", ""))
         self.assertEqual(before, len(self.mock.sent_messages()))
 
@@ -1165,7 +1007,7 @@ class OutboundBusTests(unittest.TestCase):
         # 模拟「进程中断」：消息已落队但从未投递
         stuck_id = self.db.save_message(
             "demo-tenant", self.conv_a, "assistant", "卡在队列里的消息", "channel-guidance",
-            channel="telegram", delivery_status="queued",
+            channel="langbot", delivery_status="queued",
         )
         env = os.environ.copy()
         result = subprocess.run(
@@ -1186,15 +1028,15 @@ class OutboundBusTests(unittest.TestCase):
         reply = self.db.conn.execute("SELECT * FROM lead_replies WHERE id=?", (draft,)).fetchone()
         self.assertEqual(reply["status"], "sent")
         self.assertTrue(reply["message_id"])
-        self.assertEqual(reply["channel"], "telegram")
+        self.assertEqual(reply["channel"], "langbot")
         self.assertIn("经渠道发送的正式回复", self.sent_texts(71002))
         # ② 失败 + 重试：复用同一条消息（不重复建消息）
-        os.environ["TELEGRAM_API_BASE"] = "http://127.0.0.1:9/bot"
+        os.environ["LANGBOT_API_BASE"] = "http://127.0.0.1:9"
         try:
             draft2 = self.db.create_reply_draft("demo-tenant", self.rfq_id, "先失败后重试的回复", "demo-admin@example.invalid")
             status, headers, _ = form_request(self.server, "POST", f"/admin/sales/{self.rfq_id}/replies/{draft2}", {"action": "channel"}, self.admin)
         finally:
-            os.environ["TELEGRAM_API_BASE"] = self.mock.base_url()
+            os.environ["LANGBOT_API_BASE"] = self.mock.url
         self.assertIn("notice=reply_channel_failed", headers.get("Location", ""))
         reply2 = self.db.conn.execute("SELECT * FROM lead_replies WHERE id=?", (draft2,)).fetchone()
         self.assertEqual(reply2["status"], "failed")

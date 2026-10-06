@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlencode
 
-from app import Database, make_server
+from app import make_server
 
 
 def form_request(server, method, path, fields=None, cookie=None):

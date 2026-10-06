@@ -4,7 +4,6 @@
 导出遵循权限并记录操作者与时间；资料缺口关联原问题与产品、可形成可分派的修订任务。
 """
 import http.client
-import json
 import tempfile
 import threading
 import unittest
