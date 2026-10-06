@@ -542,6 +542,41 @@ class Database:
                 used_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_handoff_codes_conversation ON buyer_handoff_codes(conversation_id);
+            CREATE TABLE IF NOT EXISTS channel_accounts (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                channel TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'disabled',
+                config_json TEXT NOT NULL DEFAULT '{}',
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_by TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                UNIQUE (tenant_id, channel)
+            );
+            CREATE TABLE IF NOT EXISTS channel_identities (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                channel TEXT NOT NULL,
+                external_user_id TEXT NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (tenant_id, channel, external_user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_channel_identities_conversation ON channel_identities(tenant_id, conversation_id);
+            CREATE TABLE IF NOT EXISTS rfq_form_tokens (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(id),
+                conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                token_hash TEXT NOT NULL,
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                revoked_at TEXT
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_rfq_form_tokens_hash ON rfq_form_tokens(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_rfq_form_tokens_conversation ON rfq_form_tokens(tenant_id, conversation_id);
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -793,9 +828,21 @@ class Database:
             ("idempotency_key", "TEXT"),
             ("request_hash", "TEXT"),
             ("result_revision_id", "TEXT"),
+            ("channel", "TEXT NOT NULL DEFAULT ''"),
+            ("external_message_id", "TEXT"),
+            ("delivery_status", "TEXT NOT NULL DEFAULT ''"),
+            ("delivery_error", "TEXT NOT NULL DEFAULT ''"),
+            ("actor_email", "TEXT NOT NULL DEFAULT ''"),
         ):
             if column not in message_columns:
                 self.conn.execute(f"ALTER TABLE messages ADD COLUMN {column} {definition}")
+        # 渠道消息去重：同一渠道同一条外部消息只落一次（列建成后再建索引，兼容旧库迁移顺序）。
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_external ON messages(tenant_id, channel, external_message_id) WHERE external_message_id IS NOT NULL"
+        )
+        conversation_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(conversations)")}
+        if "ai_paused" not in conversation_columns:
+            self.conn.execute("ALTER TABLE conversations ADD COLUMN ai_paused INTEGER NOT NULL DEFAULT 0")
         recommendation_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(recommendations)")}
         if "tentative_viewed" not in recommendation_columns:
             self.conn.execute("ALTER TABLE recommendations ADD COLUMN tentative_viewed INTEGER NOT NULL DEFAULT 0")
@@ -1351,6 +1398,10 @@ class Database:
         commit: bool = True,
         idempotency_key: str | None = None,
         request_hash: str | None = None,
+        channel: str = "",
+        external_message_id: str | None = None,
+        delivery_status: str = "",
+        actor_email: str = "",
     ) -> str:
         if not self.get_conversation(tenant_id, conversation_id):
             raise ValueError("会话不存在")
@@ -1359,13 +1410,127 @@ class Database:
             raise ValueError("消息不能为空")
         message_id = secrets.token_hex(12)
         self.conn.execute(
-            "INSERT INTO messages(id, tenant_id, conversation_id, role, content, source, idempotency_key, request_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (message_id, tenant_id, conversation_id, role, content, source, idempotency_key, request_hash, now_iso()),
+            "INSERT INTO messages(id, tenant_id, conversation_id, role, content, source, idempotency_key, request_hash, channel, external_message_id, delivery_status, actor_email, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (message_id, tenant_id, conversation_id, role, content, source, idempotency_key, request_hash, channel, external_message_id, delivery_status, actor_email, now_iso()),
         )
         self.conn.execute("UPDATE conversations SET updated_at=? WHERE tenant_id=? AND id=?", (now_iso(), tenant_id, conversation_id))
         if commit:
             self.conn.commit()
         return message_id
+
+    # ── V1-04 外部渠道接入：渠道账户 / 渠道身份 / RFQ 表单链接 / 会话 AI 开关 ──
+    def list_channel_accounts(self, tenant_id: str) -> dict[str, sqlite3.Row]:
+        rows = self.conn.execute("SELECT * FROM channel_accounts WHERE tenant_id=?", (tenant_id,)).fetchall()
+        return {row["channel"]: row for row in rows}
+
+    def get_channel_account(self, tenant_id: str, channel: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM channel_accounts WHERE tenant_id=? AND channel=?", (tenant_id, channel)
+        ).fetchone()
+
+    def save_channel_account(self, tenant_id: str, channel: str, config: dict, actor: str = "demo-admin") -> None:
+        """保存渠道公开配置（幂等 upsert）；机密凭证不进这里（走环境变量）。"""
+        if channel not in CHANNEL_KEYS:
+            raise ValueError("未知渠道")
+        now = now_iso()
+        config_json = json.dumps(config, ensure_ascii=False)
+        existing = self.get_channel_account(tenant_id, channel)
+        if existing:
+            self.conn.execute(
+                "UPDATE channel_accounts SET config_json=?, updated_by=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (config_json, actor, now, tenant_id, existing["id"]),
+            )
+        else:
+            self.conn.execute(
+                "INSERT INTO channel_accounts(id, tenant_id, channel, status, config_json, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, 'disabled', ?, ?, ?, ?, ?)",
+                (secrets.token_hex(12), tenant_id, channel, config_json, actor, now, actor, now),
+            )
+        self._audit(tenant_id, "channel", channel, "channel_configured", actor, ",".join(sorted(config.keys())))
+        self.conn.commit()
+
+    def set_channel_enabled(self, tenant_id: str, channel: str, enabled: bool, actor: str = "demo-admin") -> None:
+        """启用/停用渠道（默认关闭 = fail-closed；启用前无需强制凭证，缺失在页面与运行时如实提示）。"""
+        if channel not in CHANNEL_KEYS:
+            raise ValueError("未知渠道")
+        if not self.get_channel_account(tenant_id, channel):
+            self.save_channel_account(tenant_id, channel, {}, actor)
+        account = self.get_channel_account(tenant_id, channel)
+        self.conn.execute(
+            "UPDATE channel_accounts SET status=?, updated_by=?, updated_at=? WHERE tenant_id=? AND id=?",
+            ("enabled" if enabled else "disabled", actor, now_iso(), tenant_id, account["id"]),
+        )
+        self._audit(tenant_id, "channel", channel, "channel_enabled" if enabled else "channel_disabled", actor, "")
+        self.conn.commit()
+
+    def get_channel_identity(self, tenant_id: str, channel: str, external_user_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM channel_identities WHERE tenant_id=? AND channel=? AND external_user_id=?",
+            (tenant_id, channel, external_user_id),
+        ).fetchone()
+
+    def bind_channel_identity(self, tenant_id: str, channel: str, external_user_id: str, display_name: str, conversation_id: str) -> str:
+        """外部渠道用户 ↔ 会话绑定（一外部用户一持续会话）；重复绑定的去重由调用方按唯一约束处理。"""
+        if channel not in CHANNEL_KEYS:
+            raise ValueError("未知渠道")
+        if not self.get_conversation(tenant_id, conversation_id):
+            raise ValueError("会话不存在")
+        identity_id = secrets.token_hex(12)
+        now = now_iso()
+        self.conn.execute(
+            "INSERT INTO channel_identities(id, tenant_id, channel, external_user_id, display_name, conversation_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (identity_id, tenant_id, channel, external_user_id, display_name, conversation_id, now, now),
+        )
+        self.conn.commit()
+        return identity_id
+
+    def find_message_by_external(self, tenant_id: str, channel: str, external_message_id: str) -> sqlite3.Row | None:
+        """渠道消息去重查询：同一渠道同一条外部消息只处理一次。"""
+        return self.conn.execute(
+            "SELECT * FROM messages WHERE tenant_id=? AND channel=? AND external_message_id=?",
+            (tenant_id, channel, external_message_id),
+        ).fetchone()
+
+    def create_rfq_form_token(self, tenant_id: str, conversation_id: str, actor: str = "demo-admin") -> str:
+        """为会话生成 RFQ 填写链接令牌（只存摘要；可重复打开、可撤销；表单页在渠道切片上线）。"""
+        if not self.get_conversation(tenant_id, conversation_id):
+            raise ValueError("会话不存在")
+        token = secrets.token_urlsafe(32)
+        self.conn.execute(
+            "INSERT INTO rfq_form_tokens(id, tenant_id, conversation_id, token_hash, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (secrets.token_hex(12), tenant_id, conversation_id, hashlib.sha256(token.encode()).hexdigest(), actor, now_iso()),
+        )
+        self._audit(tenant_id, "conversation", conversation_id, "rfq_form_created", actor, "")
+        self.conn.commit()
+        return token
+
+    def get_rfq_form_token(self, tenant_id: str, token: str) -> sqlite3.Row | None:
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        return self.conn.execute(
+            "SELECT * FROM rfq_form_tokens WHERE tenant_id=? AND token_hash=? AND revoked_at IS NULL",
+            (tenant_id, digest),
+        ).fetchone()
+
+    def revoke_rfq_form_token(self, tenant_id: str, token_id: str, actor: str = "demo-admin") -> None:
+        row = self.conn.execute(
+            "SELECT * FROM rfq_form_tokens WHERE tenant_id=? AND id=?", (tenant_id, token_id)
+        ).fetchone()
+        if not row:
+            raise ValueError("链接不存在")
+        self.conn.execute(
+            "UPDATE rfq_form_tokens SET revoked_at=? WHERE tenant_id=? AND id=?", (now_iso(), tenant_id, token_id)
+        )
+        self.conn.commit()
+
+    def set_conversation_ai_paused(self, tenant_id: str, conversation_id: str, paused: bool, actor: str = "demo-admin") -> None:
+        """每会话「暂停 AI 自动回复」开关（默认继续自动答；人工介入不自动关闭）。"""
+        if not self.get_conversation(tenant_id, conversation_id):
+            raise ValueError("会话不存在")
+        self.conn.execute(
+            "UPDATE conversations SET ai_paused=?, updated_at=? WHERE tenant_id=? AND id=?",
+            (1 if paused else 0, now_iso(), tenant_id, conversation_id),
+        )
+        self._audit(tenant_id, "conversation", conversation_id, "conversation_ai_switch", actor, f"paused={1 if paused else 0}")
+        self.conn.commit()
 
     def get_revisions(self, tenant_id: str, conversation_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -4626,6 +4791,10 @@ CONSOLE_ICONS = """<svg width="0" height="0" style="position:absolute" aria-hidd
 <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
 <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></symbol>
 <symbol id="i-palette" viewBox="0 0 24 24"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></symbol>
+<symbol id="i-chat" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></symbol>
+<symbol id="i-send" viewBox="0 0 24 24"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></symbol>
+<symbol id="i-phone" viewBox="0 0 24 24"><path d="M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384"/></symbol>
+<symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></symbol>
 </defs></svg>"""
 
 
@@ -4836,6 +5005,7 @@ def admin_permission_area(path: str) -> tuple[str, str, str]:
     areas = (
         ("/admin/users", "访问「成员管理」", "管理员", "成员账号与模块授权关系到企业数据隔离，成员管理只对管理员开放。"),
         ("/admin/settings", "访问「企业设置」", "管理员", "企业设置会影响全企业买家的表单与跟进流程，只对管理员开放。"),
+        ("/admin/channels", "访问「渠道接入」", "管理员", "渠道接入包含对外连接与凭证引用配置，只对管理员开放。"),
         ("/admin/audit", "访问「操作记录」", "管理员", "操作记录包含全企业范围的操作轨迹，只对管理员开放。"),
         ("/admin/analytics", "访问「分析报表」", "管理员", "分析报表汇总全企业买家数据并提供导出入口，只对管理员开放。"),
         ("/admin/export", "导出数据", "管理员", "数据导出包含买方联系信息，只对管理员开放。"),
@@ -4849,6 +5019,7 @@ def admin_permission_area(path: str) -> tuple[str, str, str]:
         ("/admin/leads", "访问「销售工作台」", "模块权限「销售工作台」", module_why),
         ("/admin/rfqs", "访问「RFQ 询价」", "模块权限「RFQ 询价」", module_why),
         ("/admin/creative", "访问「产品展示页」", "模块权限「创意中心」", module_why),
+        ("/admin/inbox", "访问「会话收件箱」", "模块权限「会话收件箱」", module_why),
     )
     for prefix, area, required, why in areas:
         if path.startswith(prefix):
@@ -4964,6 +5135,11 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("rfqs", "/admin/rfqs", "file", "RFQ 询价"),
             ("tasks", "/admin/tasks", "tool", "人工任务"),
         )),
+        ("会话收件箱", (
+            ("inbox_web", "/admin/inbox/web", "chat", "网站聊天"),
+            ("inbox_telegram", "/admin/inbox/telegram", "send", "Telegram"),
+            ("inbox_whatsapp", "/admin/inbox/whatsapp", "phone", "WhatsApp"),
+        )),
         ("产品经营", (("products", "/admin/products", "box", "产品管理"),)),
         ("创意中心", (("creative", "/admin/creative", "palette", "产品展示页"),)),
         ("经营分析", (("analytics", "/admin/analytics", "chart", "分析报表"),)),
@@ -4973,10 +5149,11 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
         )),
         ("设置与治理", (
             ("settings", "/admin/settings", "sliders", "企业设置"),
+            ("channels", "/admin/channels", "plug", "渠道接入"),
             ("audit", "/admin/audit", "history", "操作记录"),
         )),
     )
-    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "creative": "创意中心", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "audit": "设置与治理", "analytics": "经营分析"}
+    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "creative": "创意中心", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "channels": "设置与治理", "audit": "设置与治理", "analytics": "经营分析", "inbox_web": "会话收件箱", "inbox_telegram": "会话收件箱", "inbox_whatsapp": "会话收件箱"}
     role_label = "管理员" if role == "admin" else ("员工" if role else "未登录")
     lang_target = f"{esc(path)}?lang={'en' if lang == 'zh' else 'zh'}"
     counts = nav_counts or {}
@@ -5066,11 +5243,34 @@ def parse_multipart(handler: BaseHTTPRequestHandler) -> dict[str, str | bytes]:
 DEMO_TOOL_PATHS = {"/admin/products/seed", "/admin/products/seed-lowara", "/admin/demo/seed", "/admin/lowara/seed"}
 
 # V1-01 账号与模块权限：账号只有两种（admin=管理员 / employee=普通员工）；员工的可访问模块由管理员逐项授权。
-GRANTABLE_MODULES = (("products", "产品管理"), ("tasks", "人工任务"), ("rfqs", "RFQ 询价"), ("sales", "销售工作台"), ("sites", "网站 API 接入"), ("creative", "创意中心"))
+GRANTABLE_MODULES = (("products", "产品管理"), ("tasks", "人工任务"), ("rfqs", "RFQ 询价"), ("sales", "销售工作台"), ("sites", "网站 API 接入"), ("creative", "创意中心"), ("inbox", "会话收件箱"))
 GRANTABLE_MODULE_KEYS = tuple(key for key, _label in GRANTABLE_MODULES)
 MODULE_LABELS = dict(GRANTABLE_MODULES)
 # 旧角色名兼容（旧库迁移与既有测试）：等价于"员工 + 对应模块授权"，能力与迁移前一致。
 LEGACY_ROLE_MODULES = {"sales": ("rfqs", "sales"), "engineer": ("tasks", "rfqs", "sales")}
+
+# ── V1-04 外部渠道接入（Telegram / WhatsApp）：渠道账户与会话收件箱 ──────────────
+# 渠道消息与网页聊天共用同一批会话/消息对象；渠道账户只存公开配置，
+# 机密凭证（bot 令牌 / Twilio 凭据）一律走本机环境变量读取，不入库、不落 Git、不回显。
+CHANNEL_KEYS = ("telegram", "whatsapp")
+CHANNEL_LABELS = {"telegram": "Telegram", "whatsapp": "WhatsApp"}
+# 会话收件箱的三个子模块（导航分别展示；web=网站聊天）
+INBOX_SECTIONS = (("inbox_web", "web", "网站聊天"), ("inbox_telegram", "telegram", "Telegram"), ("inbox_whatsapp", "whatsapp", "WhatsApp"))
+INBOX_SECTION_CHANNELS = {key: channel for key, channel, _label in INBOX_SECTIONS}
+INBOX_SECTION_LABELS = {key: label for key, _channel, label in INBOX_SECTIONS}
+CHANNEL_SECRET_ENV = {
+    "telegram": ("TELEGRAM_BOT_TOKEN",),
+    "whatsapp": ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM"),
+}
+# 模拟/测试用基地址（生产不设置即用官方默认）；适配器在后续切片接入。
+CHANNEL_API_BASE_ENV = {"telegram": "TELEGRAM_API_BASE", "whatsapp": "TWILIO_API_BASE"}
+
+
+def channel_secret_status(channel: str) -> dict:
+    """渠道凭据状态：只看环境变量“在不在”，绝不回显值（供渠道接入页展示）。"""
+    names = CHANNEL_SECRET_ENV.get(channel, ())
+    missing = [name for name in names if not os.environ.get(name, "").strip()]
+    return {"configured": not missing, "missing": missing}
 
 # ── V1-03 创意中心 · 产品展示页：板块库与标准模板（首批冻结，见 docs/V1-03-收口稿.md） ──
 # 板块库顺序 = 标准组合在现状公开页的自上而下顺序；fixed=不可关闭；default_enabled=标准模板默认开关。
@@ -5457,6 +5657,7 @@ AUDIT_ENTITY_LABELS = {
     "human_task": "人工任务", "rfq": "询价单", "lead": "线索", "product": "产品",
     "product_field": "产品字段", "source_document": "来源资料", "user": "成员账号", "settings": "企业设置",
     "material_task": "资料补充任务", "export": "数据导出", "reply": "回复草稿", "template": "产品展示页",
+    "channel": "渠道",
 }
 AUDIT_ACTION_LABELS = {
     "created": "创建", "updated": "更新", "activated": "启用", "deactivated": "停用",
@@ -5477,6 +5678,8 @@ AUDIT_ACTION_LABELS = {
     "template_created": "创建展示页", "template_draft_saved": "保存展示页改动",
     "template_submitted": "提交展示页给管理员", "template_published": "确认上线展示页", "template_withdrawn": "撤回展示页",
     "template_restored_defaults": "恢复默认设置",
+    "channel_configured": "保存渠道配置", "channel_enabled": "启用渠道", "channel_disabled": "停用渠道",
+    "conversation_ai_switch": "切换AI自动回复", "rfq_form_created": "生成询价表单链接",
 }
 
 
@@ -5546,7 +5749,7 @@ class Handler(BaseHTTPRequestHandler):
         requirement: str | None = "deny"
         if path in ("/admin", "/admin/nav-counts"):
             requirement = None
-        elif path.startswith("/admin/demo") or path.startswith("/admin/lowara") or path.startswith("/admin/users") or path.startswith("/admin/settings") or path.startswith("/admin/audit") or path.startswith("/admin/analytics") or path.startswith("/admin/export") or path.startswith("/admin/material-tasks"):
+        elif path.startswith("/admin/demo") or path.startswith("/admin/lowara") or path.startswith("/admin/users") or path.startswith("/admin/settings") or path.startswith("/admin/channels") or path.startswith("/admin/audit") or path.startswith("/admin/analytics") or path.startswith("/admin/export") or path.startswith("/admin/material-tasks"):
             requirement = "admin"
         else:
             for prefix, module_key in (
@@ -5557,6 +5760,7 @@ class Handler(BaseHTTPRequestHandler):
                 ("/admin/leads", "sales"),
                 ("/admin/rfqs", "rfqs"),
                 ("/admin/creative", "creative"),
+                ("/admin/inbox", "inbox"),
             ):
                 if path.startswith(prefix):
                     requirement = f"module:{module_key}"
@@ -5716,16 +5920,20 @@ class Handler(BaseHTTPRequestHandler):
         return module in getattr(self, "user_modules", set())
 
     def console_nav_keys(self) -> set[str]:
-        """侧栏可见集：概览人人可见；管理员另见成员管理；员工按已授权模块。"""
+        """侧栏可见集：概览人人可见；管理员另见成员管理/渠道接入等；员工按已授权模块。"""
         keys = {"admin"}
         if self.user_role == "admin":
             keys.add("users")
             keys.add("settings")
             keys.add("audit")
             keys.add("analytics")
+            keys.add("channels")
         for module_key in GRANTABLE_MODULE_KEYS:
             if self.has_module(module_key):
                 keys.add(module_key)
+        # 会话收件箱一个模块对应三个导航子模块（网站聊天 / Telegram / WhatsApp）。
+        if self.has_module("inbox"):
+            keys.update({"inbox_web", "inbox_telegram", "inbox_whatsapp"})
         return keys
 
     def login_page(self, query: dict[str, list[str]], error: str = "") -> None:
@@ -5919,6 +6127,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/admin/audit":
             self.admin_audit(query)
+            return
+        match = re.fullmatch(r"/admin/inbox/(web|telegram|whatsapp)", path)
+        if match:
+            self.admin_inbox(f"inbox_{match.group(1)}", query)
+            return
+        if path == "/admin/channels":
+            self.admin_channels(query)
             return
         if path == "/admin/analytics":
             self.admin_analytics(query)
@@ -7052,6 +7267,24 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 self.admin_creative_restore_defaults(match.group(1))
                 return
+            match = re.fullmatch(r"/admin/channels/(telegram|whatsapp)", path)
+            if match:
+                channel = match.group(1)
+                if channel == "telegram":
+                    config = {"bot_username": str(form.get("bot_username", "")).strip()[:64]}
+                else:
+                    config = {"display_name": str(form.get("display_name", "")).strip()[:64]}
+                self.db.save_channel_account(self.tenant_id, channel, config, self.actor)
+                self.redirect("/admin/channels?notice=saved")
+                return
+            match = re.fullmatch(r"/admin/channels/(telegram|whatsapp)/toggle", path)
+            if match:
+                channel = match.group(1)
+                account = self.db.get_channel_account(self.tenant_id, channel)
+                enabled = not (account and account["status"] == "enabled")
+                self.db.set_channel_enabled(self.tenant_id, channel, enabled, self.actor)
+                self.redirect(f"/admin/channels?notice={'enabled' if enabled else 'disabled'}")
+                return
             if path == "/admin/settings/stages":
                 self.admin_settings_save_stages(form)
                 return
@@ -8017,6 +8250,94 @@ class Handler(BaseHTTPRequestHandler):
         recipients = list(dict.fromkeys(candidates))
         self.db.set_tenant_setting(self.tenant_id, SETTING_NOTIFY_RECIPIENTS, recipients, self.actor)
         self.redirect("/admin/settings?notice=notify")
+
+    # ── V1-04 外部渠道接入：会话收件箱子模块（骨架）与渠道接入页 ──────────────
+    def admin_inbox(self, section: str, query: dict[str, list[str]]) -> None:
+        """会话收件箱子模块入口（V1-04 切片1 骨架）：列表与回复界面在后续切片上线。"""
+        channel = INBOX_SECTION_CHANNELS.get(section)
+        if not channel:
+            self.send_html(self.console_page("未找到", "<div class='error'>页面不存在。</div>", ""), 404)
+            return
+        label = INBOX_SECTION_LABELS[section]
+        if channel == "web":
+            count = self.db.conn.execute(
+                "SELECT COUNT(*) FROM conversations WHERE tenant_id=? AND source IN ('web','website_api')",
+                (self.tenant_id,),
+            ).fetchone()[0]
+            if count:
+                state_html = f"<p class='muted'>目前已有 {count} 条网站聊天会话入库；会话列表与详情（含 AI / 人工标注、直接回复）将在下一批接入。</p>"
+            else:
+                state_html = "<p class='muted'>还没有网站聊天会话；买方在官网窗口发起咨询后，会在这里统一查看与回复。</p>"
+        else:
+            account = self.db.get_channel_account(self.tenant_id, channel)
+            secret = channel_secret_status(channel)
+            identities = self.db.conn.execute(
+                "SELECT COUNT(*) FROM channel_identities WHERE tenant_id=? AND channel=?", (self.tenant_id, channel)
+            ).fetchone()[0]
+            if not account or account["status"] != "enabled":
+                state = "渠道未启用——管理员可在「设置与治理 › 渠道接入」完成配置并启用。"
+            elif not secret["configured"]:
+                state = f"渠道已启用，但本机凭证未配置（缺少 {'、'.join(secret['missing'])}）；凭证就绪前不会收发任何消息。"
+            else:
+                state = "渠道已启用且凭证就绪；连接、收发与回复将在对应切片上线。"
+            state_html = f"<p class='muted'>{esc(state)}</p><p class='muted'>已绑定买方：{identities} 位。</p>"
+        body = f"""
+<div class='toolbar'><div><h1>{esc(label)}</h1><div class='muted'>会话收件箱 · 同一批会话对象，按来源渠道分开展示，一眼看清消息来自哪里。</div></div></div>
+<section class='card'><div class='panel-title'><h2>{esc(label)}会话</h2></div>
+<div class='muted-block'>这里将统一展示渠道里的全部聊天记录（AI 回复与人工回复分开标注、人工显示回复人），并支持直接回复与发送 RFQ 填写链接。</div>
+{state_html}</section>"""
+        self.send_html(self.console_page(f"{label} · 会话", body, section))
+
+    def admin_channels(self, query: dict[str, list[str]]) -> None:
+        """渠道接入页（管理员）：配置与启停 Telegram / WhatsApp；凭证只读环境变量状态、不回显值。"""
+        accounts = self.db.list_channel_accounts(self.tenant_id)
+        notices = {
+            "saved": "<div class='notice'>渠道配置已保存。</div>",
+            "enabled": "<div class='notice'>渠道已启用。凭证就绪后，收信与发送将在对应切片上线时开始工作。</div>",
+            "disabled": "<div class='notice'>渠道已停用，不会收发任何消息。</div>",
+        }
+        notice = notices.get(query.get("notice", [""])[0], "")
+        guides = {
+            "telegram": "在 Telegram 里找 @BotFather 新建机器人 → 把机器人令牌写进本机环境变量 TELEGRAM_BOT_TOKEN（服务端读取，不入库、不回显）→ 回到这里填写机器人用户名并启用。本地开发用长轮询收信，无需公网地址；生产可切换 Webhook（带密钥校验）。",
+            "whatsapp": "走 Twilio：开通 WhatsApp 沙箱（手机发送加入码即可参与测试）→ 把 Account SID、Auth Token、（whatsapp: 前缀的）发送号码写进本机环境变量 TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM → 回到这里填写显示名称并启用。收信需要一条公网回调地址，联调时使用临时隧道。",
+        }
+        cards = []
+        for channel in CHANNEL_KEYS:
+            account = accounts.get(channel)
+            status = account["status"] if account else "disabled"
+            config = json.loads(account["config_json"]) if account else {}
+            secret = channel_secret_status(channel)
+            enabled = status == "enabled"
+            badge = "<span class='badge approved'>已启用</span>" if enabled else "<span class='badge'>已停用</span>"
+            if secret["configured"]:
+                secret_badge = "<span class='badge approved'>凭证已配置</span>"
+            else:
+                secret_badge = f"<span class='badge pending_review'>凭证未配置：{esc('、'.join(secret['missing']))}</span>"
+            if channel == "telegram":
+                field = f"<label>机器人用户名（公开显示）<input name='bot_username' value='{esc(str(config.get('bot_username', '')))}' placeholder='例如 @YourSellerBot'></label>"
+            else:
+                field = f"<label>显示名称（公开显示）<input name='display_name' value='{esc(str(config.get('display_name', '')))}' placeholder='例如 星海泵业'></label>"
+            toggle_label = "停用" if enabled else "启用"
+            toggle_class = "warn" if enabled else ""
+            cards.append(f"""<section class='card' style='margin-top:16px'>
+<div class='panel-title'><h2>{esc(CHANNEL_LABELS[channel])} {badge} {secret_badge}</h2></div>
+<form method='post' action='/admin/channels/{channel}'>
+{field}
+<p style='margin-top:10px'><button class='secondary'>保存配置</button></p>
+</form>
+<form method='post' action='/admin/channels/{channel}/toggle' style='margin-top:8px'>
+<p style='margin:0'><button class='{toggle_class}'>{toggle_label}渠道</button></p>
+</form>
+<p class='guide'>{esc(guides[channel])}</p>
+<p class='field-state'>机密凭证只从本机环境变量读取：页面不显示、数据库不保存、不进 Git；启用/停用与配置变更全部写入操作记录。</p>
+</section>""")
+        body = f"""
+<div class='toolbar'><div><h1>渠道接入</h1><div class='muted'>把 Telegram / WhatsApp 变成买方入口：消息进「会话收件箱」，回复从平台发出。</div></div></div>
+{notice}
+<section class='card'><div class='panel-title'><h2>如何工作</h2></div>
+<p class='muted' style='margin:0'>启用并配置凭证后：买方在渠道里的消息会进入「会话收件箱」，与网站聊天走同一批处理（需求确认、有据问答、人工接管、RFQ 填写链接）；卖家在平台里的回复会经渠道直达买方。功能默认关闭；收信与发送能力将在对应渠道切片上线后开始工作。</p></section>
+{''.join(cards)}"""
+        self.send_html(self.console_page("渠道接入", body, "channels"))
 
     def admin_audit(self, query: dict[str, list[str]]) -> None:
         try:
