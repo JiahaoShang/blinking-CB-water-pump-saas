@@ -109,3 +109,11 @@ cd "<worktree>" && set -a \
 - **停用 Dify 问答**：不带 `DIFY_QA_APP_KEY` 重启平台 → langbot 渠道立即回到本地资料问答（前端无感）。
 - **停用自动同步**：不带 `DIFY_KB_DATASET_ID`/`DIFY_KB_API_KEY` 重启 → 同步整体跳过（按钮显示未配置）；已同步的文档可手动删除（或恢复配置后按「收回产品」自动清理）。
 - 平台与 LangBot 侧无 schema 破坏性变更（仅新增 `kb_sync_state` 表）；Dify 为独立服务，停容器不影响平台其余功能。
+
+## 10. 小项补记（2026-10-07，提交 `d80b202`）
+
+**统一问答入口**：`answer_question_prefer_dify(db, ai, tenant_id, conversation_id, question, product_id, user_label)`——配置 Dify 时优先 Dify（哨兵 `[[NO_ANSWER]]` → needs_human 同口径；引擎故障静默回落本地）；返回附带 `source ∈ {dify, local}`。渠道分流 ⑤（langbot）与网页两入口已全部改用；其余渠道保持本地。
+
+**Dify 覆盖网页入口**：`/api/v1/buyer/conversations/<id>/questions`（参考客户端）与 `/inquiry/<id>/ask`（旧询价页）提问均优先走 Dify；`user` 标签分别为 `web:<conversation_id>`。真机核验（旧询价页买方 cookie 链路）：问「CB-120C 的适用介质是什么？」→ grounded 回答（出自知识库 CB-120C 文档）→ assistant/grounded-answer 落库。
+
+**退役旧 Telegram 直连**：对客入口统一为 LangBot 单轨（@Growave_v2bot）。操作：旧轮询进程停止；渠道经后台路径停用（`telegram=disabled`）；渠道页与总述加退役说明。**代码与测试保留**（渠道停用即不收发，可回滚）；收件箱 Telegram 分栏保留用于历史会话查看。
