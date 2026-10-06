@@ -73,39 +73,46 @@ def main() -> None:
 
     offset = 0
     while True:
-        if not channel_enabled():
-            # 与 Webhook 口径一致：停用渠道不收任何消息（不消费、不落库）。
-            print("渠道未启用：暂停收信；在「设置与治理 › 渠道接入」启用后自动继续。")
-            if args.once:
-                return
-            time.sleep(max(args.interval, 5.0))
-            continue
         try:
-            data = telegram_call(base, token, "getUpdates", {"offset": offset + 1 if offset else 0, "timeout": args.timeout}, timeout=max(args.timeout + 10, 30))
-        except app_module.ChannelSendError as error:
-            print(f"拉取失败：{error}")
-            if args.once:
-                raise SystemExit(2)
-            time.sleep(max(args.interval, 5.0))
-            continue
-        updates = data.get("result") or []
-        for update in updates:
-            try:
-                offset = max(offset, int(update.get("update_id") or 0))
-            except (TypeError, ValueError):
-                pass
-            try:
-                outcome = app_module.handle_telegram_update(db, ai, tenant_id, update)
-            except Exception as error:  # 单条失败不阻塞后续
-                print(f"update {update.get('update_id')} 处理失败：{error}")
+            if not channel_enabled():
+                # 与 Webhook 口径一致：停用渠道不收任何消息（不消费、不落库）。
+                print("渠道未启用：暂停收信；在「设置与治理 › 渠道接入」启用后自动继续。")
+                if args.once:
+                    return
+                time.sleep(max(args.interval, 5.0))
                 continue
-            if outcome:
-                print(json.dumps({"update_id": update.get("update_id"), **outcome}, ensure_ascii=False))
-        if args.once:
-            print(f"本轮完成：处理 {len(updates)} 条更新。")
-            return
-        if not updates:
-            time.sleep(args.interval)
+            try:
+                data = telegram_call(base, token, "getUpdates", {"offset": offset + 1 if offset else 0, "timeout": args.timeout}, timeout=max(args.timeout + 10, 30))
+            except app_module.ChannelSendError as error:
+                print(f"拉取失败：{error}")
+                if args.once:
+                    raise SystemExit(2)
+                time.sleep(max(args.interval, 5.0))
+                continue
+            updates = data.get("result") or []
+            for update in updates:
+                try:
+                    offset = max(offset, int(update.get("update_id") or 0))
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    outcome = app_module.handle_telegram_update(db, ai, tenant_id, update)
+                except Exception as error:  # 单条失败不阻塞后续
+                    print(f"update {update.get('update_id')} 处理失败：{error}")
+                    continue
+                if outcome:
+                    print(json.dumps({"update_id": update.get("update_id"), **outcome}, ensure_ascii=False))
+            if args.once:
+                print(f"本轮完成：处理 {len(updates)} 条更新。")
+                return
+            if not updates:
+                time.sleep(args.interval)
+        except Exception as error:
+            # 兜底：任何未预期异常都不允许让轮询终止（现场曾出现进程意外退出且无留痕）
+            print(f"轮询循环未预期异常（将自动重试）：{error!r}", flush=True)
+            if args.once:
+                raise
+            time.sleep(max(args.interval, 5.0))
 
 
 if __name__ == "__main__":
