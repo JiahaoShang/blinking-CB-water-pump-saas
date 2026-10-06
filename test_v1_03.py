@@ -1063,17 +1063,29 @@ class TemplateAuditTests(unittest.TestCase):
             "preview": "看效果 · 买家视角",
             "publish": "产品页联动",
         }
+        banned = ("字段", "区块", "提示词", "草稿")
         for step, phrase in expectations.items():
             status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}?step={step}", cookie=self.admin)
             self.assertEqual(status, 200)
             self.assertIn(phrase, page)
             stripped = re.sub(r"<style>.*?</style>|<script>.*?</script>", "", page, flags=re.S)
-            self.assertNotIn("字段", stripped)
+            for word in banned:
+                self.assertNotIn(word, stripped, f"主路径出现禁用词「{word}」（step={step}）")
             self.assertEqual(page.count("class='flowbar"), 1)
             bar = re.search(r"<div class='flowbar.*?</div>", page, flags=re.S)
             self.assertIsNotNone(bar)
             bar_text = re.sub(r"href='[^']*'", "", bar.group(0))
             self.assertIsNone(re.search(r"[0-9]", bar_text), f"模块条不应含数字: step={step}")
+        # 首页同样检查（「标准模板（推荐）」为 v0.3 定稿命名，不在禁用清单内）
+        pid = self.db.create_product("demo-tenant", "S8-TERM-100", "术语测试机", "测试用途", "demo-admin@example.invalid")
+        self.db.set_category_candidate("demo-tenant", pid, "术语准备品类", "manual", "demo-admin@example.invalid")
+        self.db.approve_category("demo-tenant", pid, "demo-admin@example.invalid")
+        status, _, home = form_request(self.server, "GET", "/admin/creative", cookie=self.admin)
+        self.assertEqual(status, 200)
+        home_stripped = re.sub(r"<style>.*?</style>|<script>.*?</script>", "", home, flags=re.S)
+        for word in banned:
+            self.assertNotIn(word, home_stripped, f"首页出现禁用词「{word}」")
+        self.assertIn("标准模板（推荐）", home)
         # 管理员的编辑区带「操作记录」入口；员工没有
         status, _, page = form_request(self.server, "GET", f"/admin/creative/{tid}", cookie=self.admin)
         self.assertIn("/admin/audit?type=template", page)

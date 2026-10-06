@@ -4336,7 +4336,7 @@ hr{border:0;border-top:1px solid var(--border-subtle);margin:16px 0}
 .console .side-foot{margin-top:auto;padding:12px 8px 4px;border-top:1px solid var(--nav-line);font-size:11px;color:var(--nav-text-2);line-height:1.9;overflow-wrap:anywhere}
 .console .side-foot a{font-size:11px}
 .console .shell{min-width:0;display:flex;flex-direction:column}
-.console .topbar{position:sticky;top:0;z-index:15;height:var(--topbar-h);display:flex;align-items:center;gap:10px;padding:0 24px;background:var(--topbar-bg);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
+.console .topbar{position:sticky;top:0;z-index:15;height:var(--topbar-h);display:flex;flex-direction:row;align-items:center;gap:10px;padding:0 24px;background:var(--topbar-bg);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
 .console .crumb{font-size:12px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .console .crumb b{color:var(--text-1);font-weight:600}
 .console .topbar .grow{flex:1}
@@ -8593,7 +8593,7 @@ class Handler(BaseHTTPRequestHandler):
 <p class='muted' style='margin:0 0 14px'>{version_line}</p>
 <div class='actions' style='display:flex;gap:10px;flex-wrap:wrap'>{actions}</div>
 <p class='guide'>{guide}</p>
-<p class='guide'>上线后的版本会被冻结保存：以后继续修改草稿，不会影响买家看到的版本。</p>
+<p class='guide'>上线后的版本会被冻结保存：以后继续修改，不会影响买家看到的版本。</p>
 </section>
 <section class='card' style='margin-top:16px'><div class='panel-title'><h2>会用到这份展示页的产品</h2><span class='muted'>发布或重新发布后自动应用</span></div>
 <div class='simple-list'>{products_html}</div></section>"""
