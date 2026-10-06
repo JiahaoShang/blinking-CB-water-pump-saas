@@ -34,7 +34,11 @@ from app import (  # noqa: E402
     GRANTABLE_MODULE_KEYS,
     Database,
     channel_secret_status,
+    dispatch_outbound,
+    enqueue_outbound,
     make_server,
+    mark_outbound_delivered,
+    retry_outbound_message,
 )
 import mock_telegram  # noqa: E402
 import mock_whatsapp  # noqa: E402
@@ -943,7 +947,7 @@ class TelegramPipelineTests(unittest.TestCase):
         self.assertEqual(row["delivery_status"], "sent")
         self.assertEqual(row["actor_email"], "demo-admin@example.invalid")
         status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{conversation_id}?notice=sent", cookie=self.admin)
-        self.assertIn("已送达", page)
+        self.assertIn("已发送", page)
         # 失败可见：临时把模拟地址指向不可达端口
         os.environ["TELEGRAM_API_BASE"] = "http://127.0.0.1:9/bot"
         try:
@@ -1017,6 +1021,212 @@ class TelegramPipelineTests(unittest.TestCase):
         # 未知 hook_id → 404
         status, _body = json_http(self.server, "POST", "/api/v1/channels/telegram/webhook/unknown-hook-123", update, headers={"X-Telegram-Bot-Api-Secret-Token": "hook-secret-test"})
         self.assertEqual(status, 404)
+
+
+class OutboundBusTests(unittest.TestCase):
+    """切片④：出站总线与 F-22 状态机——重试幂等、回执、销售侧真发、补投工人、主动门控。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.db_path = Path(cls.temp_dir.name) / "app.db"
+        cls.mock = mock_telegram.MockTelegramServer()
+        cls.env_backup = {name: os.environ.get(name) for name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_API_BASE", "TELEGRAM_WEBHOOK_SECRET")}
+        os.environ["TELEGRAM_BOT_TOKEN"] = "123:BUS-TOKEN"
+        os.environ["TELEGRAM_API_BASE"] = cls.mock.base_url()
+        os.environ["TELEGRAM_WEBHOOK_SECRET"] = "bus-hook-secret"
+        cls.server = make_server(cls.db_path, port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        cls.db.save_channel_account("demo-tenant", "telegram", {"bot_username": "@bus_bot", "webhook_id": "bus-hook-12345678"}, "demo-admin@example.invalid")
+        cls.db.set_channel_enabled("demo-tenant", "telegram", True, "demo-admin@example.invalid")
+        # 会话 A：总线重试/回执/收件箱重试用
+        cls.conv_a = cls.db.create_conversation("demo-tenant", "telegram", "en")
+        cls.db.bind_channel_identity("demo-tenant", "telegram", "71001", "Bus Buyer", cls.conv_a)
+        # 会话 B：销售侧真发（RFQ→线索自动生成）
+        cls.conv_b = cls.db.create_conversation("demo-tenant", "telegram", "en")
+        cls.db.bind_channel_identity("demo-tenant", "telegram", "71002", "Sales Buyer", cls.conv_b)
+        cls.rfq_id, _created = cls.db.create_rfq(
+            "demo-tenant", cls.conv_b, "sub-bus-1",
+            {"contact_email": "bus@example.invalid", "contact_phone": "+49", "quantity": "1", "region": "Germany"},
+            "总线测试询价",
+        )
+        # 会话 C：主动门控（独立，避免串扰）
+        cls.conv_c = cls.db.create_conversation("demo-tenant", "telegram", "en")
+        cls.db.bind_channel_identity("demo-tenant", "telegram", "71003", "Gate Buyer", cls.conv_c)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.mock.stop()
+        cls.temp_dir.cleanup()
+        for name, value in cls.env_backup.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def message_row(self, message_id):
+        return self.db.conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+
+    def sent_texts(self, chat_id):
+        return [item["text"] for item in self.mock.sent_messages() if int(item["chat"]["id"]) == int(chat_id)]
+
+    def test_dispatch_retry_idempotent_and_delivered_receipt(self):
+        conversation = self.db.get_conversation("demo-tenant", self.conv_a)
+        os.environ["TELEGRAM_API_BASE"] = "http://127.0.0.1:9/bot"  # 先制造一次失败
+        try:
+            message_id, sent, error = enqueue_outbound(self.db, "demo-tenant", conversation, "assistant", "总线测试消息一", "channel-guidance")
+        finally:
+            os.environ["TELEGRAM_API_BASE"] = self.mock.base_url()
+        self.assertFalse(sent)
+        self.assertIn("网络请求失败", error)
+        row = self.message_row(message_id)
+        self.assertEqual(row["delivery_status"], "failed")
+        self.assertEqual(row["delivery_attempts"], 1)
+        # 修复后重试 → sent；尝试数 +1；审计留痕
+        sent, error = retry_outbound_message(self.db, "demo-tenant", message_id, "demo-admin@example.invalid")
+        self.assertTrue(sent, error)
+        row = self.message_row(message_id)
+        self.assertEqual(row["delivery_status"], "sent")
+        self.assertEqual(row["delivery_attempts"], 2)
+        self.assertTrue(row["external_message_id"])
+        self.assertIn("总线测试消息一", self.sent_texts(71001))
+        audits = [item["action"] for item in self.db.conn.execute(
+            "SELECT action FROM audit_log WHERE tenant_id='demo-tenant' AND entity_id=? ORDER BY id", (message_id,)
+        )]
+        self.assertIn("outbound_retried", audits)
+        # 幂等：已发送再重试 → 不重发
+        before = len(self.mock.sent_messages())
+        sent, _ = retry_outbound_message(self.db, "demo-tenant", message_id, "demo-admin@example.invalid")
+        self.assertTrue(sent)
+        self.assertEqual(before, len(self.mock.sent_messages()))
+        # 回执推进：sent → delivered（幂等）
+        self.assertTrue(mark_outbound_delivered(self.db, "demo-tenant", "telegram", row["external_message_id"]))
+        self.assertEqual(self.message_row(message_id)["delivery_status"], "delivered")
+        self.assertFalse(mark_outbound_delivered(self.db, "demo-tenant", "telegram", row["external_message_id"]))
+        # 详情页显示「已送达」，且不再提供重试
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.conv_a}", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("已送达", page)
+
+    def test_inbox_retry_button_flow_and_list_badge(self):
+        conversation = self.db.get_conversation("demo-tenant", self.conv_a)
+        os.environ["TELEGRAM_API_BASE"] = "http://127.0.0.1:9/bot"
+        try:
+            message_id, sent, _error = enqueue_outbound(self.db, "demo-tenant", conversation, "assistant", "总线测试消息二", "channel-guidance")
+        finally:
+            os.environ["TELEGRAM_API_BASE"] = self.mock.base_url()
+        self.assertFalse(sent)
+        # 列表：显示「N 条发送失败」徽标
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/telegram", cookie=self.admin)
+        self.assertIn("1 条发送失败", page)
+        # 详情：失败原因 + 「重试发送」按钮
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.conv_a}", cookie=self.admin)
+        self.assertIn("发送失败：网络请求失败", page)
+        self.assertIn("重试发送", page)
+        self.assertIn(f"/admin/inbox/telegram/{self.conv_a}/messages/{message_id}/retry", page)
+        # 点重试（真实 UI 表单 POST）→ 成功公告 + 消息可送达
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{self.conv_a}/messages/{message_id}/retry", {}, self.admin)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=retried_ok", headers.get("Location", ""))
+        self.assertEqual(self.message_row(message_id)["delivery_status"], "sent")
+        self.assertIn("总线测试消息二", self.sent_texts(71001))
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.conv_a}?notice=retried_ok", cookie=self.admin)
+        self.assertIn("重试成功", page)
+        # 已成功消息再点重试（直接 POST）→ 幂等提示，不重发
+        before = len(self.mock.sent_messages())
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{self.conv_a}/messages/{message_id}/retry", {}, self.admin)
+        self.assertIn("notice=retry_already", headers.get("Location", ""))
+        self.assertEqual(before, len(self.mock.sent_messages()))
+
+    def test_outbound_worker_flush_stuck_queue(self):
+        # 模拟「进程中断」：消息已落队但从未投递
+        stuck_id = self.db.save_message(
+            "demo-tenant", self.conv_a, "assistant", "卡在队列里的消息", "channel-guidance",
+            channel="telegram", delivery_status="queued",
+        )
+        env = os.environ.copy()
+        result = subprocess.run(
+            [sys.executable, "tools/channels/outbound_worker.py", "--db", str(self.db_path), "--once", "--min-age", "0"],
+            cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("已补投", result.stdout)
+        self.assertEqual(self.message_row(stuck_id)["delivery_status"], "sent")
+        self.assertIn("卡在队列里的消息", self.sent_texts(71001))
+
+    def test_sales_reply_via_channel_success_failure_retry_and_gates(self):
+        # ① 成功：草稿经渠道发送
+        draft = self.db.create_reply_draft("demo-tenant", self.rfq_id, "经渠道发送的正式回复", "demo-admin@example.invalid")
+        status, headers, _ = form_request(self.server, "POST", f"/admin/sales/{self.rfq_id}/replies/{draft}", {"action": "channel"}, self.admin)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=reply_channel_sent", headers.get("Location", ""))
+        reply = self.db.conn.execute("SELECT * FROM lead_replies WHERE id=?", (draft,)).fetchone()
+        self.assertEqual(reply["status"], "sent")
+        self.assertTrue(reply["message_id"])
+        self.assertEqual(reply["channel"], "telegram")
+        self.assertIn("经渠道发送的正式回复", self.sent_texts(71002))
+        # ② 失败 + 重试：复用同一条消息（不重复建消息）
+        os.environ["TELEGRAM_API_BASE"] = "http://127.0.0.1:9/bot"
+        try:
+            draft2 = self.db.create_reply_draft("demo-tenant", self.rfq_id, "先失败后重试的回复", "demo-admin@example.invalid")
+            status, headers, _ = form_request(self.server, "POST", f"/admin/sales/{self.rfq_id}/replies/{draft2}", {"action": "channel"}, self.admin)
+        finally:
+            os.environ["TELEGRAM_API_BASE"] = self.mock.base_url()
+        self.assertIn("notice=reply_channel_failed", headers.get("Location", ""))
+        reply2 = self.db.conn.execute("SELECT * FROM lead_replies WHERE id=?", (draft2,)).fetchone()
+        self.assertEqual(reply2["status"], "failed")
+        first_message_id = reply2["message_id"]
+        status, headers, _ = form_request(self.server, "POST", f"/admin/sales/{self.rfq_id}/replies/{draft2}", {"action": "channel"}, self.admin)
+        self.assertIn("notice=reply_channel_sent", headers.get("Location", ""))
+        reply2 = self.db.conn.execute("SELECT * FROM lead_replies WHERE id=?", (draft2,)).fetchone()
+        self.assertEqual(reply2["status"], "sent")
+        self.assertEqual(reply2["message_id"], first_message_id)  # 重试不换消息
+        self.assertIn("先失败后重试的回复", self.sent_texts(71002))
+        # ③ 线下记录仍可用（同一渠道会话也不强制走真发）
+        draft3 = self.db.create_reply_draft("demo-tenant", self.rfq_id, "线下邮件记录的回复", "demo-admin@example.invalid")
+        status, headers, _ = form_request(self.server, "POST", f"/admin/sales/{self.rfq_id}/replies/{draft3}", {"action": "sent", "channel": "email"}, self.admin)
+        self.assertIn("notice=reply_sent", headers.get("Location", ""))
+        self.assertEqual(self.db.conn.execute("SELECT * FROM lead_replies WHERE id=?", (draft3,)).fetchone()["message_id"], "")
+        # ④ 停止主动联系门控：渠道真发被阻止（不建消息、草稿保持）
+        self.db.stop_proactive_contact("demo-tenant", self.conv_b, "请不要再主动联系", "buyer_chat", "buyer")
+        draft4 = self.db.create_reply_draft("demo-tenant", self.rfq_id, "被门控阻止的回复", "demo-admin@example.invalid")
+        status, headers, _ = form_request(self.server, "POST", f"/admin/sales/{self.rfq_id}/replies/{draft4}", {"action": "channel"}, self.admin)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=reply_stop_blocked", headers.get("Location", ""))
+        reply4 = self.db.conn.execute("SELECT * FROM lead_replies WHERE id=?", (draft4,)).fetchone()
+        self.assertEqual(reply4["status"], "draft")
+        self.assertEqual(reply4["message_id"], "")
+
+    def test_proactive_gate_in_bus_entry(self):
+        # 停止主动联系后：主动消息被总线拒绝且不留下任何消息；回应式消息不受影响
+        self.db.stop_proactive_contact("demo-tenant", self.conv_c, "不再接收推销", "buyer_chat", "buyer")
+        conversation = self.db.get_conversation("demo-tenant", self.conv_c)
+        before = self.db.conn.execute("SELECT COUNT(*) AS n FROM messages WHERE conversation_id=?", (self.conv_c,)).fetchone()["n"]
+        with self.assertRaises(ValueError):
+            enqueue_outbound(self.db, "demo-tenant", conversation, "assistant", "主动推销消息", "rfq-link", proactive=True)
+        after = self.db.conn.execute("SELECT COUNT(*) AS n FROM messages WHERE conversation_id=?", (self.conv_c,)).fetchone()["n"]
+        self.assertEqual(before, after)
+        # 回应式不受门控（对买方消息的回复）
+        _message_id, sent, _error = enqueue_outbound(self.db, "demo-tenant", conversation, "staff", "卖家回复：回应内容", "staff-reply", proactive=False)
+        self.assertTrue(sent)
+        self.assertIn("回应内容", self.sent_texts(71003))
+
+    def test_dispatch_idempotent_for_sent_messages(self):
+        # 直接对已发送消息调用投递 → 幂等返回且不重发（并发/手动重复调用防护）
+        conversation = self.db.get_conversation("demo-tenant", self.conv_a)
+        message_id, sent, _error = enqueue_outbound(self.db, "demo-tenant", conversation, "assistant", "幂等测试消息", "channel-guidance")
+        self.assertTrue(sent)
+        before = len(self.mock.sent_messages())
+        sent, _error = dispatch_outbound(self.db, "demo-tenant", message_id)
+        self.assertTrue(sent)
+        self.assertEqual(before, len(self.mock.sent_messages()))
 
 
 if __name__ == "__main__":

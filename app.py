@@ -501,6 +501,7 @@ class Database:
                 body TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'draft',
                 channel TEXT NOT NULL DEFAULT '',
+                message_id TEXT NOT NULL DEFAULT '',
                 created_by TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_by TEXT NOT NULL DEFAULT '',
@@ -592,6 +593,8 @@ class Database:
                 idempotency_key TEXT,
                 request_hash TEXT,
                 result_revision_id TEXT,
+                delivery_attempts INTEGER NOT NULL DEFAULT 0,
+                delivery_updated_at TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS requirement_revisions (
@@ -849,6 +852,8 @@ class Database:
             ("external_message_id", "TEXT"),
             ("delivery_status", "TEXT NOT NULL DEFAULT ''"),
             ("delivery_error", "TEXT NOT NULL DEFAULT ''"),
+            ("delivery_attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("delivery_updated_at", "TEXT"),
             ("actor_email", "TEXT NOT NULL DEFAULT ''"),
         ):
             if column not in message_columns:
@@ -857,6 +862,9 @@ class Database:
         self.conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_external ON messages(tenant_id, channel, external_message_id) WHERE external_message_id IS NOT NULL"
         )
+        lead_reply_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(lead_replies)")}
+        if "message_id" not in lead_reply_columns:
+            self.conn.execute("ALTER TABLE lead_replies ADD COLUMN message_id TEXT NOT NULL DEFAULT ''")
         conversation_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(conversations)")}
         if "ai_paused" not in conversation_columns:
             self.conn.execute("ALTER TABLE conversations ADD COLUMN ai_paused INTEGER NOT NULL DEFAULT 0")
@@ -2485,11 +2493,11 @@ class Database:
             self._audit(tenant_id, "lead", lead["id"], "milestone_completed", actor, f"key={key};label={label}")
             return True
 
-    # ── V1-09：回复草稿（平台不自动外发；线下发送后记录；发送前检查停止主动联系）──
+    # ── V1-09：回复草稿（渠道会话可经出站总线真发；其余线下发送后记录；发送前检查停止主动联系）──
     def list_lead_replies(self, tenant_id: str, lead_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM lead_replies WHERE tenant_id=? AND lead_id=? "
-            "ORDER BY CASE status WHEN 'draft' THEN 0 WHEN 'sent' THEN 1 ELSE 2 END, created_at DESC",
+            "ORDER BY CASE status WHEN 'draft' THEN 0 WHEN 'failed' THEN 1 WHEN 'queued' THEN 2 WHEN 'sent' THEN 3 ELSE 4 END, created_at DESC",
             (tenant_id, lead_id),
         ).fetchall()
 
@@ -2566,6 +2574,55 @@ class Database:
                 (body, channel, actor, timestamp, actor, timestamp, tenant_id, reply_id),
             )
             self._audit(tenant_id, "reply", reply_id, "sent", actor, f"lead={reply['lead_id']};channel={channel}")
+
+    def send_reply_via_channel(self, tenant_id: str, reply_id: str, actor: str) -> tuple[bool, str]:
+        """F-22：回复草稿经真实渠道发送（draft/failed/queued → queued → sent/failed）。
+
+        - 只在「会话已接渠道」时可用；每次尝试都检查停止主动联系（被阻止抛 ValueError）；
+        - 重试复用同一条会话消息（message_id 关联），绝不重复建消息、重复发送；
+        - 审计 action=sent_via_channel（含渠道、结果与尝试次数）。
+        """
+        reply = self._get_lead_reply(tenant_id, reply_id)
+        if reply["status"] == "sent":
+            return True, ""
+        lead = self.conn.execute("SELECT * FROM leads WHERE tenant_id=? AND id=?", (tenant_id, reply["lead_id"])).fetchone()
+        if not lead:
+            raise ValueError("线索不存在")
+        conversation = self.get_conversation(tenant_id, lead["conversation_id"])
+        channel = (conversation["source"] or "") if conversation else ""
+        if not conversation or channel not in CHANNEL_KEYS:
+            raise ValueError("该会话没有已接入的发送渠道")
+        preference = self.get_contact_preference(tenant_id, conversation["id"])
+        if preference and preference["stop_proactive_contact"]:
+            raise ValueError("买方已要求停止主动联系，发送被阻止")
+        message_id = reply["message_id"]
+        if not message_id:
+            message_id = self.save_message(
+                tenant_id, conversation["id"], "staff", reply["body"], "lead-reply",
+                channel=channel, delivery_status="queued", actor_email=actor,
+            )
+            self.conn.execute(
+                "UPDATE lead_replies SET message_id=?, channel=?, updated_by=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (message_id, channel, actor, now_iso(), tenant_id, reply_id),
+            )
+            self.conn.commit()
+        sent, error = dispatch_outbound(self, tenant_id, message_id)
+        attempts_row = self.conn.execute("SELECT delivery_attempts FROM messages WHERE id=?", (message_id,)).fetchone()
+        attempts = attempts_row["delivery_attempts"] if attempts_row else 0
+        timestamp = now_iso()
+        if sent:
+            self.conn.execute(
+                "UPDATE lead_replies SET status='sent', sent_by=?, sent_at=?, updated_by=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (actor, timestamp, actor, timestamp, tenant_id, reply_id),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE lead_replies SET status='failed', updated_by=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (actor, timestamp, tenant_id, reply_id),
+            )
+        self._audit(tenant_id, "reply", reply_id, "sent_via_channel", actor, f"channel={channel};result={'sent' if sent else 'failed'};attempts={attempts}")
+        self.conn.commit()
+        return sent, error
 
     def list_entity_audit(self, tenant_id: str, entity_ids: list[str]) -> list[sqlite3.Row]:
         if not entity_ids:
@@ -5415,28 +5472,45 @@ def channel_outbound_text(message: sqlite3.Row) -> str:
     return content
 
 
-def deliver_channel_message(db: Database, tenant_id: str, conversation_id: str, message_id: str) -> tuple[bool, str]:
-    """把一条已保存的出站消息投递到渠道；更新 delivery_status / external_message_id / delivery_error。
+def _mark_outbound_failed(db: Database, message_id: str, error: str) -> tuple[bool, str]:
+    """把一次投递失败落成可见状态（原因进聊天记录；可人工重试）。"""
+    db.conn.execute(
+        "UPDATE messages SET delivery_status='failed', delivery_error=?, delivery_updated_at=? WHERE id=?",
+        (error, now_iso(), message_id),
+    )
+    db.conn.commit()
+    return False, error
 
-    网站聊天会话没有外发通道，视为即时送达。返回（是否送达, 失败原因）。
+
+def dispatch_outbound(db: Database, tenant_id: str, message_id: str) -> tuple[bool, str]:
+    """出站总线投递（发送与重试共用）：queued/failed → sent / failed。
+
+    - 已成功（sent/delivered）的消息幂等返回，绝不重发；
+    - 每次尝试先自增 attempts、刷新 delivery_updated_at，崩溃/失败都留痕；
+    - 网站聊天会话没有外发通道：视为即时可见，直接成功。
     """
-    conversation = db.get_conversation(tenant_id, conversation_id)
     message = db.conn.execute("SELECT * FROM messages WHERE id=? AND tenant_id=?", (message_id, tenant_id)).fetchone()
-    if not conversation or not message:
-        return False, "消息或会话不存在"
+    if not message:
+        return False, "消息不存在"
+    conversation = db.get_conversation(tenant_id, message["conversation_id"])
+    if not conversation:
+        return False, "会话不存在"
     channel = conversation["source"] or ""
     if channel not in CHANNEL_KEYS:
         return True, ""
+    if (message["delivery_status"] or "") in ("sent", "delivered"):
+        return True, ""
+    db.conn.execute(
+        "UPDATE messages SET delivery_status='queued', delivery_error='', delivery_attempts=COALESCE(delivery_attempts,0)+1, delivery_updated_at=? WHERE id=?",
+        (now_iso(), message_id),
+    )
+    db.conn.commit()
     account = db.get_channel_account(tenant_id, channel)
     if not account or account["status"] != "enabled":
-        db.conn.execute("UPDATE messages SET delivery_status='failed', delivery_error=? WHERE id=?", ("渠道未启用", message_id))
-        db.conn.commit()
-        return False, "渠道未启用"
-    identity = db.get_channel_identity_by_conversation(tenant_id, channel, conversation_id)
+        return _mark_outbound_failed(db, message_id, "渠道未启用")
+    identity = db.get_channel_identity_by_conversation(tenant_id, channel, conversation["id"])
     if not identity:
-        db.conn.execute("UPDATE messages SET delivery_status='failed', delivery_error=? WHERE id=?", ("没有绑定外部联系人", message_id))
-        db.conn.commit()
-        return False, "没有绑定外部联系人"
+        return _mark_outbound_failed(db, message_id, "没有绑定外部联系人")
     try:
         config = json.loads(account["config_json"] or "{}")
     except json.JSONDecodeError:
@@ -5444,16 +5518,80 @@ def deliver_channel_message(db: Database, tenant_id: str, conversation_id: str, 
     try:
         external_id = send_channel_text(channel, config, identity["external_user_id"], channel_outbound_text(message))
     except ChannelSendError as error:
-        db.conn.execute("UPDATE messages SET delivery_status='failed', delivery_error=? WHERE id=?", (str(error), message_id))
-        db.conn.commit()
-        return False, str(error)
+        return _mark_outbound_failed(db, message_id, str(error))
     external_message_id = f"{identity['external_user_id']}:{external_id}" if external_id else ""
     db.conn.execute(
-        "UPDATE messages SET delivery_status='sent', external_message_id=?, delivery_error='' WHERE id=?",
-        (external_message_id, message_id),
+        "UPDATE messages SET delivery_status='sent', external_message_id=?, delivery_error='', delivery_updated_at=? WHERE id=?",
+        (external_message_id, now_iso(), message_id),
     )
     db.conn.commit()
     return True, ""
+
+
+def enqueue_outbound(db: Database, tenant_id: str, conversation: sqlite3.Row, role: str, content: str, source: str, actor_email: str = "", proactive: bool = False) -> tuple[str, bool, str]:
+    """出站总线入口：先落 queued 消息，再投递；返回（消息 ID, 是否送达, 失败原因）。
+
+    主动消息（proactive=True，如跟进、询价链接）先过「停止主动联系」门控，被阻止时抛
+    ValueError 且不创建任何消息（fail-closed）；对买方消息的回应（问答/回复）不设该门控。
+    """
+    channel = (conversation["source"] or "") if conversation["source"] else ""
+    if channel not in CHANNEL_KEYS:
+        channel = ""
+    if channel and proactive:
+        preference = db.get_contact_preference(tenant_id, conversation["id"])
+        if preference and preference["stop_proactive_contact"]:
+            raise ValueError("买方已要求停止主动联系，发送被阻止")
+    message_id = db.save_message(
+        tenant_id, conversation["id"], role, content, source,
+        channel=channel, delivery_status="queued" if channel else "", actor_email=actor_email,
+    )
+    if not channel:
+        return message_id, True, ""
+    sent, error = dispatch_outbound(db, tenant_id, message_id)
+    return message_id, sent, error
+
+
+def retry_outbound_message(db: Database, tenant_id: str, message_id: str, actor: str = "") -> tuple[bool, str]:
+    """人工重试失败消息：仅 failed/queued 可重试；原子状态校验防并发重复发送；审计留痕。"""
+    message = db.conn.execute("SELECT * FROM messages WHERE id=? AND tenant_id=?", (message_id, tenant_id)).fetchone()
+    if not message:
+        return False, "消息不存在"
+    status = message["delivery_status"] or ""
+    if status in ("sent", "delivered"):
+        return True, ""  # 幂等：已成功不重发
+    if status not in ("failed", "queued"):
+        return False, "该消息不是发送失败状态，不能重试"
+    if status == "failed":
+        cursor = db.conn.execute(
+            "UPDATE messages SET delivery_status='queued', delivery_updated_at=? WHERE id=? AND tenant_id=? AND delivery_status='failed'",
+            (now_iso(), message_id, tenant_id),
+        )
+        if cursor.rowcount != 1:
+            # 并发下已被其他请求重试/成功：读取最新状态，已成功按幂等成功返回。
+            latest = db.conn.execute("SELECT delivery_status FROM messages WHERE id=?", (message_id,)).fetchone()
+            if latest and (latest["delivery_status"] or "") in ("sent", "delivered"):
+                return True, ""
+            return False, "消息状态已变化，请刷新后重试"
+        db.conn.commit()
+    sent, error = dispatch_outbound(db, tenant_id, message_id)
+    attempts_row = db.conn.execute("SELECT delivery_attempts FROM messages WHERE id=?", (message_id,)).fetchone()
+    attempts = attempts_row["delivery_attempts"] if attempts_row else 0
+    db._audit(tenant_id, "message", message_id, "outbound_retried", actor or "system", f"result={'sent' if sent else 'failed'};attempts={attempts}")
+    db.conn.commit()
+    return sent, error
+
+
+def mark_outbound_delivered(db: Database, tenant_id: str, channel: str, external_message_id: str) -> bool:
+    """投递回执（如 Twilio 状态回调）：sent → delivered；幂等、只在自身记录上推进。"""
+    if not channel or not external_message_id:
+        return False
+    cursor = db.conn.execute(
+        "UPDATE messages SET delivery_status='delivered', delivery_updated_at=? "
+        "WHERE tenant_id=? AND channel=? AND external_message_id=? AND delivery_status='sent'",
+        (now_iso(), tenant_id, channel, external_message_id),
+    )
+    db.conn.commit()
+    return cursor.rowcount > 0
 
 
 def get_or_create_channel_conversation(db: Database, tenant_id: str, channel: str, external_user_id: str, display_name: str, locale: str = "en") -> str:
@@ -5478,19 +5616,9 @@ def get_or_create_channel_conversation(db: Database, tenant_id: str, channel: st
         return existing["conversation_id"]
 
 
-def channel_send_stored(db: Database, tenant_id: str, conversation: sqlite3.Row, text: str, source: str, actor_email: str = "") -> tuple[str, bool, str]:
-    """保存一条对外消息并立即投递；返回（消息 ID, 是否送达, 失败原因）。"""
-    channel = (conversation["source"] or "") if conversation["source"] else ""
-    if channel not in CHANNEL_KEYS:
-        channel = ""
-    message_id = db.save_message(
-        tenant_id, conversation["id"], "assistant", text, source,
-        channel=channel, delivery_status="queued" if channel else "", actor_email=actor_email,
-    )
-    if not channel:
-        return message_id, True, ""
-    sent, error = deliver_channel_message(db, tenant_id, conversation["id"], message_id)
-    return message_id, sent, error
+def channel_send_stored(db: Database, tenant_id: str, conversation: sqlite3.Row, text: str, source: str, actor_email: str = "", proactive: bool = False) -> tuple[str, bool, str]:
+    """兼容包装：经出站总线保存并投递一条对外消息（返回 消息 ID / 是否送达 / 失败原因）。"""
+    return enqueue_outbound(db, tenant_id, conversation, "assistant", text, source, actor_email=actor_email, proactive=proactive)
 
 
 def channel_requirement_summary(values: dict) -> str:
@@ -5582,7 +5710,7 @@ def process_channel_message(db: Database, ai, tenant_id: str, channel: str, exte
                 (tenant_id, conversation_id, f"human-request:{task_id}"),
             ).fetchone()
             if ack:
-                deliver_channel_message(db, tenant_id, conversation_id, ack["id"])
+                dispatch_outbound(db, tenant_id, ack["id"])
             result["action"] = "human_requested"
             result["task_id"] = task_id
         else:
@@ -6098,7 +6226,7 @@ AUDIT_ENTITY_LABELS = {
     "human_task": "人工任务", "rfq": "询价单", "lead": "线索", "product": "产品",
     "product_field": "产品字段", "source_document": "来源资料", "user": "成员账号", "settings": "企业设置",
     "material_task": "资料补充任务", "export": "数据导出", "reply": "回复草稿", "template": "产品展示页",
-    "channel": "渠道",
+    "channel": "渠道", "message": "渠道消息",
 }
 AUDIT_ACTION_LABELS = {
     "created": "创建", "updated": "更新", "activated": "启用", "deactivated": "停用",
@@ -6115,6 +6243,7 @@ AUDIT_ACTION_LABELS = {
     "nurture_created": "登记待培育线索", "merged": "线索被并入", "merged_in": "并入重复线索",
     "public_download_blocked_hash_mismatch": "拦截下载（哈希不符）", "modules_updated": "模块授权",
     "exported": "导出数据", "completed": "完成", "sent": "记录发送", "discarded": "废弃",
+    "sent_via_channel": "经渠道发送回复", "outbound_retried": "重试渠道消息",
     "milestone_completed": "节点完成", "milestone_reopened": "节点重开",
     "template_created": "创建展示页", "template_draft_saved": "保存展示页改动",
     "template_submitted": "提交展示页给管理员", "template_published": "确认上线展示页", "template_withdrawn": "撤回展示页",
@@ -7578,16 +7707,22 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     if action == "sent":
                         self.db.record_reply_sent(self.tenant_id, reply_id, str(form.get("channel", "")), str(form.get("body", "")), self.actor)
+                        notice_code = "reply_sent"
+                    elif action == "channel":
+                        # F-22：经出站总线真发（draft/queued/failed → queued → sent/failed）
+                        sent, _error = self.db.send_reply_via_channel(self.tenant_id, reply_id, self.actor)
+                        notice_code = "reply_channel_sent" if sent else "reply_channel_failed"
                     elif action == "discard":
                         self.db.discard_reply_draft(self.tenant_id, reply_id, self.actor)
+                        notice_code = "reply_discarded"
                     else:
                         self.db.update_reply_draft(self.tenant_id, reply_id, str(form.get("body", "")), self.actor)
+                        notice_code = "reply_saved"
                 except ValueError as error:
                     message = str(error)
                     notice = "reply_stop_blocked" if "停止主动联系" in message else "reply_invalid"
                     self.redirect(f"/admin/sales/{rfq_id}?notice={notice}#replies")
                     return
-                notice_code = "reply_sent" if action == "sent" else "reply_discarded" if action == "discard" else "reply_saved"
                 self.redirect(f"/admin/sales/{rfq_id}?notice={notice_code}#replies")
                 return
             match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/(claim|assign)", path)
@@ -7773,6 +7908,10 @@ class Handler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/admin/inbox/(telegram|whatsapp)/([a-f0-9]+)/rfq-link", path)
             if match:
                 self.admin_inbox_rfq_link(match.group(1), match.group(2))
+                return
+            match = re.fullmatch(r"/admin/inbox/(web|telegram|whatsapp)/([a-f0-9]+)/messages/([a-f0-9]+)/retry", path)
+            if match:
+                self.admin_inbox_message_retry(f"inbox_{match.group(1)}", match.group(2), match.group(3))
                 return
             if path == "/admin/settings/stages":
                 self.admin_settings_save_stages(form)
@@ -8938,7 +9077,7 @@ class Handler(BaseHTTPRequestHandler):
             (self.tenant_id, task["conversation_id"], source),
         ).fetchone()
         if row:
-            deliver_channel_message(self.db, self.tenant_id, task["conversation_id"], row["id"])
+            dispatch_outbound(self.db, self.tenant_id, row["id"])
 
     def admin_inbox_rfq_link(self, channel: str, conversation_id: str) -> None:
         """给渠道会话主动发送「RFQ 填写链接」消息（停止主动联系时拒绝）。"""
@@ -8954,7 +9093,12 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get("Host", "127.0.0.1:8137")
         scheme = "https" if self.headers.get("X-Forwarded-Proto") == "https" else "http"
         text = f"您可以打开以下链接填写询价信息（可重复打开、随时修改）：\n{scheme}://{host}/rfq/{token}"
-        _message_id, sent, _error = channel_send_stored(self.db, self.tenant_id, conversation, text, "rfq-link", actor_email=self.actor)
+        try:
+            _message_id, sent, _error = channel_send_stored(self.db, self.tenant_id, conversation, text, "rfq-link", actor_email=self.actor, proactive=True)
+        except ValueError:
+            # 主动发送门控（停止主动联系）在总线入口兜底拦截
+            self.redirect(f"/admin/inbox/{channel}/{conversation_id}?notice=link_stopped")
+            return
         self.redirect(f"/admin/inbox/{channel}/{conversation_id}?notice={'link_sent' if sent else 'link_failed'}")
 
     def admin_inbox(self, section: str, query: dict[str, list[str]]) -> None:
@@ -8976,7 +9120,8 @@ class Handler(BaseHTTPRequestHandler):
                 (SELECT r.contact_email FROM rfqs r WHERE r.tenant_id=c.tenant_id AND r.conversation_id=c.id AND r.contact_email<>'' ORDER BY r.created_at DESC LIMIT 1) AS rfq_email,
                 (SELECT l.contact_email FROM leads l WHERE l.tenant_id=c.tenant_id AND l.conversation_id=c.id AND l.contact_email<>'' ORDER BY l.created_at DESC LIMIT 1) AS lead_email,
                 (SELECT i.display_name FROM channel_identities i WHERE i.tenant_id=c.tenant_id AND i.conversation_id=c.id LIMIT 1) AS ext_name,
-                (SELECT i.external_user_id FROM channel_identities i WHERE i.tenant_id=c.tenant_id AND i.conversation_id=c.id LIMIT 1) AS ext_id
+                (SELECT i.external_user_id FROM channel_identities i WHERE i.tenant_id=c.tenant_id AND i.conversation_id=c.id LIMIT 1) AS ext_id,
+                (SELECT COUNT(*) FROM messages m WHERE m.tenant_id=c.tenant_id AND m.conversation_id=c.id AND m.delivery_status='failed') AS failed_count
             FROM conversations c WHERE c.tenant_id=? AND {source_where}
             ORDER BY c.updated_at DESC, c.id DESC LIMIT 50""",
             (self.tenant_id, *params),
@@ -8993,6 +9138,8 @@ class Handler(BaseHTTPRequestHandler):
                 meta_parts.insert(0, f"联系方式 {esc(contact)}")
             if row["ai_paused"]:
                 meta_parts.append("<span class='badge pending_review'>AI 已暂停</span>")
+            if row["failed_count"]:
+                meta_parts.append(f"<span class='badge withdrawn'>{row['failed_count']} 条发送失败</span>")
             if row["stop_proactive_contact"]:
                 meta_parts.append("<span class='badge withdrawn'>停止主动联系</span>")
             preview = (row["last_content"] or "（暂无消息）").strip().splitlines()[0][:60]
@@ -9041,6 +9188,9 @@ class Handler(BaseHTTPRequestHandler):
             "link_sent": f"<div class='notice'>询价链接已发送——买方在 {esc(label)} 里点开即可填写。</div>",
             "link_failed": "<div class='error'>询价链接发送失败——请检查渠道凭证与网络后重试。</div>",
             "link_stopped": "<div class='error'>该会话已标记「停止主动联系」，不能主动发送询价链接。</div>",
+            "retried_ok": "<div class='notice'>重试成功——消息已发出。</div>",
+            "retried_fail": "<div class='error'>重试仍未成功——原因见对应消息，可修复渠道后再试。</div>",
+            "retry_already": "<div class='notice'>该消息已经发出，无需重试。</div>",
         }
         notice = notices.get(query.get("notice", [""])[0], "")
         messages = self.db.list_messages(self.tenant_id, conversation_id)
@@ -9051,11 +9201,19 @@ class Handler(BaseHTTPRequestHandler):
             delivery_html = ""
             delivery_status = message["delivery_status"] or ""
             if channel != "web" and delivery_status:
-                delivery_label = {
-                    "sent": "已送达", "queued": "发送中",
-                    "failed": f"发送失败：{message['delivery_error'] or '原因未知'}",
-                }.get(delivery_status, delivery_status)
+                attempts = message["delivery_attempts"] or 0
+                if delivery_status == "failed":
+                    delivery_label = f"发送失败：{message['delivery_error'] or '原因未知'}"
+                    if attempts > 1:
+                        delivery_label += f"（已尝试 {attempts} 次）"
+                else:
+                    delivery_label = {"queued": "排队中", "sent": "已发送", "delivered": "已送达"}.get(delivery_status, delivery_status)
                 delivery_html = f"<span class='when'>{esc(delivery_label)}</span>"
+                if delivery_status == "failed":
+                    delivery_html += (
+                        f"<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/messages/{esc(message['id'])}/retry' class='inline' style='margin-left:8px'>"
+                        f"<button class='secondary'>重试发送</button></form>"
+                    )
             message_rows.append(
                 f"<div class='msgrow {css}'><div class='meta'><span class='who'>{esc(who)}</span><span class='when'>{when}</span>{delivery_html}</div>"
                 f"<div class='bubble'>{esc(body_text)}</div></div>"
@@ -9136,16 +9294,15 @@ class Handler(BaseHTTPRequestHandler):
             self.db.audit_staff_reply(self.tenant_id, conversation_id, message_id, self.actor)
             self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice=sent")
             return
-        message_id = self.db.save_message(
-            self.tenant_id, conversation_id, "staff", f"卖家回复：{body_text}", "staff-reply",
-            channel=channel or "", actor_email=self.actor, delivery_status="queued",
+        message_id, sent, _error = enqueue_outbound(
+            self.db, self.tenant_id, conversation, "staff", f"卖家回复：{body_text}", "staff-reply",
+            actor_email=self.actor, proactive=False,
         )
         self.db.audit_staff_reply(self.tenant_id, conversation_id, message_id, self.actor)
-        sent, _error = deliver_channel_message(self.db, self.tenant_id, conversation_id, message_id)
         self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice={'sent' if sent else 'reply_failed'}")
 
     def admin_inbox_ai_toggle(self, section: str, conversation_id: str) -> None:
-        """每会话「暂停/恢复 AI 自动回复」。"""
+        """每会话「暂停/恢复 AI 自动回复」开关。"""
         channel = INBOX_SECTION_CHANNELS.get(section)
         slug = section.removeprefix("inbox_")
         conversation = channel and self.db.get_conversation(self.tenant_id, conversation_id)
@@ -9154,6 +9311,29 @@ class Handler(BaseHTTPRequestHandler):
         paused = not conversation["ai_paused"]
         self.db.set_conversation_ai_paused(self.tenant_id, conversation_id, paused, self.actor)
         self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice={'ai_paused' if paused else 'ai_resumed'}")
+
+    def admin_inbox_message_retry(self, section: str, conversation_id: str, message_id: str) -> None:
+        """收件箱内重试一条发送失败的消息（出站总线幂等：已成功不重发）。"""
+        channel = INBOX_SECTION_CHANNELS.get(section)
+        slug = section.removeprefix("inbox_")
+        conversation = channel and self.db.get_conversation(self.tenant_id, conversation_id)
+        if not channel or not conversation or not self._inbox_conversation_in_section(channel, conversation):
+            raise ValueError("会话不存在或不属于这个渠道")
+        if channel == "web":
+            raise ValueError("网站聊天消息无需重试")
+        message = self.db.conn.execute(
+            "SELECT * FROM messages WHERE tenant_id=? AND id=? AND conversation_id=?",
+            (self.tenant_id, message_id, conversation_id),
+        ).fetchone()
+        if not message:
+            raise ValueError("消息不存在")
+        status_before = message["delivery_status"] or ""
+        if status_before in ("sent", "delivered"):
+            notice = "retry_already"
+        else:
+            sent, _error = retry_outbound_message(self.db, self.tenant_id, message_id, self.actor)
+            notice = "retried_ok" if sent else "retried_fail"
+        self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice={notice}")
 
     def admin_channels(self, query: dict[str, list[str]]) -> None:
         """渠道接入页（管理员）：配置与启停 Telegram / WhatsApp；凭证只读环境变量状态、不回显值。"""
@@ -10380,9 +10560,27 @@ class Handler(BaseHTTPRequestHandler):
 
         milestone_rows = "".join(milestone_row(key, label) for key, label in LEAD_MILESTONE_DEFS)
         channel_options = "".join(f"<option value='{key}'>{label}</option>" for key, label in REPLY_CHANNELS)
+        # F-22：渠道会话的草稿可经出站总线真发（发送结果与重试都显示在卡片上）
+        lead_conversation = self.db.get_conversation(self.tenant_id, lead["conversation_id"])
+        lead_channel = (lead_conversation["source"] or "") if lead_conversation else ""
+        channel_sendable = lead_channel in CHANNEL_KEYS
+        channel_label = CHANNEL_LABELS.get(lead_channel, lead_channel)
         reply_parts = []
         for reply in replies:
+            reply_delivery = None
+            if reply["message_id"]:
+                reply_delivery = self.db.conn.execute(
+                    "SELECT delivery_status, delivery_error, delivery_attempts FROM messages WHERE id=?", (reply["message_id"],)
+                ).fetchone()
+
+            def channel_retry_form(label_text: str) -> str:
+                return (
+                    f"<form method='post' action='/admin/sales/{rfq_id}/replies/{reply['id']}' class='inline'>"
+                    f"<button name='action' value='channel'>{esc(label_text)}</button></form>"
+                )
+
             if reply["status"] == "draft":
+                channel_button = channel_retry_form(f"经 {channel_label} 发送") if channel_sendable else ""
                 reply_parts.append(
                     f"<div class='source' style='flex-direction:column;align-items:stretch;gap:8px'>"
                     f"<span><span class='badge pending_review'>未发送草稿</span> <span class='field-state'>最近更新 {esc(reply['updated_at'])} · {esc(reply['updated_by'] or reply['created_by'])}</span></span>"
@@ -10390,16 +10588,45 @@ class Handler(BaseHTTPRequestHandler):
                     f"<textarea name='body' rows='3' required>{esc(reply['body'])}</textarea>"
                     f"<div class='actions' style='margin-top:8px'><label class='check-inline' style='margin:0'>发送渠道 <select name='channel'>{channel_options}</select></label>"
                     f"<button name='action' value='save' class='secondary'>保存修改</button>"
-                    f"<button name='action' value='sent'>记录为已发送（线下）</button></div></form>"
+                    f"{channel_button}"
+                    f"<button name='action' value='sent' class='secondary'>记录为已发送（线下）</button></div></form>"
                     f"<div class='actions'><form method='post' action='/admin/sales/{rfq_id}/replies/{reply['id']}' class='inline'><button name='action' value='discard' class='secondary'>废弃草稿</button></form></div>"
                     f"</div>"
                 )
-            elif reply["status"] == "sent":
-                channel_label = REPLY_CHANNEL_LABELS.get(reply["channel"], reply["channel"])
+            elif reply["status"] in ("failed", "queued"):
+                error_text = (reply_delivery["delivery_error"] if reply_delivery else "") or "发送失败"
+                attempts = (reply_delivery["delivery_attempts"] if reply_delivery else 0) or 0
+                if reply["status"] == "queued":
+                    badge = "<span class='badge pending_review'>排队中</span>"
+                    hint = "消息已进入出站队列；可点「立即重发」或等待后台补投。"
+                else:
+                    badge = "<span class='badge withdrawn'>发送失败</span>"
+                    hint = f"原因：{esc(error_text)} · 已尝试 {attempts} 次"
+                retry_form = channel_retry_form(f"重试发送（{channel_label}）") if channel_sendable else ""
                 reply_parts.append(
-                    f"<div class='source'><span><span class='badge published'>已记录发送（{esc(channel_label)}）</span><br>{esc(reply['body'])}</span>"
-                    f"<span class='field-state'>{esc(reply['sent_at'])} · {esc(reply['sent_by'])}</span></div>"
+                    f"<div class='source' style='flex-direction:column;align-items:stretch;gap:8px'>"
+                    f"<span>{badge} <span class='field-state'>{hint}</span></span>"
+                    f"<span>{esc(reply['body'])}</span>"
+                    f"<div class='actions'>{retry_form}</div>"
+                    f"</div>"
                 )
+            elif reply["status"] == "sent":
+                if reply["message_id"]:
+                    delivery_state = {
+                        "sent": "已发送", "delivered": "已送达",
+                        "failed": "发送失败", "queued": "排队中",
+                    }.get(reply_delivery["delivery_status"] if reply_delivery else "", "已发送")
+                    sent_channel_label = CHANNEL_LABELS.get(reply["channel"], reply["channel"])
+                    reply_parts.append(
+                        f"<div class='source'><span><span class='badge published'>经 {esc(sent_channel_label)} 发送 · {esc(delivery_state)}</span><br>{esc(reply['body'])}</span>"
+                        f"<span class='field-state'>{esc(reply['sent_at'])} · {esc(reply['sent_by'])}</span></div>"
+                    )
+                else:
+                    channel_label_offline = REPLY_CHANNEL_LABELS.get(reply["channel"], reply["channel"])
+                    reply_parts.append(
+                        f"<div class='source'><span><span class='badge published'>已记录发送（{esc(channel_label_offline)}）</span><br>{esc(reply['body'])}</span>"
+                        f"<span class='field-state'>{esc(reply['sent_at'])} · {esc(reply['sent_by'])}</span></div>"
+                    )
             else:
                 reply_parts.append(
                     f"<div class='source'><span><span class='badge withdrawn'>已废弃</span> <span class='field-state'>{esc(reply['body'][:60])}</span></span>"
@@ -10409,7 +10636,7 @@ class Handler(BaseHTTPRequestHandler):
             f"<form method='post' action='/admin/sales/{rfq_id}/replies'><label>起草回复（保存为未发送草稿）</label>"
             f"<textarea name='body' rows='3' required placeholder='写给买方的回复内容'></textarea>"
             f"<p><button>保存草稿</button></p></form>"
-            f"<p class='field-state'>平台尚未接入外发渠道：不会自动发送任何消息。线下实际发送后，回来点「记录为已发送」并选择渠道；发送前会检查买方「停止主动联系」状态（已停止则阻止记录发送）。</p>"
+            f"<p class='field-state'>渠道会话（如 Telegram）可直接「经渠道发送」：draft → queued → sent/failed，失败可重试；其他情况线下发送后回来「记录为已发送」。两种方式发送前都会检查买方「停止主动联系」状态（已停止则阻止发送）。</p>"
         )
         replies_html = replies_new_form + ("".join(reply_parts) or "<p class='muted'>还没有回复记录。</p>")
         followup_cards = (
@@ -10438,6 +10665,8 @@ class Handler(BaseHTTPRequestHandler):
             "milestone_invalid": "<div class='error'>节点操作未完成：不支持的节点。</div>",
             "reply_saved": "<div class='notice'>回复草稿已保存（未发送）。</div>",
             "reply_sent": "<div class='notice'>已记录为「线下发送」——平台不会自动外发；发送状态见下方草稿卡片。</div>",
+            "reply_channel_sent": "<div class='notice'>已通过渠道发送——买方在对应渠道里可见；送达状态与重试都在下方卡片。</div>",
+            "reply_channel_failed": "<div class='error'>渠道发送未成功——消息已存为「发送失败」，原因在下方卡片上，可点「重试发送」。</div>",
             "reply_discarded": "<div class='notice'>草稿已废弃。</div>",
             "reply_stop_blocked": "<div class='error'>发送被阻止：买方已要求停止主动联系；请仅在买方主动发起沟通后回应。</div>",
             "reply_invalid": "<div class='error'>回复操作未完成：请检查内容与操作。</div>",

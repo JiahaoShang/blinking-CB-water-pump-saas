@@ -119,9 +119,9 @@ class SalesListTests(SalesBase):
 
     def test_detail_page_renders_new_sections(self):
         _, _, page = form_request(self.server, "GET", f"/admin/sales/{self.rfq_overdue}", cookie=self.admin)
-        for marker in ("跟进节点", "技术确认", "样品准备", "报价准备", "回复草稿（跟进记录）", "关闭原因（阶段设为「已关闭」时必填）", "平台尚未接入外发渠道", "保存草稿"):
+        for marker in ("跟进节点", "技术确认", "样品准备", "报价准备", "回复草稿（跟进记录）", "关闭原因（阶段设为「已关闭」时必填）", "draft → queued → sent/failed", "保存草稿"):
             self.assertIn(marker, page)
-        # 「发送渠道」与「记录为已发送（线下）」只在存在未发送草稿时渲染（由回复流测试覆盖）
+        # 「发送渠道」「记录为已发送（线下）」「经渠道发送」只在存在未发送草稿时渲染（由回复流测试覆盖）
 
 
 class MilestoneTests(SalesBase):
