@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from app import _dify_retriever_resources, make_server, strip_reasoning_blocks  # noqa: E402
-from test_langbot_bridge import _LangBotMock, login, json_http  # noqa: E402
+from test_langbot_bridge import _LangBotMock, form_request, json_http, login  # noqa: E402
 
 
 class _DifyQAMock:
@@ -103,6 +103,7 @@ class DifyQALangBotTests(unittest.TestCase):
         cls.token = "tok_dify_qa_test_0001_abcdef"
         cls.db.save_channel_account("demo-tenant", "langbot", {"bot_uuid": "bot-0001", "webhook_token": cls.token}, "demo-admin@example.invalid")
         cls.db.set_channel_enabled("demo-tenant", "langbot", True, "demo-admin@example.invalid")
+        cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
 
     @classmethod
     def tearDownClass(cls):
@@ -203,6 +204,39 @@ class DifyQALangBotTests(unittest.TestCase):
         self.assertEqual(_dify_retriever_resources(nested)[0]["position"], 2)
         self.assertEqual(_dify_retriever_resources({}), [])
         self.assertEqual(_dify_retriever_resources({"retriever_resources": None}), [])
+
+    def test_web_inquiry_prefers_dify(self):
+        """网页入口（旧询价页提问）：同样优先走 Dify；有据直达、哨兵转人工同口径。"""
+        status, headers, _ = form_request(self.server, "GET", "/inquiry")
+        self.assertEqual(status, 303)
+        path = headers["Location"].split("?", 1)[0]
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        conversation_id = path.rsplit("/", 1)[1]
+        status, _headers, _ = form_request(
+            self.server, "POST", path + "/ask",
+            {"question": "SLICE-T1 的流量范围是多少？", "submission_key": "sk-web-01"}, cookie=cookie,
+        )
+        self.assertEqual(status, 303)
+        row = self.db.conn.execute(
+            "SELECT * FROM answers WHERE tenant_id='demo-tenant' AND conversation_id=? ORDER BY rowid DESC LIMIT 1",
+            (conversation_id,),
+        ).fetchone()
+        self.assertEqual(row["answer_status"], "grounded")
+        self.assertEqual(row["answer_text"], "SLICE-T1 的流量范围为 20-80 m³/h。")
+        self.assertEqual(json.loads(row["citations_json"])[0]["filename"], "SLICE-T1 · 测试泵")
+        self.assertEqual(self.dify.requests[-1]["body"].get("user"), f"web:{conversation_id}")
+        # 哨兵 → 转人工口径（与渠道一致）
+        status, _headers, _ = form_request(
+            self.server, "POST", path + "/ask",
+            {"question": "无依据的问题？", "submission_key": "sk-web-02"}, cookie=cookie,
+        )
+        self.assertEqual(status, 303)
+        row2 = self.db.conn.execute(
+            "SELECT * FROM answers WHERE tenant_id='demo-tenant' AND conversation_id=? ORDER BY rowid DESC LIMIT 1",
+            (conversation_id,),
+        ).fetchone()
+        self.assertEqual(row2["answer_status"], "needs_human")
+        self.assertIn("现有核准资料没有足够依据", row2["answer_text"])
 
     def test_strip_reasoning_blocks_unit(self):
         cases = [

@@ -4478,6 +4478,34 @@ def answer_question_with_mode(
     return "grounded", answer, product_id, version["id"], [citation], ""
 
 
+def answer_question_prefer_dify(
+    db: Database,
+    ai,
+    tenant_id: str,
+    conversation_id: str,
+    question: str,
+    product_id: str | None,
+    user_label: str,
+) -> tuple[str, str, str | None, str | None, list[dict[str, str]], str, str]:
+    """第二波统一问答入口：配置 Dify 时优先 Dify（哨兵转人工同口径；引擎故障静默回落本地）。
+
+    返回 (status, answer_text, product_id, version_id, citations, reason, source)；source ∈ {dify, local}。
+    """
+    if dify_qa_config()[1]:
+        try:
+            outcome = dify_ask_question(question, user_label)
+        except DifyQAUnavailableError:
+            outcome = None
+        if outcome is not None:
+            if outcome["status"] == "grounded":
+                return "grounded", outcome["answer"], None, None, outcome["citations"], "", "dify"
+            return "needs_human", NO_APPROVED_BASIS_ANSWER, None, None, [], "dify-no-answer", "dify"
+    status, answer_text, answer_product_id, version_id, citations, reason = answer_question_with_mode(
+        db, ai, tenant_id, conversation_id, question, product_id
+    )
+    return status, answer_text, answer_product_id, version_id, citations, reason, "local"
+
+
 AI_TASK_LABELS_ZH = {AI_TASK_EXTRACTION: "需求提取", AI_TASK_ANSWER: "资料问答"}
 
 
@@ -6005,33 +6033,20 @@ def process_channel_message(db: Database, ai, tenant_id: str, channel: str, exte
             if first:
                 product_id = first.get("product_id")
         # 第二波：LangBot 渠道的资料问答优先走 Dify 引擎（平台仍是唯一主脑：落库、转人工、出站都在平台）。
-        dify_outcome = None
-        if channel == "langbot" and dify_qa_config()[1]:
-            try:
-                dify_outcome = dify_ask_question(text, f"langbot:{external_user_id}")
-            except DifyQAUnavailableError:
-                dify_outcome = None  # 引擎不可用：回落到本地资料问答，通道不中断
-        if dify_outcome is not None:
-            if dify_outcome["status"] == "grounded":
-                status, answer_text, answer_product_id, version_id, citations = "grounded", dify_outcome["answer"], None, None, dify_outcome["citations"]
-            else:
-                status, answer_text, answer_product_id, version_id, citations = "needs_human", NO_APPROVED_BASIS_ANSWER, None, None, []
-            db.save_answer(tenant_id, conversation_id, message_id, answer_product_id, version_id, status, answer_text, citations)
-            if status == "grounded":
-                channel_send_stored(db, tenant_id, conversation, answer_text, "grounded-answer")
-            else:
-                channel_send_stored(db, tenant_id, conversation, f"{answer_text}\n\n{CHANNEL_HUMAN_HINT}", "unresolved-question")
-            result["action"] = "answered" if status == "grounded" else "answer_unresolved"
-            result["qa_source"] = "dify"
-            return result
-        status, answer_text, answer_product_id, version_id, citations, _reason = answer_question_with_mode(db, ai, tenant_id, conversation_id, text, product_id)
+        if channel == "langbot":
+            status, answer_text, answer_product_id, version_id, citations, _reason, qa_source = answer_question_prefer_dify(
+                db, ai, tenant_id, conversation_id, text, product_id, f"langbot:{external_user_id}"
+            )
+        else:
+            status, answer_text, answer_product_id, version_id, citations, _reason = answer_question_with_mode(db, ai, tenant_id, conversation_id, text, product_id)
+            qa_source = "local"
         db.save_answer(tenant_id, conversation_id, message_id, answer_product_id, version_id, status, answer_text, citations)
         if status == "grounded":
             channel_send_stored(db, tenant_id, conversation, answer_text, "grounded-answer")
         else:
             channel_send_stored(db, tenant_id, conversation, f"{answer_text}\n\n{CHANNEL_HUMAN_HINT}", "unresolved-question")
         result["action"] = "answered" if status == "grounded" else "answer_unresolved"
-        result["qa_source"] = "local"
+        result["qa_source"] = qa_source
         return result
     # ⑥ 其余：需求识别与整理（没有新内容时不重复播报）。
     previous_values = json.loads(latest["values_json"]) if latest else {}
@@ -7562,9 +7577,11 @@ class Handler(BaseHTTPRequestHandler):
                     # 收件箱「暂停 AI」开关：暂停自动答复（问题已保存、按待人工处理；不自动建任务）。
                     status, answer_text, answered_product_id, version_id, citations, _reason = ("needs_human", AI_PAUSED_ANSWER, None, None, [], "ai_paused")
                 else:
-                    status, answer_text, answered_product_id, version_id, citations, _reason = answer_question_with_mode(
+                    # 第二波：网页聊天入口同样优先走 Dify（与渠道口径一致；引擎不可用时回落本地）。
+                    status, answer_text, answered_product_id, version_id, citations, _reason, _qa_source = answer_question_prefer_dify(
                         self.db, self.ai, site["tenant_id"], conversation["id"], question,
                         product_id if isinstance(product_id, str) and product_id else None,
+                        f"web:{conversation['id']}",
                     )
                 self.db.save_message(site["tenant_id"], conversation["id"], "assistant", answer_text, "grounded-answer" if status == "grounded" else "unresolved-question")
                 try:
@@ -7909,9 +7926,11 @@ class Handler(BaseHTTPRequestHandler):
                         # 收件箱「暂停 AI」开关（旧询价页同口径）。
                         answer_status, answer_text, answered_product_id, product_version_id, citations, _reason = ("needs_human", AI_PAUSED_ANSWER, None, None, [], "ai_paused")
                     else:
-                        answer_status, answer_text, answered_product_id, product_version_id, citations, _reason = answer_question_with_mode(
+                        # 第二波：旧询价页同口径优先走 Dify（引擎不可用时回落本地）。
+                        answer_status, answer_text, answered_product_id, product_version_id, citations, _reason, _qa_source = answer_question_prefer_dify(
                             self.db, self.ai, self.tenant_id, conversation_id, question,
                             selected_product_id if isinstance(selected_product_id, str) and selected_product_id else None,
+                            f"web:{conversation_id}",
                         )
                 except AIUnavailableError:
                     # 模型故障：问题已保存，明确提示可重试；不落假答案、不建人工任务。
@@ -9759,7 +9778,7 @@ class Handler(BaseHTTPRequestHandler):
         elif notice_code == "kb_not_configured":
             notice = "<div class='notice'>知识库同步尚未配置（需本机变量 DIFY_KB_DATASET_ID 与 DIFY_KB_API_KEY）。</div>"
         guides = {
-            "telegram": "在 Telegram 里找 @BotFather 新建机器人 → 把机器人令牌写进本机环境变量 TELEGRAM_BOT_TOKEN（服务端读取，不入库、不回显）→ 回到这里填写机器人用户名并启用。收信两种方式都可用：本地长轮询（下方命令，无需公网地址）或 Webhook（需再设置一个密钥变量并注册下方地址）。",
+            "telegram": "【已退役：对客入口统一由 LangBot 单轨承接，本渠道停用保留回滚；以下为历史配置说明。】在 Telegram 里找 @BotFather 新建机器人 → 把机器人令牌写进本机环境变量 TELEGRAM_BOT_TOKEN（服务端读取，不入库、不回显）→ 回到这里填写机器人用户名并启用。收信两种方式都可用：本地长轮询（下方命令，无需公网地址）或 Webhook（需再设置一个密钥变量并注册下方地址）。",
             "whatsapp": "走 Twilio：开通 WhatsApp 沙箱（手机发送加入码即可参与测试）→ 把 Account SID、Auth Token、（whatsapp: 前缀的）发送号码写进本机环境变量 TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM → 回到这里填写显示名称并启用。收信需要一条公网回调地址，联调时使用临时隧道。",
             "langbot": "试验通道（本机）：LangBot 负责对接各社交平台并把消息推送进来，平台处理后的回复经 LangBot 发送接口直达买方。步骤：① 本机环境变量设置 LANGBOT_API_KEY（LangBot 面板「API Keys」生成）② 在 LangBot 面板把上方收信地址登记为 Webhook 并启用 ③ 回到这里填写 bot_uuid 并启用渠道。",
         }
@@ -9791,7 +9810,7 @@ class Handler(BaseHTTPRequestHandler):
                 hook_secret_ok = bool(os.environ.get(CHANNEL_WEBHOOK_SECRET_ENV["telegram"], "").strip())
                 hook_url = f"http://{host}/api/v1/channels/telegram/webhook/{webhook_id}" if webhook_id else "（保存配置后生成）"
                 hook_secret_label = "已设置" if hook_secret_ok else f"未设置（需本机变量 {CHANNEL_WEBHOOK_SECRET_ENV['telegram']}）"
-                receive_block = f"""<div class='field-state' style='margin-top:8px'><b>收信（已上线）</b>：本地长轮询 <code>python3 tools/channels/telegram_poller.py --db data/demo.db</code>；生产 Webhook 地址 <code>{esc(hook_url)}</code>（密钥状态：{esc(hook_secret_label)}）。<br><b>已支持</b>：自动问答（资料外转人工）、文本「人工」转交、卖家回复直达、询价填写链接。</div>"""
+                receive_block = f"""<div class='field-state' style='margin-top:8px'><b>已退役（2026-10-07）</b>：对客入口统一由 LangBot 单轨承接；本渠道停用、不再收发，历史会话保留，代码保留可回滚。<br><b>历史说明</b>：本地长轮询 <code>python3 tools/channels/telegram_poller.py --db data/demo.db</code>；Webhook 地址 <code>{esc(hook_url)}</code>（密钥状态：{esc(hook_secret_label)}）。</div>"""
             elif channel == "langbot":
                 token = str(config.get("webhook_token", ""))
                 api_ok = bool(os.environ.get("LANGBOT_API_KEY", "").strip())
@@ -9837,7 +9856,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class='toolbar'><div><h1>渠道接入</h1><div class='muted'>把 Telegram / WhatsApp 变成买方入口：消息进「会话收件箱」，回复从平台发出。</div></div></div>
 {notice}
 <section class='card'><div class='panel-title'><h2>如何工作</h2></div>
-<p class='muted' style='margin:0'>启用并配置凭证后：买方在渠道里的消息会进入「会话收件箱」，与网站聊天走同一批处理（需求确认、有据问答、人工接管、RFQ 填写链接）；卖家在平台里的回复会经渠道直达买方。收信与发送已支持 Telegram 与 LangBot（试验，LangBot 渠道的资料问答由本机 Dify 引擎承担）；WhatsApp 待后续切片上线。新渠道默认关闭，启用与凭证变更全部留痕。</p></section>
+<p class='muted' style='margin:0'>启用并配置凭证后：买方在渠道里的消息会进入「会话收件箱」，与网站聊天走同一批处理（需求确认、有据问答、人工接管、RFQ 填写链接）；卖家在平台里的回复会经渠道直达买方。对客入口已统一为 LangBot 单轨（试验，资料问答由本机 Dify 引擎承担；旧 Telegram 直连已退役停用、保留回滚）；WhatsApp 与微信系渠道按后续计划接入。新渠道默认关闭，启用与凭证变更全部留痕。</p></section>
 {''.join(cards)}"""
         self.send_html(self.console_page("渠道接入", body, "channels"))
 
