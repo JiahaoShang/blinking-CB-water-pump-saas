@@ -29,6 +29,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import ai_client
 from ai_client import AIConfig, AIConfigurationError, AIService, AIUnavailableError
@@ -114,6 +116,8 @@ CONTACT_CONSENT_SOURCE_LABELS = {
     "chat": "官网聊天窗",
     "product_page": "产品详情页",
     "inquiry": "旧询价页",
+    "telegram_link": "Telegram 询价链接",
+    "whatsapp_link": "WhatsApp 询价链接",
     "offline": "线下登记（销售已确认）",
 }
 # 跨站会话交接（一次性交接码）：官网聊天（来源 A）与平台产品页（来源 B）不同来源时，
@@ -671,6 +675,7 @@ class Database:
                 requested_model TEXT NOT NULL DEFAULT '',
                 contact_consent_source TEXT NOT NULL DEFAULT '',
                 contact_consent_at TEXT,
+                entry_surface TEXT NOT NULL DEFAULT '',
                 missing_json TEXT NOT NULL DEFAULT '[]',
                 status TEXT NOT NULL DEFAULT 'needs_info',
                 snapshot_json TEXT NOT NULL,
@@ -743,6 +748,17 @@ class Database:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN contact_consent_source TEXT NOT NULL DEFAULT ''")
         if "contact_consent_at" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
             self.conn.execute("ALTER TABLE rfqs ADD COLUMN contact_consent_at TEXT")
+        if "entry_surface" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(rfqs)")}:
+            self.conn.execute("ALTER TABLE rfqs ADD COLUMN entry_surface TEXT NOT NULL DEFAULT ''")
+        # 旧库回填：入口信息此前只存在 snapshot_json 里；逐行回填一次（幂等）。
+        for row in self.conn.execute("SELECT id, snapshot_json FROM rfqs WHERE entry_surface=''").fetchall():
+            try:
+                entry = str(json.loads(row["snapshot_json"] or "{}").get("entry_surface") or "")
+            except json.JSONDecodeError:
+                entry = ""
+            if entry:
+                self.conn.execute("UPDATE rfqs SET entry_surface=? WHERE id=?", (entry, row["id"]))
+        self.conn.commit()
         lead_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(leads)")}
         for column, definition in (
             ("close_reason", "TEXT NOT NULL DEFAULT ''"),
@@ -1538,6 +1554,20 @@ class Database:
         self._audit(tenant_id, "conversation", conversation_id, "staff_replied", actor, f"message={message_id[:8]}")
         self.conn.commit()
 
+    def get_channel_identity_by_conversation(self, tenant_id: str, channel: str, conversation_id: str) -> sqlite3.Row | None:
+        """按会话反查渠道身份（出站发送需要外部用户 ID）。"""
+        return self.conn.execute(
+            "SELECT * FROM channel_identities WHERE tenant_id=? AND channel=? AND conversation_id=?",
+            (tenant_id, channel, conversation_id),
+        ).fetchone()
+
+    def find_rfq_form_token(self, token: str) -> sqlite3.Row | None:
+        """按令牌原文跨会话查找（只存摘要；公开 RFQ 填写页用）。"""
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        return self.conn.execute(
+            "SELECT * FROM rfq_form_tokens WHERE token_hash=? AND revoked_at IS NULL", (digest,)
+        ).fetchone()
+
     def get_revisions(self, tenant_id: str, conversation_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM requirement_revisions WHERE tenant_id=? AND conversation_id=? ORDER BY revision",
@@ -2015,8 +2045,8 @@ class Database:
         rfq_id = secrets.token_hex(12)
         timestamp = now_iso()
         self.conn.execute(
-            "INSERT INTO rfqs(id, tenant_id, conversation_id, requirement_revision_id, recommendation_id, product_id, product_version_id, submission_key, request_hash, contact_name, company, contact_email, contact_phone, quantity, destination, requested_delivery, notes, requested_model, missing_json, status, snapshot_json, created_at, contact_consent_source, contact_consent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (rfq_id, tenant_id, conversation_id, revision["id"] if revision else None, recommendation["id"] if recommendation else None, product_id, product_version_id, submission_key, request_hash, normalized_contact["contact_name"], normalized_contact["company"], normalized_contact["contact_email"], normalized_contact["contact_phone"], normalized_contact["quantity"], normalized_contact["region"], normalized_contact["delivery"], notes.strip(), requested_model, json.dumps(missing, ensure_ascii=False), status, json.dumps(snapshot, ensure_ascii=False), timestamp, entry_surface or "chat", timestamp),
+            "INSERT INTO rfqs(id, tenant_id, conversation_id, requirement_revision_id, recommendation_id, product_id, product_version_id, submission_key, request_hash, contact_name, company, contact_email, contact_phone, quantity, destination, requested_delivery, notes, requested_model, missing_json, status, snapshot_json, created_at, contact_consent_source, contact_consent_at, entry_surface) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (rfq_id, tenant_id, conversation_id, revision["id"] if revision else None, recommendation["id"] if recommendation else None, product_id, product_version_id, submission_key, request_hash, normalized_contact["contact_name"], normalized_contact["company"], normalized_contact["contact_email"], normalized_contact["contact_phone"], normalized_contact["quantity"], normalized_contact["region"], normalized_contact["delivery"], notes.strip(), requested_model, json.dumps(missing, ensure_ascii=False), status, json.dumps(snapshot, ensure_ascii=False), timestamp, entry_surface or "chat", timestamp, entry_surface or "chat"),
         )
         initial = self.get_rfq(tenant_id, rfq_id)
         self.conn.execute(
@@ -5286,6 +5316,403 @@ def channel_secret_status(channel: str) -> dict:
     missing = [name for name in names if not os.environ.get(name, "").strip()]
     return {"configured": not missing, "missing": missing}
 
+
+# ── V1-04 切片③：Telegram 全链路（收信 / 自动问答 / 人工转交 / 回复直达 / RFQ 填写链接） ──
+# 收信：本地长轮询（tools/channels/telegram_poller.py）与 Webhook（生产）共用 handle_telegram_update；
+# 出站：发送适配器把已保存的消息投递到渠道（delivery_status = queued → sent / failed，失败原因可见）；
+# 分流：与网页聊天同口径——工程师追问优先、暂停 AI 不自动答复、「人工」转交、「确认」确认工况并匹配、
+#       提问样文本走有据问答（资料外给转人工提示）、其余走需求识别与整理。
+CHANNEL_WEBHOOK_SECRET_ENV = {"telegram": "TELEGRAM_WEBHOOK_SECRET"}
+CHANNEL_OFFICIAL_API_BASE = {"telegram": "https://api.telegram.org/bot"}
+# 渠道内提示文案（入库即不可变：只描述可用动作，不作状态承诺）
+CHANNEL_HUMAN_HINT = "如需工程师人工核实，请回复「人工」。"
+CHANNEL_HUMAN_GUIDE = "还没有待核实的问题。请先发送您想核实的具体问题，再回复「人工」转交工程师。"
+CHANNEL_RFQ_ACK = "您的询价信息已收到；您可以随时重新打开链接更新内容。"
+CHANNEL_CONFIRM_WORDS = ("确认", "确定", "confirm", "confirmed", "ok")
+CHANNEL_HUMAN_WORDS = ("人工", "转人工", "工程师", "人工核实", "engineer", "human", "agent")
+_CHANNEL_QUESTION_HEAD = re.compile(r"^(what|which|how|can|could|do|does|is|are|will|would|should|why|when|where|who|may)\b", re.IGNORECASE)
+_CHANNEL_QUESTION_HINTS = ("请问", "问一下", "想问", "咨询一下", "是否", "能否", "能不能", "可不可以", "如何", "怎么", "多少", "多大", "什么型号", "哪种", "哪款", "哪一个")
+
+
+def channel_looks_like_question(text: str) -> bool:
+    """与参考客户端 looksLikeQuestion 同口径；规则保守——宁可多走需求识别，不误吞工况描述。"""
+    value = str(text or "").strip()
+    if not value:
+        return False
+    if "?" in value or "？" in value:
+        return True
+    if _CHANNEL_QUESTION_HEAD.match(value):
+        return True
+    return any(hint in value for hint in _CHANNEL_QUESTION_HINTS)
+
+
+class ChannelSendError(RuntimeError):
+    """渠道发送失败（原因可直接展示给卖家界面）。"""
+
+
+def channel_api_base(channel: str, config: dict) -> str:
+    """渠道 API 基地址：环境变量 > 公开配置 > 官方默认。本地模拟用环境变量覆盖。"""
+    env_base = os.environ.get(CHANNEL_API_BASE_ENV.get(channel, ""), "").strip()
+    base = env_base or str(config.get("api_base") or "").strip() or CHANNEL_OFFICIAL_API_BASE.get(channel, "")
+    return base.rstrip("/")
+
+
+def channel_http_json(url: str, payload: dict, timeout: int = 10) -> dict:
+    request = urllib_request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except (urllib_error.URLError, TimeoutError, OSError) as error:
+        raise ChannelSendError(f"网络请求失败：{error}") from error
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ChannelSendError("渠道接口返回内容无法解析") from error
+    if not isinstance(data, dict):
+        raise ChannelSendError("渠道接口返回格式异常")
+    return data
+
+
+def telegram_api_call(base_url: str, token: str, method: str, payload: dict, timeout: int = 10) -> dict:
+    """调用 Telegram Bot API；非 ok 一律转成可展示的中文错误。token 只在本函数内使用、绝不落库落屏。
+
+    地址约定：base_url 以 /bot 结尾（官方与模拟服务一致），令牌直接拼在其后。
+    """
+    data = channel_http_json(f"{base_url}{token}/{method}", payload, timeout=timeout)
+    if not data.get("ok"):
+        raise ChannelSendError(str(data.get("description") or "渠道接口返回失败"))
+    return data
+
+
+def send_channel_text(channel: str, config: dict, external_user_id: str, text: str) -> str:
+    """向渠道发送一条文本，返回外部消息 ID。凭证缺失/未开通时明确报错（fail-closed）。"""
+    if channel != "telegram":
+        raise ChannelSendError("该渠道的发送通道尚未开通")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        raise ChannelSendError("缺少环境变量 TELEGRAM_BOT_TOKEN")
+    chat_id: object = external_user_id
+    try:
+        chat_id = int(external_user_id)
+    except (TypeError, ValueError):
+        pass
+    data = telegram_api_call(channel_api_base(channel, config), token, "sendMessage", {"chat_id": chat_id, "text": text})
+    result = data.get("result") or {}
+    return str(result.get("message_id") or "")
+
+
+def channel_outbound_text(message: sqlite3.Row) -> str:
+    """外发文案：去掉只为网页呈现保留的「xx回复：」前缀（标签由接收端呈现）。"""
+    content = message["content"] or ""
+    for prefix in ("卖家回复：", "工程师回复："):
+        if content.startswith(prefix):
+            return content[len(prefix):]
+    return content
+
+
+def deliver_channel_message(db: Database, tenant_id: str, conversation_id: str, message_id: str) -> tuple[bool, str]:
+    """把一条已保存的出站消息投递到渠道；更新 delivery_status / external_message_id / delivery_error。
+
+    网站聊天会话没有外发通道，视为即时送达。返回（是否送达, 失败原因）。
+    """
+    conversation = db.get_conversation(tenant_id, conversation_id)
+    message = db.conn.execute("SELECT * FROM messages WHERE id=? AND tenant_id=?", (message_id, tenant_id)).fetchone()
+    if not conversation or not message:
+        return False, "消息或会话不存在"
+    channel = conversation["source"] or ""
+    if channel not in CHANNEL_KEYS:
+        return True, ""
+    account = db.get_channel_account(tenant_id, channel)
+    if not account or account["status"] != "enabled":
+        db.conn.execute("UPDATE messages SET delivery_status='failed', delivery_error=? WHERE id=?", ("渠道未启用", message_id))
+        db.conn.commit()
+        return False, "渠道未启用"
+    identity = db.get_channel_identity_by_conversation(tenant_id, channel, conversation_id)
+    if not identity:
+        db.conn.execute("UPDATE messages SET delivery_status='failed', delivery_error=? WHERE id=?", ("没有绑定外部联系人", message_id))
+        db.conn.commit()
+        return False, "没有绑定外部联系人"
+    try:
+        config = json.loads(account["config_json"] or "{}")
+    except json.JSONDecodeError:
+        config = {}
+    try:
+        external_id = send_channel_text(channel, config, identity["external_user_id"], channel_outbound_text(message))
+    except ChannelSendError as error:
+        db.conn.execute("UPDATE messages SET delivery_status='failed', delivery_error=? WHERE id=?", (str(error), message_id))
+        db.conn.commit()
+        return False, str(error)
+    external_message_id = f"{identity['external_user_id']}:{external_id}" if external_id else ""
+    db.conn.execute(
+        "UPDATE messages SET delivery_status='sent', external_message_id=?, delivery_error='' WHERE id=?",
+        (external_message_id, message_id),
+    )
+    db.conn.commit()
+    return True, ""
+
+
+def get_or_create_channel_conversation(db: Database, tenant_id: str, channel: str, external_user_id: str, display_name: str, locale: str = "en") -> str:
+    """外部用户 ↔ 持续会话：一个外部用户对应一个长期会话；并发下靠唯一约束兜底。"""
+    identity = db.get_channel_identity(tenant_id, channel, external_user_id)
+    if identity:
+        return identity["conversation_id"]
+    conversation_id = db.create_conversation(tenant_id, channel, locale if locale in {"en", "zh"} else "en")
+    try:
+        db.bind_channel_identity(tenant_id, channel, external_user_id, display_name, conversation_id)
+        return conversation_id
+    except sqlite3.IntegrityError:
+        db.conn.rollback()
+        existing = db.get_channel_identity(tenant_id, channel, external_user_id)
+        if not existing:
+            raise
+        # 本次新建的会话没被绑定（并发败者）：没有消息就清理，避免收件箱出现空会话。
+        count = db.conn.execute("SELECT COUNT(*) AS n FROM messages WHERE conversation_id=?", (conversation_id,)).fetchone()
+        if count and count["n"] == 0:
+            db.conn.execute("DELETE FROM conversations WHERE tenant_id=? AND id=?", (tenant_id, conversation_id))
+            db.conn.commit()
+        return existing["conversation_id"]
+
+
+def channel_send_stored(db: Database, tenant_id: str, conversation: sqlite3.Row, text: str, source: str, actor_email: str = "") -> tuple[str, bool, str]:
+    """保存一条对外消息并立即投递；返回（消息 ID, 是否送达, 失败原因）。"""
+    channel = (conversation["source"] or "") if conversation["source"] else ""
+    if channel not in CHANNEL_KEYS:
+        channel = ""
+    message_id = db.save_message(
+        tenant_id, conversation["id"], "assistant", text, source,
+        channel=channel, delivery_status="queued" if channel else "", actor_email=actor_email,
+    )
+    if not channel:
+        return message_id, True, ""
+    sent, error = deliver_channel_message(db, tenant_id, conversation["id"], message_id)
+    return message_id, sent, error
+
+
+def channel_requirement_summary(values: dict) -> str:
+    lines = []
+    for key, item in values.items():
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("value", "")).strip()
+        if not value:
+            continue
+        label = str(item.get("label") or REQUIREMENT_LABELS.get(key, key))
+        unit = str(item.get("unit", "")).strip()
+        lines.append(f"· {label}：{value}{(' ' + unit) if unit else ''}")
+    return ("已记录以下工况：\n" + "\n".join(lines)) if lines else ""
+
+
+def channel_requirement_snapshot(values: dict) -> str:
+    """只比较取值与单位（判断本次消息是否带来新内容）。"""
+    return json.dumps(
+        {key: [str(item.get("value", "")).strip(), str(item.get("unit", "")).strip()] for key, item in values.items() if isinstance(item, dict)},
+        sort_keys=True, ensure_ascii=False,
+    )
+
+
+def channel_recommendation_summary(results: list, missing: list) -> str:
+    candidates = [item for item in results if item.get("status") == "candidate"]
+    tentative = [item for item in results if item.get("status") == "needs_confirmation"]
+    parts: list = []
+    if candidates:
+        parts.append("根据已确认工况，资料显示可以关注以下型号：")
+        for item in candidates[:3]:
+            refs = [str(value) for value in (item.get("satisfies") or [])[:2]]
+            note = f"（{'；'.join(refs)}）" if refs else ""
+            parts.append(f"· {item.get('model')}{note}")
+    elif tentative:
+        parts.append(f"有 {len(tentative)} 个型号与工况相关，但需要工程师核实后才能作为推荐。")
+    else:
+        parts.append("根据已确认工况，当前没有可直接推荐的型号。")
+    if missing:
+        parts.append("还需补充：" + "、".join(str(item) for item in missing))
+        parts.append("您可以继续补充工况，或回复「人工」请求工程师协助。")
+    else:
+        parts.append("如需进一步确认适用性，回复「人工」可请求工程师协助。")
+    return "\n".join(parts)
+
+
+def process_channel_message(db: Database, ai, tenant_id: str, channel: str, external_user_id: str, display_name: str, text: str, external_message_id: str) -> dict:
+    """渠道买家消息 → 落库 + 服务端分流（全部复用网页聊天的业务函数）。"""
+    text = str(text or "").strip()
+    if not text:
+        return {"action": "empty"}
+    existing = db.find_message_by_external(tenant_id, channel, external_message_id)
+    if existing:
+        return {"action": "duplicate", "conversation_id": existing["conversation_id"], "message_id": existing["id"]}
+    conversation_id = get_or_create_channel_conversation(db, tenant_id, channel, external_user_id, display_name)
+    message_id = db.save_message(tenant_id, conversation_id, "buyer", text, channel, channel=channel, external_message_id=external_message_id)
+    conversation = db.get_conversation(tenant_id, conversation_id)
+    if not conversation:
+        return {"action": "error", "error": "conversation_missing"}
+    result: dict = {"action": "recorded", "conversation_id": conversation_id, "message_id": message_id}
+    # ① 工程师追问待回复：整条消息作为对追问的补充（与网页聊天同一语义）。
+    waiting = db.conn.execute(
+        "SELECT id FROM human_tasks WHERE tenant_id=? AND conversation_id=? AND status='waiting_buyer' ORDER BY updated_at DESC LIMIT 1",
+        (tenant_id, conversation_id),
+    ).fetchone()
+    if waiting:
+        db.answer_task_followup(tenant_id, conversation_id, waiting["id"], text)
+        result["action"] = "human_followup"
+        return result
+    # ② 暂停 AI：消息已保存、不自动答复；问句补一条与网页可见性一致的「已暂停」文案。
+    if conversation["ai_paused"]:
+        if channel_looks_like_question(text):
+            channel_send_stored(db, tenant_id, conversation, AI_PAUSED_ANSWER, "unresolved-question")
+            result["action"] = "ai_paused"
+        return result
+    compact = text.casefold().replace(" ", "")
+    # ③ 「人工」：把最近一条未解问题转交工程师（与网页「请求工程师核实」同一路径，不自动建任务）。
+    if compact in {word.replace(" ", "") for word in CHANNEL_HUMAN_WORDS}:
+        answer = db.conn.execute(
+            "SELECT a.id FROM answers a WHERE a.tenant_id=? AND a.conversation_id=? AND a.answer_status='needs_human' "
+            "AND NOT EXISTS (SELECT 1 FROM human_tasks t WHERE t.tenant_id=a.tenant_id AND t.conversation_id=a.conversation_id AND t.question_message_id=a.question_message_id) "
+            "ORDER BY a.rowid DESC LIMIT 1",
+            (tenant_id, conversation_id),
+        ).fetchone()
+        if answer:
+            task_id = db.request_human_review(tenant_id, conversation_id, answer["id"])
+            ack = db.conn.execute(
+                "SELECT id FROM messages WHERE tenant_id=? AND conversation_id=? AND source=?",
+                (tenant_id, conversation_id, f"human-request:{task_id}"),
+            ).fetchone()
+            if ack:
+                deliver_channel_message(db, tenant_id, conversation_id, ack["id"])
+            result["action"] = "human_requested"
+            result["task_id"] = task_id
+        else:
+            channel_send_stored(db, tenant_id, conversation, CHANNEL_HUMAN_GUIDE, "channel-guidance")
+            result["action"] = "human_guide"
+        return result
+    # ④ 「确认」：确认最新候选工况并按网页同口径匹配产品。
+    latest = db.get_latest_revision(tenant_id, conversation_id)
+    if compact in {word.replace(" ", "") for word in CHANNEL_CONFIRM_WORDS} and latest and latest["status"] == "candidate":
+        values = json.loads(latest["values_json"])
+        confirmed = confirm_requirement_values(values)
+        revision_id = db.create_requirement_revision(tenant_id, conversation_id, confirmed, "confirmed", channel)
+        try:
+            full_results, missing = classify_products(db, tenant_id, confirmed)
+            status = overall_status(full_results, missing)
+            db.save_recommendation(tenant_id, conversation_id, revision_id, status, full_results)
+            body_text = channel_recommendation_summary(full_results, missing)
+        except Exception:
+            body_text = "工况已确认，但产品匹配暂时不可用；请稍后重试，或回复「人工」请求工程师协助。"
+        channel_send_stored(db, tenant_id, conversation, body_text, "channel-recommendation")
+        result["action"] = "confirmed"
+        return result
+    # ⑤ 提问样文本：有据问答（与网页一致：绑定当前推荐首型号）；资料外附转人工提示。
+    if channel_looks_like_question(text):
+        product_id = None
+        recommendation = db.latest_active_recommendation(tenant_id, conversation_id)
+        if recommendation:
+            try:
+                results = json.loads(recommendation["results_json"])
+            except json.JSONDecodeError:
+                results = []
+            first = next((item for item in results if item.get("status") in {"candidate", "needs_confirmation"}), None)
+            if first:
+                product_id = first.get("product_id")
+        status, answer_text, answer_product_id, version_id, citations, _reason = answer_question_with_mode(db, ai, tenant_id, conversation_id, text, product_id)
+        db.save_answer(tenant_id, conversation_id, message_id, answer_product_id, version_id, status, answer_text, citations)
+        if status == "grounded":
+            channel_send_stored(db, tenant_id, conversation, answer_text, "grounded-answer")
+        else:
+            channel_send_stored(db, tenant_id, conversation, f"{answer_text}\n\n{CHANNEL_HUMAN_HINT}", "unresolved-question")
+        result["action"] = "answered" if status == "grounded" else "answer_unresolved"
+        return result
+    # ⑥ 其余：需求识别与整理（没有新内容时不重复播报）。
+    previous_values = json.loads(latest["values_json"]) if latest else {}
+    try:
+        values = extract_requirement_candidates(db, ai, tenant_id, conversation_id, text, None, previous_values)
+    except Exception:
+        channel_send_stored(db, tenant_id, conversation, "您的消息已收到，但需求识别暂时不可用；请稍后再试。", "channel-guidance")
+        result["action"] = "extraction_failed"
+        return result
+    changed = channel_requirement_snapshot(values) != channel_requirement_snapshot(previous_values)
+    if not changed and latest:
+        result["action"] = "no_change"
+        return result
+    db.create_requirement_revision(tenant_id, conversation_id, values, "candidate", channel)
+    summary = channel_requirement_summary(values)
+    if summary:
+        body_text = f"{summary}\n\n请核对：回复「确认」开始匹配产品，或直接补充、更正。"
+        source = "channel-requirements"
+    else:
+        body_text = "没有识别到具体的工况参数。请描述关键信息（示例：流量 3 m³/h、扬程 45 m、介质清水），或直接提出产品问题。"
+        source = "channel-guidance"
+    channel_send_stored(db, tenant_id, conversation, body_text, source)
+    result["action"] = "extracted"
+    return result
+
+
+def handle_telegram_update(db: Database, ai, tenant_id: str, update: dict) -> dict | None:
+    """Telegram update → 渠道消息处理（长轮询与 Webhook 共用入口）。"""
+    if not isinstance(update, dict):
+        return None
+    message = update.get("message") or {}
+    if not isinstance(message, dict):
+        return None
+    text = message.get("text")
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    if not isinstance(text, str) or not text.strip() or chat_id is None or message_id is None:
+        return None
+    sender = message.get("from") or {}
+    display_name = str(sender.get("first_name") or sender.get("username") or f"Telegram {chat_id}").strip()
+    if sender.get("username"):
+        display_name = f"{display_name} (@{sender['username']})"
+    return process_channel_message(db, ai, tenant_id, "telegram", str(chat_id), display_name, text, f"{chat_id}:{message_id}")
+
+
+def render_rfq_link_form(field_config: dict, values: dict, error: str = "", existing_short: str = "") -> str:
+    """公开的 RFQ 填写页表单主体（字段状态跟随企业设置：必填 / 选填 / 隐藏）。"""
+    field_specs = (
+        ("email", "邮箱 / Email", "contact_email", " type='email'", "you@example.com"),
+        ("phone", "电话 / Phone", "contact_phone", "", "+49 …"),
+        ("quantity", "数量 / Quantity", "quantity", "", "如 2"),
+        ("destination", "目的地 / Destination", "destination", "", "如 Germany"),
+    )
+    inputs = []
+    for key, label, name, input_type, placeholder in field_specs:
+        state = field_config.get(key, "optional")
+        if state == "hidden":
+            continue
+        star = " *" if state == "required" else ""
+        required_attr = " required" if state == "required" else ""
+        inputs.append(
+            f"<div><label>{esc(label)}{star}</label>"
+            f"<input name='{name}'{input_type} value='{esc(values.get(key, ''))}' placeholder='{esc(placeholder)}'{required_attr}></div>"
+        )
+    notes_state = field_config.get("notes", "optional")
+    notes_input = ""
+    if notes_state != "hidden":
+        star = " *" if notes_state == "required" else ""
+        required_attr = " required" if notes_state == "required" else ""
+        notes_input = (
+            f"<div class='full'><label>补充说明 / Notes{star}</label>"
+            f"<textarea name='notes'{required_attr} placeholder='其它需要说明的信息'>{esc(values.get('notes', ''))}</textarea></div>"
+        )
+    revisit_note = ""
+    if existing_short:
+        revisit_note = f"<p class='muted'>您已提交过询价（编号 {esc(existing_short)}）；再次提交将更新同一张询价单。</p>"
+    error_html = f"<div class='error'>{esc(error)}</div>" if error else ""
+    return f"""
+{error_html}
+{revisit_note}
+<form method='post'>
+<div class='form-grid'>{''.join(inputs)}{notes_input}</div>
+<label style='display:flex;gap:8px;align-items:flex-start;margin-top:12px'><input type='checkbox' name='contact_confirmed' value='1' style='width:auto;margin-top:3px'> 我确认销售可通过上述联系方式就本次询价与我联系 / I confirm this contact can be used for this request</label>
+<p style='margin-top:12px'><button>提交询价 / Submit</button></p>
+</form>
+"""
+
+
 # ── V1-03 创意中心 · 产品展示页：板块库与标准模板（首批冻结，见 docs/V1-03-收口稿.md） ──
 # 板块库顺序 = 标准组合在现状公开页的自上而下顺序；fixed=不可关闭；default_enabled=标准模板默认开关。
 TEMPLATE_BLOCK_LIBRARY = (
@@ -6021,6 +6448,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            return
+        rfq_link_match = re.fullmatch(r"/rfq/([A-Za-z0-9_-]{16,96})", path)
+        if rfq_link_match:
+            self.public_rfq_form(rfq_link_match.group(1))
             return
         public_product_match = re.fullmatch(r"/api/v1/public/products/([a-zA-Z0-9-]+)", path)
         if public_product_match:
@@ -6868,6 +7299,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/logout":
             self.logout()
             return
+        telegram_hook_match = re.fullmatch(r"/api/v1/channels/telegram/webhook/([A-Za-z0-9_-]{8,64})", path)
+        if telegram_hook_match:
+            self.handle_telegram_webhook(telegram_hook_match.group(1))
+            return
+        rfq_submit_match = re.fullmatch(r"/rfq/([A-Za-z0-9_-]{16,96})", path)
+        if rfq_submit_match:
+            self.public_rfq_submit(rfq_submit_match.group(1), parse_multipart(self))
+            return
         if path.startswith("/admin/") and not self.authorize_admin(path, "POST"):
             return
         if path in DEMO_TOOL_PATHS and (not self.demo_tools or self.user_role != "admin"):
@@ -7088,11 +7527,13 @@ class Handler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/admin/tasks/([a-f0-9]+)/reply", path)
             if match:
                 self.db.resolve_human_task(self.tenant_id, match.group(1), str(form.get("response", "")), self.actor)
+                self.deliver_latest_task_message(match.group(1), "human-engineer")
                 self.redirect(f"/admin/tasks/{match.group(1)}?notice=resolved")
                 return
             match = re.fullmatch(r"/admin/tasks/([a-f0-9]+)/followup", path)
             if match:
                 self.db.ask_task_followup(self.tenant_id, match.group(1), str(form.get("question", "")), self.actor)
+                self.deliver_latest_task_message(match.group(1), f"engineer-followup:{match.group(1)}")
                 self.redirect(f"/admin/tasks/{match.group(1)}?notice=followup")
                 return
             match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/update", path)
@@ -7299,7 +7740,16 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 channel = match.group(1)
                 if channel == "telegram":
-                    config = {"bot_username": str(form.get("bot_username", "")).strip()[:64]}
+                    existing = self.db.get_channel_account(self.tenant_id, channel)
+                    try:
+                        existing_config = json.loads(existing["config_json"]) if existing else {}
+                    except (json.JSONDecodeError, TypeError):
+                        existing_config = {}
+                    config = {
+                        "bot_username": str(form.get("bot_username", "")).strip()[:64],
+                        # Webhook 收信地址令牌：首次保存时生成、此后保持稳定。
+                        "webhook_id": str(existing_config.get("webhook_id") or secrets.token_hex(16)),
+                    }
                 else:
                     config = {"display_name": str(form.get("display_name", "")).strip()[:64]}
                 self.db.save_channel_account(self.tenant_id, channel, config, self.actor)
@@ -7319,6 +7769,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.admin_inbox_reply(f"inbox_{match.group(1)}", match.group(2), form)
                 else:
                     self.admin_inbox_ai_toggle(f"inbox_{match.group(1)}", match.group(2))
+                return
+            match = re.fullmatch(r"/admin/inbox/(telegram|whatsapp)/([a-f0-9]+)/rfq-link", path)
+            if match:
+                self.admin_inbox_rfq_link(match.group(1), match.group(2))
                 return
             if path == "/admin/settings/stages":
                 self.admin_settings_save_stages(form)
@@ -8300,6 +8754,8 @@ class Handler(BaseHTTPRequestHandler):
         source = message["source"] or ""
         actor = message["actor_email"] or ""
         content = message["content"] or ""
+        if source == "rfq-form-submitted":
+            return "买方 · 询价链接提交", content, "buyer"
         if role == "buyer" or source.startswith("buyer-followup"):
             return "买方", content, "buyer"
         if source == "human-engineer":
@@ -8312,6 +8768,16 @@ class Handler(BaseHTTPRequestHandler):
         if source == "staff-reply":
             body = content.removeprefix("卖家回复：")
             return (f"人工 · 卖家回复（{actor}）" if actor else "人工 · 卖家回复"), body, "human"
+        if source == "rfq-link":
+            return (f"人工 · 询价链接（{actor}）" if actor else "人工 · 询价链接"), content, "human"
+        if source == "channel-requirements":
+            return "AI · 工况整理", content, "ai"
+        if source == "channel-recommendation":
+            return "AI · 匹配结果", content, "ai"
+        if source == "channel-guidance":
+            return "AI · 提示", content, "ai"
+        if source == "rfq-ack":
+            return "系统 · 询价回执", content, "system"
         if source == "grounded-answer":
             return "AI · 有据回答", content, "ai"
         if source == "unresolved-question":
@@ -8327,6 +8793,169 @@ class Handler(BaseHTTPRequestHandler):
             (self.tenant_id, conversation_id, body),
         ).fetchone()
         return f"（{row['assigned_to']}）" if row and row["assigned_to"] else ""
+
+    # ── V1-04 切片③：Telegram Webhook 收信 / RFQ 填写链接公开页 / 任务回复投递 ──────
+    def handle_telegram_webhook(self, hook_id: str) -> None:
+        """Telegram Webhook 收信：按 hook_id 定位企业，校验密钥头，处理后返回 200。
+
+        - 密钥只从环境变量读取（TELEGRAM_WEBHOOK_SECRET）；未设置或校验失败一律 403（fail-closed）。
+        - 渠道停用时 200 skipped（避免 Telegram 反复重试）；处理失败返回 500 让其按策略重试，
+          同一消息的重试由消息去重兜底。
+        """
+        account = None
+        for row in self.db.conn.execute("SELECT * FROM channel_accounts WHERE channel='telegram'").fetchall():
+            try:
+                config = json.loads(row["config_json"] or "{}")
+            except json.JSONDecodeError:
+                config = {}
+            if config.get("webhook_id") == hook_id:
+                account = row
+                break
+        if not account:
+            self.send_json({"ok": False, "error": "webhook_not_found"}, 404)
+            return
+        secret = os.environ.get(CHANNEL_WEBHOOK_SECRET_ENV["telegram"], "").strip()
+        supplied = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not secret or not hmac.compare_digest(supplied, secret):
+            self.send_json({"ok": False, "error": "secret_token_mismatch"}, 403)
+            return
+        if account["status"] != "enabled":
+            self.send_json({"ok": True, "skipped": "channel_disabled"}, 200)
+            return
+        payload = self.read_json()
+        if payload is None:
+            return
+        try:
+            outcome = handle_telegram_update(self.db, self.ai, account["tenant_id"], payload)
+        except Exception:
+            self.send_json({"ok": False, "error": "processing_failed"}, 500)
+            return
+        self.send_json({"ok": True, "outcome": (outcome or {}).get("action", "ignored")}, 200)
+
+    def _rfq_link_context(self, token: str) -> tuple[sqlite3.Row | None, sqlite3.Row | None, str]:
+        """RFQ 链接公共解析：令牌 →（会话, 渠道 slug）。无效返回 (None, None, \"\")。"""
+        record = self.db.find_rfq_form_token(token)
+        conversation = None
+        if record:
+            conversation = self.db.get_conversation(record["tenant_id"], record["conversation_id"])
+        channel = (conversation["source"] or "") if conversation else ""
+        if not record or not conversation or channel not in CHANNEL_KEYS:
+            return None, None, ""
+        return record, conversation, channel
+
+    def public_rfq_form(self, token: str, values: dict | None = None, error: str = "", status: int = 200) -> None:
+        """公开 RFQ 填写页（令牌即凭据；可重复打开，再次提交更新同一张询价单）。"""
+        record, conversation, channel = self._rfq_link_context(token)
+        if not record or not conversation:
+            self.send_html(layout("链接不可用", "<div class='error'>链接无效或已撤销；请联系与您沟通的卖家重新获取。</div>", public=True), 404)
+            return
+        tenant_id = record["tenant_id"]
+        conversation_id = conversation["id"]
+        field_config = self.db.get_rfq_field_config(tenant_id, self.db.rfq_category_hint(tenant_id, conversation_id, None, ""))
+        existing = self.db.conn.execute(
+            "SELECT * FROM rfqs WHERE tenant_id=? AND conversation_id=? AND entry_surface=? ORDER BY created_at DESC LIMIT 1",
+            (tenant_id, conversation_id, f"{channel}_link"),
+        ).fetchone()
+        if values is None:
+            values = {"email": "", "phone": "", "quantity": "", "destination": "", "notes": ""}
+            if existing:
+                content = self.db.rfq_current_content(existing)
+                values = {
+                    "email": content.get("contact_email") or "", "phone": content.get("contact_phone") or "",
+                    "quantity": content.get("quantity") or "", "destination": content.get("destination") or "",
+                    "notes": content.get("notes") or "",
+                }
+        existing_short = existing["id"][:8] if existing else ""
+        body = f"""
+<div class='toolbar'><div><h1>填写询价信息</h1><div class='muted'>提交后进入卖家的销售工作台；本链接可重复打开、随时修改。</div></div></div>
+<section class='card'>{render_rfq_link_form(field_config, values, error, existing_short)}</section>
+"""
+        self.send_html(layout("填写询价信息", body, public=True), status)
+
+    def public_rfq_submit(self, token: str, form: dict) -> None:
+        """公开 RFQ 填写页提交：首次提交建单；再次提交更新同一张单（版本 +1）。"""
+        record, conversation, channel = self._rfq_link_context(token)
+        if not record or not conversation:
+            self.send_html(layout("链接不可用", "<div class='error'>链接无效或已撤销；请联系与您沟通的卖家重新获取。</div>", public=True), 404)
+            return
+        tenant_id = record["tenant_id"]
+        conversation_id = conversation["id"]
+        field_config = self.db.get_rfq_field_config(tenant_id, self.db.rfq_category_hint(tenant_id, conversation_id, None, ""))
+        raw = {key: str(form.get(name, "")).strip() for key, name in (("email", "contact_email"), ("phone", "contact_phone"), ("quantity", "quantity"), ("destination", "destination"), ("notes", "notes"))}
+        for key in ("email", "phone", "quantity", "destination", "notes"):
+            if field_config.get(key) == "hidden":
+                raw[key] = ""
+        if str(form.get("contact_confirmed", "")) != "1":
+            self.public_rfq_form(token, values=raw, error="请先勾选确认：销售可通过上述联系方式就本次询价与您联系。", status=400)
+            return
+        missing = [RFQ_FIELD_LABELS[key] for key in RFQ_FIELD_ORDER if field_config.get(key) == "required" and not raw.get(key, "")]
+        if missing:
+            self.public_rfq_form(token, values=raw, error="请填写：" + "、".join(missing), status=400)
+            return
+        contact = {"contact_email": raw["email"], "contact_phone": raw["phone"], "quantity": raw["quantity"], "region": raw["destination"]}
+        entry = f"{channel}_link"
+        existing = self.db.conn.execute(
+            "SELECT * FROM rfqs WHERE tenant_id=? AND conversation_id=? AND entry_surface=? ORDER BY created_at DESC LIMIT 1",
+            (tenant_id, conversation_id, entry),
+        ).fetchone()
+        try:
+            if existing:
+                self.db.revise_rfq(
+                    tenant_id, conversation_id, existing["id"], existing["current_revision"],
+                    {"contact_email": raw["email"], "contact_phone": raw["phone"], "quantity": raw["quantity"], "destination": raw["destination"], "notes": raw["notes"]},
+                    secrets.token_hex(12),
+                )
+                rfq_id = existing["id"]
+                action_text = f"通过询价链接更新了询价单 {rfq_id[:8]}。"
+            else:
+                rfq_id, _created = self.db.create_rfq(tenant_id, conversation_id, secrets.token_hex(12), contact, raw["notes"], None, entry, "")
+                action_text = f"通过询价链接提交了询价单 {rfq_id[:8]}。"
+        except ConflictError as error:
+            self.public_rfq_form(token, values=raw, error=f"提交未完成：{error}。请刷新后重试。", status=409)
+            return
+        except ValueError as error:
+            self.public_rfq_form(token, values=raw, error=f"提交未完成：{error}", status=400)
+            return
+        self.db.save_message(tenant_id, conversation_id, "buyer", action_text, "rfq-form-submitted", channel=channel)
+        channel_send_stored(self.db, tenant_id, conversation, CHANNEL_RFQ_ACK, "rfq-ack")
+        body = f"""
+<div class='toolbar'><div><h1>已提交 / Submitted</h1></div></div>
+<section class='card'><p>您的询价信息已提交（编号 {esc(rfq_id[:8])}）。</p>
+<p class='muted'>您可以随时重新打开本链接更新内容；更新会保存到同一张询价单。</p></section>
+"""
+        self.send_html(layout("已提交", body, public=True), 200)
+
+    def deliver_latest_task_message(self, task_id: str, source: str) -> None:
+        """任务操作后把最新一条消息投递到渠道（网站聊天会话无外发通道，直接忽略）。"""
+        task = self.db.get_human_task(self.tenant_id, task_id)
+        if not task:
+            return
+        conversation = self.db.get_conversation(self.tenant_id, task["conversation_id"])
+        if not conversation or (conversation["source"] or "") not in CHANNEL_KEYS:
+            return
+        row = self.db.conn.execute(
+            "SELECT id FROM messages WHERE tenant_id=? AND conversation_id=? AND source=? ORDER BY rowid DESC LIMIT 1",
+            (self.tenant_id, task["conversation_id"], source),
+        ).fetchone()
+        if row:
+            deliver_channel_message(self.db, self.tenant_id, task["conversation_id"], row["id"])
+
+    def admin_inbox_rfq_link(self, channel: str, conversation_id: str) -> None:
+        """给渠道会话主动发送「RFQ 填写链接」消息（停止主动联系时拒绝）。"""
+        conversation = self.db.get_conversation(self.tenant_id, conversation_id)
+        if not conversation or (conversation["source"] or "") != channel:
+            raise ValueError("会话不存在或不属于这个渠道")
+        if channel == "whatsapp":
+            raise ValueError("该渠道的发送通道尚未开通")
+        if conversation["stop_proactive_contact"]:
+            self.redirect(f"/admin/inbox/{channel}/{conversation_id}?notice=link_stopped")
+            return
+        token = self.db.create_rfq_form_token(self.tenant_id, conversation_id, self.actor)
+        host = self.headers.get("Host", "127.0.0.1:8137")
+        scheme = "https" if self.headers.get("X-Forwarded-Proto") == "https" else "http"
+        text = f"您可以打开以下链接填写询价信息（可重复打开、随时修改）：\n{scheme}://{host}/rfq/{token}"
+        _message_id, sent, _error = channel_send_stored(self.db, self.tenant_id, conversation, text, "rfq-link", actor_email=self.actor)
+        self.redirect(f"/admin/inbox/{channel}/{conversation_id}?notice={'link_sent' if sent else 'link_failed'}")
 
     def admin_inbox(self, section: str, query: dict[str, list[str]]) -> None:
         """会话收件箱子模块：列表（按渠道分开，一眼看清来源）。"""
@@ -8399,10 +9028,19 @@ class Handler(BaseHTTPRequestHandler):
         if not conversation or not self._inbox_conversation_in_section(channel, conversation):
             self.send_html(self.console_page("未找到", "<div class='error'>会话不存在或不属于这个渠道。</div>", section if channel else ""), 404)
             return
+        sent_html = (
+            "<div class='notice'>回复已发送——买方在网站聊天窗口里可见。</div>"
+            if channel == "web"
+            else f"<div class='notice'>回复已发送——已经由 {esc(label)} 直达买方。</div>"
+        )
         notices = {
-            "sent": "<div class='notice'>回复已发送——买方在网站聊天窗口里可见。</div>",
+            "sent": sent_html,
+            "reply_failed": "<div class='error'>回复发送失败——消息已保存并标为「发送失败」，原因见聊天记录。</div>",
             "ai_paused": "<div class='notice'>已暂停本会话的 AI 自动回复；买方提问将按「待人工」处理。</div>",
             "ai_resumed": "<div class='notice'>已恢复本会话的 AI 自动回复。</div>",
+            "link_sent": f"<div class='notice'>询价链接已发送——买方在 {esc(label)} 里点开即可填写。</div>",
+            "link_failed": "<div class='error'>询价链接发送失败——请检查渠道凭证与网络后重试。</div>",
+            "link_stopped": "<div class='error'>该会话已标记「停止主动联系」，不能主动发送询价链接。</div>",
         }
         notice = notices.get(query.get("notice", [""])[0], "")
         messages = self.db.list_messages(self.tenant_id, conversation_id)
@@ -8410,8 +9048,16 @@ class Handler(BaseHTTPRequestHandler):
         for message in messages:
             who, body_text, css = self._inbox_message_view(message)
             when = esc((message["created_at"] or "")[:16].replace("T", " "))
+            delivery_html = ""
+            delivery_status = message["delivery_status"] or ""
+            if channel != "web" and delivery_status:
+                delivery_label = {
+                    "sent": "已送达", "queued": "发送中",
+                    "failed": f"发送失败：{message['delivery_error'] or '原因未知'}",
+                }.get(delivery_status, delivery_status)
+                delivery_html = f"<span class='when'>{esc(delivery_label)}</span>"
             message_rows.append(
-                f"<div class='msgrow {css}'><div class='meta'><span class='who'>{esc(who)}</span><span class='when'>{when}</span></div>"
+                f"<div class='msgrow {css}'><div class='meta'><span class='who'>{esc(who)}</span><span class='when'>{when}</span>{delivery_html}</div>"
                 f"<div class='bubble'>{esc(body_text)}</div></div>"
             )
         transcript = "".join(message_rows) or "<div class='muted-block'>这个会话还没有消息。</div>"
@@ -8443,10 +9089,22 @@ class Handler(BaseHTTPRequestHandler):
             reply_html = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>回复买方</h2><span class='muted'>立即出现在买方网站聊天窗口</span></div>
 <form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/reply'><textarea name='body' required maxlength='4000' placeholder='输入回复内容…'></textarea>
 <p style='margin-top:10px'><button>发送回复</button></p></form></section>"""
+        elif channel == "telegram":
+            reply_html = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>回复买方</h2><span class='muted'>经 {esc(label)} 直达买方聊天窗口</span></div>
+<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/reply'><textarea name='body' required maxlength='4000' placeholder='输入回复内容…'></textarea>
+<p style='margin-top:10px'><button>发送回复</button></p></form></section>"""
         else:
             reply_html = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>回复买方</h2></div>
-<div class='muted-block'>{esc(label)} 的发送通道将在渠道接入切片上线后开放；当前阶段可以查看记录与调整 AI 开关。</div>
+<div class='muted-block'>{esc(label)} 的发送通道将在后续切片上线后开放；当前阶段可以查看记录与调整 AI 开关。</div>
 <textarea disabled placeholder='发送通道未开通'></textarea></section>"""
+        if channel == "telegram":
+            rfq_card = f"""<section class='card' style='margin-top:16px'><div class='panel-title'><h2>询价填写链接</h2><span class='muted'>买方点开后可随时填写与修改</span></div>
+<p class='muted' style='margin:0 0 10px'>给买方发送一条带链接的消息；买方打开填写后，询价进入销售工作台。</p>
+<form method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/rfq-link'><p style='margin:0'><button class='secondary'>发送询价填写链接</button></p></form></section>"""
+        elif channel == "whatsapp":
+            rfq_card = "<section class='card' style='margin-top:16px'><div class='panel-title'><h2>询价填写链接</h2></div><div class='muted-block'>该渠道的发送通道将在后续切片上线后开放。</div></section>"
+        else:
+            rfq_card = ""
         body = f"""
 <div class='toolbar'><div><a href='/admin/inbox/{slug}'>← 返回{esc(label)}列表</a><h1 style='margin-top:6px'>{esc(label)}会话</h1>
 <div class='muted'>会话 {esc(conversation_id[:10])} · 开始 {esc((conversation['created_at'] or '')[:16].replace('T', ' '))} · 最后活动 {esc((conversation['updated_at'] or '')[:16].replace('T', ' '))} · 消息 {len(messages)} 条</div></div>
@@ -8456,27 +9114,35 @@ class Handler(BaseHTTPRequestHandler):
 <section class='card'><div class='panel-title'><h2>关联业务</h2></div><div class='simple-list'>{related_html}</div></section>
 <section class='card' style='margin-top:16px'><div class='panel-title'><h2>全部聊天记录</h2><span class='muted'>AI 与人工分开标注 · 人工显示回复人</span></div>
 {transcript}</section>
-{reply_html}"""
+{reply_html}
+{rfq_card}"""
         self.send_html(self.console_page(f"{label}会话", body, section))
 
     def admin_inbox_reply(self, section: str, conversation_id: str, form: dict) -> None:
-        """收件箱直接回复：网站聊天即时可见；渠道发送通道未开通前明确拒绝。"""
+        """收件箱直接回复：网站聊天即时可见；Telegram 经发送器直达买方（失败可见）。"""
         channel = INBOX_SECTION_CHANNELS.get(section)
         slug = section.removeprefix("inbox_")
         conversation = channel and self.db.get_conversation(self.tenant_id, conversation_id)
         if not conversation or not self._inbox_conversation_in_section(channel, conversation):
             raise ValueError("会话不存在或不属于这个渠道")
-        if channel != "web":
-            raise ValueError("该渠道的发送通道尚未开通，暂时不能从这里回复")
         body_text = str(form.get("body", "")).strip()
         if not body_text:
             raise ValueError("回复内容不能为空")
+        if channel == "web":
+            message_id = self.db.save_message(
+                self.tenant_id, conversation_id, "staff", f"卖家回复：{body_text}", "staff-reply",
+                actor_email=self.actor, delivery_status="sent",
+            )
+            self.db.audit_staff_reply(self.tenant_id, conversation_id, message_id, self.actor)
+            self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice=sent")
+            return
         message_id = self.db.save_message(
             self.tenant_id, conversation_id, "staff", f"卖家回复：{body_text}", "staff-reply",
-            actor_email=self.actor, delivery_status="sent",
+            channel=channel or "", actor_email=self.actor, delivery_status="queued",
         )
         self.db.audit_staff_reply(self.tenant_id, conversation_id, message_id, self.actor)
-        self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice=sent")
+        sent, _error = deliver_channel_message(self.db, self.tenant_id, conversation_id, message_id)
+        self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice={'sent' if sent else 'reply_failed'}")
 
     def admin_inbox_ai_toggle(self, section: str, conversation_id: str) -> None:
         """每会话「暂停/恢复 AI 自动回复」。"""
@@ -8499,9 +9165,10 @@ class Handler(BaseHTTPRequestHandler):
         }
         notice = notices.get(query.get("notice", [""])[0], "")
         guides = {
-            "telegram": "在 Telegram 里找 @BotFather 新建机器人 → 把机器人令牌写进本机环境变量 TELEGRAM_BOT_TOKEN（服务端读取，不入库、不回显）→ 回到这里填写机器人用户名并启用。本地开发用长轮询收信，无需公网地址；生产可切换 Webhook（带密钥校验）。",
+            "telegram": "在 Telegram 里找 @BotFather 新建机器人 → 把机器人令牌写进本机环境变量 TELEGRAM_BOT_TOKEN（服务端读取，不入库、不回显）→ 回到这里填写机器人用户名并启用。收信两种方式都可用：本地长轮询（下方命令，无需公网地址）或 Webhook（需再设置一个密钥变量并注册下方地址）。",
             "whatsapp": "走 Twilio：开通 WhatsApp 沙箱（手机发送加入码即可参与测试）→ 把 Account SID、Auth Token、（whatsapp: 前缀的）发送号码写进本机环境变量 TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM → 回到这里填写显示名称并启用。收信需要一条公网回调地址，联调时使用临时隧道。",
         }
+        host = self.headers.get("Host", "127.0.0.1:8137")
         cards = []
         for channel in CHANNEL_KEYS:
             account = accounts.get(channel)
@@ -8520,6 +9187,13 @@ class Handler(BaseHTTPRequestHandler):
                 field = f"<label>显示名称（公开显示）<input name='display_name' value='{esc(str(config.get('display_name', '')))}' placeholder='例如 星海泵业'></label>"
             toggle_label = "停用" if enabled else "启用"
             toggle_class = "warn" if enabled else ""
+            receive_block = ""
+            if channel == "telegram":
+                webhook_id = str(config.get("webhook_id", ""))
+                hook_secret_ok = bool(os.environ.get(CHANNEL_WEBHOOK_SECRET_ENV["telegram"], "").strip())
+                hook_url = f"http://{host}/api/v1/channels/telegram/webhook/{webhook_id}" if webhook_id else "（保存配置后生成）"
+                hook_secret_label = "已设置" if hook_secret_ok else f"未设置（需本机变量 {CHANNEL_WEBHOOK_SECRET_ENV['telegram']}）"
+                receive_block = f"""<div class='field-state' style='margin-top:8px'><b>收信（已上线）</b>：本地长轮询 <code>python3 tools/channels/telegram_poller.py --db data/demo.db</code>；生产 Webhook 地址 <code>{esc(hook_url)}</code>（密钥状态：{esc(hook_secret_label)}）。<br><b>已支持</b>：自动问答（资料外转人工）、文本「人工」转交、卖家回复直达、询价填写链接。</div>"""
             cards.append(f"""<section class='card' style='margin-top:16px'>
 <div class='panel-title'><h2>{esc(CHANNEL_LABELS[channel])} {badge} {secret_badge}</h2></div>
 <form method='post' action='/admin/channels/{channel}'>
@@ -8529,6 +9203,7 @@ class Handler(BaseHTTPRequestHandler):
 <form method='post' action='/admin/channels/{channel}/toggle' style='margin-top:8px'>
 <p style='margin:0'><button class='{toggle_class}'>{toggle_label}渠道</button></p>
 </form>
+{receive_block}
 <p class='guide'>{esc(guides[channel])}</p>
 <p class='field-state'>机密凭证只从本机环境变量读取：页面不显示、数据库不保存、不进 Git；启用/停用与配置变更全部写入操作记录。</p>
 </section>""")
@@ -8536,7 +9211,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class='toolbar'><div><h1>渠道接入</h1><div class='muted'>把 Telegram / WhatsApp 变成买方入口：消息进「会话收件箱」，回复从平台发出。</div></div></div>
 {notice}
 <section class='card'><div class='panel-title'><h2>如何工作</h2></div>
-<p class='muted' style='margin:0'>启用并配置凭证后：买方在渠道里的消息会进入「会话收件箱」，与网站聊天走同一批处理（需求确认、有据问答、人工接管、RFQ 填写链接）；卖家在平台里的回复会经渠道直达买方。功能默认关闭；收信与发送能力将在对应渠道切片上线后开始工作。</p></section>
+<p class='muted' style='margin:0'>启用并配置凭证后：买方在渠道里的消息会进入「会话收件箱」，与网站聊天走同一批处理（需求确认、有据问答、人工接管、RFQ 填写链接）；卖家在平台里的回复会经渠道直达买方。收信与发送已支持 Telegram；WhatsApp 待后续切片上线。新渠道默认关闭，启用与凭证变更全部留痕。</p></section>
 {''.join(cards)}"""
         self.send_html(self.console_page("渠道接入", body, "channels"))
 

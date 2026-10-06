@@ -9,7 +9,9 @@
 import http.client
 import json
 import os
+import re
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -28,6 +30,7 @@ from app import (  # noqa: E402
     AUDIT_ACTION_LABELS,
     AUDIT_ENTITY_LABELS,
     CHANNEL_KEYS,
+    DEFAULT_RFQ_FIELDS,
     GRANTABLE_MODULE_KEYS,
     Database,
     channel_secret_status,
@@ -601,17 +604,39 @@ class ConversationInboxTests(unittest.TestCase):
         status, _, _ = form_request(self.server, "GET", f"/admin/inbox/web/{self.telegram_conv}", cookie=self.inbox_emp)
         self.assertEqual(status, 404)
 
-    def test_inbox_reply_channel_blocked(self):
+    def test_inbox_reply_channel_delivery_gated(self):
+        # 切片③起 Telegram 回复走真实发送：未启用渠道时消息仍落库并标记「发送失败」（不再直接拒绝）。
         before = self.db.conn.execute(
             "SELECT COUNT(*) FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=?", (self.telegram_conv,)
         ).fetchone()[0]
-        status, _, body = form_request(self.server, "POST", f"/admin/inbox/telegram/{self.telegram_conv}/reply", {"body": "hello"}, self.inbox_emp)
-        self.assertEqual(status, 400)
-        self.assertIn("发送通道尚未开通", body)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{self.telegram_conv}/reply", {"body": "hello"}, self.inbox_emp)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=reply_failed", headers.get("Location", ""))
         after = self.db.conn.execute(
             "SELECT COUNT(*) FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=?", (self.telegram_conv,)
         ).fetchone()[0]
-        self.assertEqual(before, after)
+        self.assertEqual(before + 1, after)
+        row = self.db.conn.execute(
+            "SELECT * FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=? ORDER BY rowid DESC LIMIT 1", (self.telegram_conv,)
+        ).fetchone()
+        self.assertEqual(row["delivery_status"], "failed")
+        self.assertIn("渠道未启用", row["delivery_error"])
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.telegram_conv}?notice=reply_failed", cookie=self.inbox_emp)
+        self.assertIn("发送失败", page)
+        self.assertIn("回复发送失败", page)
+        # WhatsApp：启用渠道但发送通道未开通 → 同样落库并标记失败（UI 目前不提供入口，直连 POST 验证守卫）
+        self.db.save_channel_account("demo-tenant", "whatsapp", {}, "demo-admin@example.invalid")
+        self.db.set_channel_enabled("demo-tenant", "whatsapp", True, "demo-admin@example.invalid")
+        wa_conv = self.db.create_conversation("demo-tenant", "whatsapp", "en")
+        self.db.bind_channel_identity("demo-tenant", "whatsapp", "wa-1", "Wa Buyer", wa_conv)
+        self.db.save_message("demo-tenant", wa_conv, "buyer", "hi", "whatsapp", channel="whatsapp", external_message_id="wa:1")
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/whatsapp/{wa_conv}/reply", {"body": "hi"}, self.inbox_emp)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=reply_failed", headers.get("Location", ""))
+        row = self.db.conn.execute(
+            "SELECT * FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=? ORDER BY rowid DESC LIMIT 1", (wa_conv,)
+        ).fetchone()
+        self.assertIn("发送通道尚未开通", row["delivery_error"])
 
     def test_inbox_reply_web_and_buyer_visibility(self):
         status, headers, _ = form_request(
@@ -654,6 +679,344 @@ class ConversationInboxTests(unittest.TestCase):
         self.assertIn("回复已发送", page)
         self.assertIn("发送卖家回复", AUDIT_ACTION_LABELS.get("staff_replied", ""))  # 标签中文
         self.assertEqual(AUDIT_ACTION_LABELS["staff_replied"], "发送卖家回复")
+
+
+class TelegramPipelineTests(unittest.TestCase):
+    """切片③：Telegram 全链路——收信（Webhook / 长轮询）、自动问答、人工转交、回复直达、RFQ 填写链接。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.db_path = Path(cls.temp_dir.name) / "app.db"
+        cls.mock = mock_telegram.MockTelegramServer()
+        cls.env_backup = {name: os.environ.get(name) for name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_API_BASE", "TELEGRAM_WEBHOOK_SECRET")}
+        os.environ["TELEGRAM_BOT_TOKEN"] = "123:TEST-TOKEN"
+        os.environ["TELEGRAM_API_BASE"] = cls.mock.base_url()
+        os.environ["TELEGRAM_WEBHOOK_SECRET"] = "hook-secret-test"
+        cls.server = make_server(cls.db_path, port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        cls.hook_id = "hook-test-12345678"
+        cls.db.save_channel_account("demo-tenant", "telegram", {"bot_username": "@demo_seller_bot", "webhook_id": cls.hook_id}, "demo-admin@example.invalid")
+        cls.db.set_channel_enabled("demo-tenant", "telegram", True, "demo-admin@example.invalid")
+        # 已发布产品（有据问答 / 产品匹配用）
+        cls.product_id = cls.db.create_product("demo-tenant", "TG-100", "渠道测试泵", "清水")
+        source_id = cls.db.add_source("demo-tenant", cls.product_id, "manual.pdf", "PDF", "第 2 页")
+        cls.db.save_field("demo-tenant", cls.product_id, "flow_range", "10-30", "m3/h", source_id, "第 2 页")
+        cls.db.save_field("demo-tenant", cls.product_id, "head_range", "20-60", "m", source_id, "第 3 页")
+        cls.db.save_field("demo-tenant", cls.product_id, "media", "清水", "", source_id, "第 4 页")
+        for field_key in ("flow_range", "head_range", "media"):
+            cls.db.approve_field("demo-tenant", cls.product_id, field_key)
+        cls.db.finalize_product_review("demo-tenant", cls.product_id)
+        cls.db.publish_product("demo-tenant", cls.product_id)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.mock.stop()
+        cls.temp_dir.cleanup()
+        for name, value in cls.env_backup.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    # ── 辅助 ───────────────────────────────────────────────────────────────
+    def post_update(self, update, secret="hook-secret-test"):
+        headers = {"X-Telegram-Bot-Api-Secret-Token": secret} if secret is not None else {}
+        return json_http(self.server, "POST", f"/api/v1/channels/telegram/webhook/{self.hook_id}", update, headers=headers)
+
+    def update_for(self, chat_id, text, message_id, first_name="Maya", username="maya_t"):
+        return {
+            "update_id": message_id,
+            "message": {
+                "message_id": message_id,
+                "date": 1759500000,
+                "chat": {"id": chat_id, "type": "private"},
+                "from": {"id": chat_id, "first_name": first_name, "username": username, "language_code": "en"},
+                "text": text,
+            },
+        }
+
+    def conversation_for(self, chat_id):
+        row = self.db.conn.execute(
+            "SELECT conversation_id FROM channel_identities WHERE tenant_id='demo-tenant' AND channel='telegram' AND external_user_id=?",
+            (str(chat_id),),
+        ).fetchone()
+        return row["conversation_id"] if row else None
+
+    def sent_texts(self, chat_id):
+        return [item["text"] for item in self.mock.sent_messages() if int(item["chat"]["id"]) == int(chat_id)]
+
+    def last_message(self, conversation_id, source=None):
+        if source:
+            return self.db.conn.execute(
+                "SELECT * FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=? AND source=? ORDER BY rowid DESC LIMIT 1",
+                (conversation_id, source),
+            ).fetchone()
+        return self.db.conn.execute(
+            "SELECT * FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=? ORDER BY rowid DESC LIMIT 1",
+            (conversation_id,),
+        ).fetchone()
+
+    # ── 用例 ───────────────────────────────────────────────────────────────
+    def test_check_live_script_against_mock(self):
+        env = os.environ.copy()
+        result = subprocess.run(
+            [sys.executable, "tools/channels/check_telegram_live.py", "--chat-id", "999"],
+            cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("getMe 成功", result.stdout)
+        self.assertIn("sendMessage 成功", result.stdout)
+        self.assertNotIn("TEST-TOKEN", result.stdout)  # 令牌不回显
+        env_no_token = {key: value for key, value in env.items() if key != "TELEGRAM_BOT_TOKEN"}
+        result2 = subprocess.run(
+            [sys.executable, "tools/channels/check_telegram_live.py"],
+            cwd=str(ROOT), env=env_no_token, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result2.returncode, 2)
+        self.assertIn("缺少环境变量", result2.stdout + result2.stderr)
+
+    def test_duplicate_update_processed_once(self):
+        update = self.update_for(4301, "Who are you?", 901)
+        status, body = self.post_update(update)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["ok"], True)
+        conversation_id = self.conversation_for(4301)
+        self.assertTrue(conversation_id)
+        count_before = self.db.conn.execute("SELECT COUNT(*) AS n FROM messages WHERE conversation_id=?", (conversation_id,)).fetchone()["n"]
+        sent_before = len(self.mock.sent_messages())
+        status, _body = self.post_update(update)
+        self.assertEqual(status, 200)
+        count_after = self.db.conn.execute("SELECT COUNT(*) AS n FROM messages WHERE conversation_id=?", (conversation_id,)).fetchone()["n"]
+        self.assertEqual(count_before, count_after)
+        self.assertEqual(sent_before, len(self.mock.sent_messages()))
+
+    def test_human_request_and_engineer_reply_reaches_channel(self):
+        status, _body = self.post_update(self.update_for(4302, "你们能发到德国吗？价格是多少？", 902))
+        self.assertEqual(status, 200)
+        conversation_id = self.conversation_for(4302)
+        texts = self.sent_texts(4302)
+        self.assertTrue(any("「人工」" in text for text in texts))
+        answer = self.db.conn.execute(
+            "SELECT * FROM answers WHERE tenant_id='demo-tenant' AND conversation_id=? AND answer_status='needs_human'", (conversation_id,)
+        ).fetchone()
+        self.assertTrue(answer)
+        # 买方回复「人工」→ 创建人工任务 + 转交播报直达渠道（不自动建任务，需买方明确要求）
+        status, body = self.post_update(self.update_for(4302, "人工", 903))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["outcome"], "human_requested")
+        task = self.db.conn.execute(
+            "SELECT * FROM human_tasks WHERE tenant_id='demo-tenant' AND conversation_id=?", (conversation_id,)
+        ).fetchone()
+        self.assertTrue(task)
+        self.assertTrue(any("已转交工程师核实" in text for text in self.sent_texts(4302)))
+        # 工程师在后台答复 → 经渠道直达买方（去掉「工程师回复：」前缀）
+        status, headers, _ = form_request(self.server, "POST", f"/admin/tasks/{task['id']}/reply", {"response": "可以为德国交付，细节以销售报价为准。"}, self.admin)
+        self.assertEqual(status, 303)
+        self.assertIn("可以为德国交付，细节以销售报价为准。", self.sent_texts(4302))
+        reply_row = self.last_message(conversation_id, "human-engineer")
+        self.assertEqual(reply_row["delivery_status"], "sent")
+        self.assertTrue(reply_row["external_message_id"])
+
+    def test_poller_script_once_consumes_updates(self):
+        self.mock.inject_message(4303, "flow 5 m3/h, head 10 m", first_name="Poller")
+        env = os.environ.copy()
+        result = subprocess.run(
+            [sys.executable, "tools/channels/telegram_poller.py", "--db", str(self.db_path), "--once"],
+            cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("本轮完成", result.stdout)
+        conversation_id = self.conversation_for(4303)
+        self.assertTrue(conversation_id)
+        self.assertTrue(any("流量" in text for text in self.sent_texts(4303)))
+
+    def test_requirement_confirm_and_match(self):
+        status, _body = self.post_update(self.update_for(4304, "请报价：flow 15 m3/h, head 30 m, medium clean water，用于冷却水系统", 904))
+        self.assertEqual(status, 200)
+        conversation_id = self.conversation_for(4304)
+        self.assertTrue(any("已记录以下工况" in text for text in self.sent_texts(4304)))
+        self.assertTrue(any("「确认」" in text for text in self.sent_texts(4304)))
+        # 「确认」→ 确认工况并按同口径匹配（TG-100 覆盖 15 m³/h、30 m、清水）
+        status, _body = self.post_update(self.update_for(4304, "确认", 905))
+        self.assertEqual(status, 200)
+        latest_revision = self.db.conn.execute(
+            "SELECT * FROM requirement_revisions WHERE tenant_id='demo-tenant' AND conversation_id=? ORDER BY revision DESC LIMIT 1",
+            (conversation_id,),
+        ).fetchone()
+        self.assertEqual(latest_revision["status"], "confirmed")
+        recommendation = self.db.conn.execute(
+            "SELECT * FROM recommendations WHERE tenant_id='demo-tenant' AND conversation_id=? AND status<>'invalidated'", (conversation_id,)
+        ).fetchone()
+        self.assertTrue(recommendation)
+        self.assertTrue(any("TG-100" in text for text in self.sent_texts(4304)))
+        self.assertTrue(any("根据已确认工况" in text for text in self.sent_texts(4304)))
+
+    def test_rfq_link_and_form_roundtrip(self):
+        status, _body = self.post_update(self.update_for(4305, "hello", 906))
+        self.assertEqual(status, 200)
+        conversation_id = self.conversation_for(4305)
+        self.assertTrue(conversation_id)
+        # 后台坐席发送询价链接（消息直达渠道）
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/rfq-link", {}, self.admin)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=link_sent", headers.get("Location", ""))
+        link_row = self.last_message(conversation_id, "rfq-link")
+        self.assertEqual(link_row["delivery_status"], "sent")
+        link_texts = [text for text in self.sent_texts(4305) if "/rfq/" in text]
+        self.assertTrue(link_texts)
+        token = re.search(r"/rfq/([A-Za-z0-9_-]+)", link_texts[-1]).group(1)
+        # 公开填写页（无登录即可打开）
+        status, _, page = form_request(self.server, "GET", f"/rfq/{token}")
+        self.assertEqual(status, 200)
+        self.assertIn("填写询价信息", page)
+        self.assertIn("contact_confirmed", page)
+        self.assertIn("邮箱 / Email", page)
+        # 未勾选「联系确认」→ 拒绝且保留填写内容
+        status, _, page = form_request(self.server, "POST", f"/rfq/{token}", {"contact_email": "tg@example.invalid", "contact_phone": "+49", "quantity": "2", "destination": "Germany", "notes": ""})
+        self.assertEqual(status, 400)
+        self.assertIn("请先勾选确认", page)
+        # 提交成功 → 建单（入口=telegram_link、会话绑定、联系同意来源）+ 渠道回执 + 会话留痕
+        status, _, page = form_request(self.server, "POST", f"/rfq/{token}", {"contact_email": "tg@example.invalid", "contact_phone": "+49", "quantity": "2", "destination": "Germany", "notes": "需要 CE", "contact_confirmed": "1"})
+        self.assertEqual(status, 200)
+        self.assertIn("已提交", page)
+        rfq = self.db.conn.execute(
+            "SELECT * FROM rfqs WHERE tenant_id='demo-tenant' AND conversation_id=? AND entry_surface='telegram_link'", (conversation_id,)
+        ).fetchone()
+        self.assertTrue(rfq)
+        self.assertEqual(rfq["quantity"], "2")
+        self.assertEqual(rfq["contact_consent_source"], "telegram_link")
+        self.assertEqual(self.db.get_rfq("demo-tenant", rfq["id"])["current_revision"], 1)
+        self.assertTrue(any("您的询价信息已收到" in text for text in self.sent_texts(4305)))
+        self.assertTrue(self.last_message(conversation_id, "rfq-form-submitted"))
+        # 重新打开：回显既有内容 + 提示更新同一张单；再次提交 → 版本 +1
+        status, _, page = form_request(self.server, "GET", f"/rfq/{token}")
+        self.assertIn("您已提交过询价", page)
+        self.assertIn("value='2'", page)
+        status, _, page = form_request(self.server, "POST", f"/rfq/{token}", {"contact_email": "tg@example.invalid", "contact_phone": "+49", "quantity": "5", "destination": "Germany", "notes": "数量更新", "contact_confirmed": "1"})
+        self.assertEqual(status, 200)
+        refreshed = self.db.get_rfq("demo-tenant", rfq["id"])
+        self.assertEqual(refreshed["current_revision"], 2)
+        self.assertEqual(refreshed["quantity"], "5")
+
+    def test_rfq_form_field_states_follow_settings(self):
+        self.db.set_tenant_setting("demo-tenant", "rfq_fields", {"email": "required", "phone": "hidden", "quantity": "required", "destination": "optional", "notes": "optional"}, "demo-admin@example.invalid")
+        try:
+            status, _body = self.post_update(self.update_for(4306, "hello", 907))
+            self.assertEqual(status, 200)
+            conversation_id = self.conversation_for(4306)
+            token = self.db.create_rfq_form_token("demo-tenant", conversation_id, "demo-admin@example.invalid")
+            status, _, page = form_request(self.server, "GET", f"/rfq/{token}")
+            self.assertEqual(status, 200)
+            self.assertIn("邮箱 / Email", page)
+            self.assertNotIn("电话 / Phone", page)  # 隐藏字段不渲染
+            # 缺必填邮箱 → 400 且列出缺项
+            status, _, page = form_request(self.server, "POST", f"/rfq/{token}", {"quantity": "1", "contact_confirmed": "1"})
+            self.assertEqual(status, 400)
+            self.assertIn("请填写：邮箱", page)
+            # 补齐后成功；隐藏电话即使被提交也不落库
+            status, _, page = form_request(self.server, "POST", f"/rfq/{token}", {"contact_email": "states@example.invalid", "contact_phone": "should-not-store", "quantity": "1", "contact_confirmed": "1"})
+            self.assertEqual(status, 200)
+            rfq = self.db.conn.execute(
+                "SELECT * FROM rfqs WHERE tenant_id='demo-tenant' AND conversation_id=? AND entry_surface='telegram_link'", (conversation_id,)
+            ).fetchone()
+            self.assertEqual(rfq["contact_phone"], "")
+        finally:
+            self.db.set_tenant_setting("demo-tenant", "rfq_fields", dict(DEFAULT_RFQ_FIELDS), "demo-admin@example.invalid")
+
+    def test_staff_reply_from_inbox_reaches_channel(self):
+        status, _body = self.post_update(self.update_for(4307, "hello", 908))
+        self.assertEqual(status, 200)
+        conversation_id = self.conversation_for(4307)
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/reply", {"body": "您好，已收到您的消息。"}, self.admin)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=sent", headers.get("Location", ""))
+        self.assertIn("您好，已收到您的消息。", self.sent_texts(4307))
+        row = self.last_message(conversation_id, "staff-reply")
+        self.assertEqual(row["delivery_status"], "sent")
+        self.assertEqual(row["actor_email"], "demo-admin@example.invalid")
+        status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{conversation_id}?notice=sent", cookie=self.admin)
+        self.assertIn("已送达", page)
+        # 失败可见：临时把模拟地址指向不可达端口
+        os.environ["TELEGRAM_API_BASE"] = "http://127.0.0.1:9/bot"
+        try:
+            status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/telegram/{conversation_id}/reply", {"body": "这条会失败。"}, self.admin)
+            self.assertEqual(status, 303)
+            self.assertIn("notice=reply_failed", headers.get("Location", ""))
+            row = self.last_message(conversation_id, "staff-reply")
+            self.assertEqual(row["delivery_status"], "failed")
+            self.assertIn("网络请求失败", row["delivery_error"])
+            status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{conversation_id}?notice=reply_failed", cookie=self.admin)
+            self.assertIn("发送失败：网络请求失败", page)
+        finally:
+            os.environ["TELEGRAM_API_BASE"] = self.mock.base_url()
+
+    def test_webhook_receives_and_answers_question(self):
+        # 先走需求→确认（拿到推荐，提问将绑定推荐首型号——与网页聊天同口径）
+        status, _body = self.post_update(self.update_for(4308, "flow 15 m3/h, head 30 m, medium clean water", 909))
+        self.assertEqual(status, 200)
+        status, _body = self.post_update(self.update_for(4308, "确认", 910))
+        self.assertEqual(status, 200)
+        # 现在提问命中已发布产品（TG-100）→ 有据回答直达渠道
+        status, body = self.post_update(self.update_for(4308, "What is the flow range?", 911))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["ok"], True)
+        self.assertEqual(body["outcome"], "answered")
+        conversation_id = self.conversation_for(4308)
+        self.assertTrue(conversation_id)
+        identity = self.db.conn.execute(
+            "SELECT * FROM channel_identities WHERE tenant_id='demo-tenant' AND conversation_id=?", (conversation_id,)
+        ).fetchone()
+        self.assertEqual(identity["display_name"], "Maya (@maya_t)")
+        conversation = self.db.get_conversation("demo-tenant", conversation_id)
+        self.assertEqual(conversation["source"], "telegram")
+        buyer_row = self.last_message(conversation_id, "telegram")
+        self.assertEqual(buyer_row["role"], "buyer")
+        self.assertEqual(buyer_row["external_message_id"], "4308:911")
+        answer_row = self.last_message(conversation_id, "grounded-answer")
+        self.assertTrue(answer_row)
+        self.assertEqual(answer_row["delivery_status"], "sent")
+        texts = self.sent_texts(4308)
+        self.assertTrue(any("10-30" in text for text in texts))
+        self.assertTrue(any("流量范围" in text for text in texts))
+        # 收件箱 Telegram 子模块可见这个会话（含绑定显示名）
+        status, _, page = form_request(self.server, "GET", "/admin/inbox/telegram", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("Maya (@maya_t)", page)
+
+    def test_webhook_secret_and_disabled_channel(self):
+        update = self.update_for(4309, "hello", 910)
+        # 错误密钥 → 403 且不落库
+        status, body = self.post_update(update, secret="wrong-secret")
+        self.assertEqual(status, 403)
+        self.assertEqual(body.get("error"), "secret_token_mismatch")
+        self.assertIsNone(self.conversation_for(4309))
+        # 密钥环境变量缺失 → 403（fail-closed）
+        backup = os.environ.pop("TELEGRAM_WEBHOOK_SECRET", None)
+        try:
+            status, _body = self.post_update(update)
+            self.assertEqual(status, 403)
+        finally:
+            os.environ["TELEGRAM_WEBHOOK_SECRET"] = backup if backup is not None else "hook-secret-test"
+        # 渠道停用 → 200 skipped 且不处理
+        self.db.set_channel_enabled("demo-tenant", "telegram", False, "demo-admin@example.invalid")
+        try:
+            status, body = self.post_update(update)
+            self.assertEqual(status, 200)
+            self.assertEqual(body.get("skipped"), "channel_disabled")
+            self.assertIsNone(self.conversation_for(4309))
+        finally:
+            self.db.set_channel_enabled("demo-tenant", "telegram", True, "demo-admin@example.invalid")
+        # 未知 hook_id → 404
+        status, _body = json_http(self.server, "POST", "/api/v1/channels/telegram/webhook/unknown-hook-123", update, headers={"X-Telegram-Bot-Api-Secret-Token": "hook-secret-test"})
+        self.assertEqual(status, 404)
 
 
 if __name__ == "__main__":
