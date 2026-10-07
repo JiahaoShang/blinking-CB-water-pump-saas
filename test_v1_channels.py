@@ -684,7 +684,19 @@ class ConversationInboxTests(unittest.TestCase):
         status, _, page = form_request(self.server, "GET", f"/admin/inbox/telegram/{self.langbot_conv}?notice=reply_failed", cookie=self.inbox_emp)
         self.assertIn("发送失败", page)
         self.assertIn("回复发送失败", page)
-        # WhatsApp：启用渠道但发送通道未开通 → 同样落库并标记失败（UI 目前不提供入口，直连 POST 验证守卫）
+        # WhatsApp：启用渠道但凭证缺失 → 同样落库并标记失败，如实提示缺少的变量（直连 POST 验证守卫）。
+        # 凭证环境变量在用例内受控清空（避免本机残留影响断言），用例结束自动恢复。
+        twilio_env = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM", "TWILIO_API_BASE", "TWILIO_STATUS_CALLBACK")
+        saved_twilio = {name: os.environ.pop(name, None) for name in twilio_env}
+
+        def _restore_twilio() -> None:
+            for name, value in saved_twilio.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        self.addCleanup(_restore_twilio)
         self.db.save_channel_account("demo-tenant", "whatsapp", {}, "demo-admin@example.invalid")
         self.db.set_channel_enabled("demo-tenant", "whatsapp", True, "demo-admin@example.invalid")
         wa_conv = self.db.create_conversation("demo-tenant", "whatsapp", "en")
@@ -696,7 +708,7 @@ class ConversationInboxTests(unittest.TestCase):
         row = self.db.conn.execute(
             "SELECT * FROM messages WHERE tenant_id='demo-tenant' AND conversation_id=? ORDER BY rowid DESC LIMIT 1", (wa_conv,)
         ).fetchone()
-        self.assertIn("发送通道尚未开通", row["delivery_error"])
+        self.assertIn("缺少环境变量 TWILIO_ACCOUNT_SID", row["delivery_error"])
 
     def test_inbox_reply_web_and_buyer_visibility(self):
         status, headers, _ = form_request(

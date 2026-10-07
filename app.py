@@ -10,6 +10,7 @@ data, not production authentication or file storage.
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import hashlib
 import html
@@ -28,7 +29,7 @@ from email.policy import default
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -5853,6 +5854,44 @@ def channel_http_json(url: str, payload: dict, timeout: int = 10, headers: dict 
 
 
 
+def channel_form_post(url: str, params: dict, auth: tuple[str, str], timeout: int = 10) -> dict:
+    """表单提交（application/x-www-form-urlencoded + Basic 认证）——Twilio 形状渠道专用。
+
+    与 channel_http_json 的差异：错误体（Twilio 返回 code/message 诊断）会被解析进报错文案，
+    便于在收件箱「发送失败」里看到「为什么送不出去」（如沙箱未加入、号码不可达）。
+    """
+    body = urlencode(params).encode("utf-8")
+    credentials = base64.b64encode(f"{auth[0]}:{auth[1]}".encode("utf-8")).decode("ascii")
+    request = urllib_request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Authorization": f"Basic {credentials}"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except urllib_error.HTTPError as error:
+        detail = ""
+        try:
+            payload = json.loads(error.read().decode("utf-8"))
+            message = str(payload.get("message") or "").strip()
+            code = str(payload.get("code") or "").strip()
+            detail = message + (f"（code={code}）" if code else "")
+        except Exception:
+            detail = ""
+        raise ChannelSendError(f"渠道接口拒绝：{detail or f'HTTP {error.code}'}") from error
+    except (urllib_error.URLError, TimeoutError, OSError) as error:
+        raise ChannelSendError(f"网络请求失败：{error}") from error
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ChannelSendError("渠道接口返回内容无法解析") from error
+    if not isinstance(data, dict):
+        raise ChannelSendError("渠道接口返回格式异常")
+    return data
+
+
 def send_channel_text(channel: str, config: dict, external_user_id: str, text: str) -> str:
     """向渠道发送一条文本，返回外部消息 ID。凭证缺失/未开通时明确报错（fail-closed）。"""
     if channel == "langbot":
@@ -5871,6 +5910,39 @@ def send_channel_text(channel: str, config: dict, external_user_id: str, text: s
         if data.get("code") != 0:
             raise ChannelSendError(str(data.get("msg") or "LangBot 接口返回失败"))
         return ""
+    if channel == "whatsapp":
+        # WhatsApp 原生通道（经 BSP；当前按 Twilio 形状实现）：Messages API 表单提交 + Basic 认证。
+        # 凭证一律环境变量（不回显）：TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM；
+        # 可选 TWILIO_STATUS_CALLBACK=本平台 /api/v1/channels/whatsapp/status 的公网地址（接收送达/失败回执）。
+        account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+        auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+        sender = os.environ.get("TWILIO_WHATSAPP_FROM", "").strip()
+        if not account_sid:
+            raise ChannelSendError("缺少环境变量 TWILIO_ACCOUNT_SID")
+        if not auth_token:
+            raise ChannelSendError("缺少环境变量 TWILIO_AUTH_TOKEN")
+        if not sender:
+            raise ChannelSendError("缺少环境变量 TWILIO_WHATSAPP_FROM")
+        to_number = str(external_user_id or "").strip()
+        if not to_number:
+            raise ChannelSendError("缺少买方号码，无法发送")
+        params = {
+            "From": sender if sender.startswith("whatsapp:") else f"whatsapp:{sender}",
+            "To": to_number if to_number.startswith("whatsapp:") else f"whatsapp:{to_number}",
+            "Body": text,
+        }
+        status_callback = os.environ.get("TWILIO_STATUS_CALLBACK", "").strip()
+        if status_callback:
+            params["StatusCallback"] = status_callback
+        data = channel_form_post(
+            f"{channel_api_base(channel, config)}/2010-04-01/Accounts/{account_sid}/Messages.json",
+            params,
+            (account_sid, auth_token),
+        )
+        sid = str(data.get("sid") or "").strip()
+        if not sid:
+            raise ChannelSendError(str(data.get("message") or "渠道接口返回失败（无消息编号）"))
+        return sid
     raise ChannelSendError("该渠道的发送通道尚未开通")
 
 
@@ -6005,6 +6077,40 @@ def mark_outbound_delivered(db: Database, tenant_id: str, channel: str, external
     )
     db.conn.commit()
     return cursor.rowcount > 0
+
+
+def apply_whatsapp_delivery_status(db: Database, message_sid: str, status: str, error_text: str = "") -> bool:
+    """Twilio 状态回调落库：sent/queued → delivered；sent/queued → failed（终态不降级、幂等）。
+
+    查找方式：external_message_id 形如「外部用户ID:SID」，按「:SID」后缀或全值匹配（SID 全局唯一）。
+    """
+    if not message_sid:
+        return False
+    status = str(status or "").strip().lower()
+    if status not in ("delivered", "failed", "undelivered"):
+        return False
+    row = db.conn.execute(
+        "SELECT id, delivery_status FROM messages WHERE channel='whatsapp' "
+        "AND (external_message_id = ? OR external_message_id LIKE '%:' || ?) ORDER BY rowid DESC LIMIT 1",
+        (message_sid, message_sid),
+    ).fetchone()
+    if not row:
+        return False
+    current = row["delivery_status"] or ""
+    if current not in ("sent", "queued"):
+        return False
+    if status == "delivered":
+        db.conn.execute(
+            "UPDATE messages SET delivery_status='delivered', delivery_updated_at=? WHERE id=?",
+            (now_iso(), row["id"]),
+        )
+    else:
+        db.conn.execute(
+            "UPDATE messages SET delivery_status='failed', delivery_error=?, delivery_updated_at=? WHERE id=?",
+            (error_text or f"投递失败（{status}）", now_iso(), row["id"]),
+        )
+    db.conn.commit()
+    return True
 
 
 def get_or_create_channel_conversation(db: Database, tenant_id: str, channel: str, external_user_id: str, display_name: str, locale: str = "en") -> str:
@@ -7887,6 +7993,9 @@ class Handler(BaseHTTPRequestHandler):
         if langbot_hook_match:
             self.handle_langbot_webhook(langbot_hook_match.group(1))
             return
+        if path == "/api/v1/channels/whatsapp/status":
+            self.handle_whatsapp_status()
+            return
         rfq_submit_match = re.fullmatch(r"/rfq/([A-Za-z0-9_-]{16,96})", path)
         if rfq_submit_match:
             self.public_rfq_submit(rfq_submit_match.group(1), parse_multipart(self))
@@ -9437,6 +9546,44 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── V1-04 切片③④：渠道收信入口（LangBot Webhook）/ RFQ 填写链接公开页 / 任务回复投递 ──
 
+    def handle_whatsapp_status(self) -> None:
+        """Twilio 状态回调（WhatsApp）：验签（fail-closed）→ 推进投递状态（delivered / failed）。
+
+        验签 URL 重建：优先 TWILIO_PUBLIC_BASE（隧道场景可设）；否则 X-Forwarded-Proto + Host。
+        未配置 TWILIO_AUTH_TOKEN 时一律拒绝（fail-closed）。
+        """
+        auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+        if not auth_token:
+            self.send_json({"error": "channel_not_configured"}, 403)
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        params = {key: values[0] for key, values in parse_qs(raw, keep_blank_values=True).items()}
+        provided = self.headers.get("X-Twilio-Signature", "")
+        public_base = os.environ.get("TWILIO_PUBLIC_BASE", "").strip().rstrip("/")
+        if public_base:
+            url = public_base + urlparse(self.path).path
+        else:
+            scheme = (self.headers.get("X-Forwarded-Proto", "http").split(",")[0].strip() or "http")
+            host = self.headers.get("Host", "")
+            url = f"{scheme}://{host}{urlparse(self.path).path}"
+        signing_payload = url + "".join(f"{key}{params[key]}" for key in sorted(params))
+        expected = base64.b64encode(
+            hmac.new(auth_token.encode("utf-8"), signing_payload.encode("utf-8"), hashlib.sha1).digest()
+        ).decode("ascii")
+        if not provided or not hmac.compare_digest(expected, provided):
+            self.send_json({"error": "invalid_signature"}, 403)
+            return
+        message_sid = str(params.get("MessageSid", "")).strip()
+        status = str(params.get("MessageStatus", "")).strip().lower()
+        error_text = ""
+        if status in ("failed", "undelivered"):
+            code = str(params.get("ErrorCode", "")).strip()
+            message = str(params.get("ErrorMessage", "")).strip()
+            error_text = f"投递失败：{message or status}" + (f"（code={code}）" if code else "")
+        changed = apply_whatsapp_delivery_status(self.db, message_sid, status, error_text)
+        self.send_json({"ok": True, "changed": changed})
+
     def handle_langbot_webhook(self, token: str) -> None:
         """LangBot Webhook 收信：URL 令牌即凭据（LangBot 不签名，fail-closed）。
 
@@ -9875,7 +10022,7 @@ class Handler(BaseHTTPRequestHandler):
         elif notice_code == "kb_not_configured":
             notice = "<div class='notice'>知识库同步尚未配置（需本机变量 DIFY_KB_DATASET_ID 与 DIFY_KB_API_KEY）。</div>"
         guides = {
-            "whatsapp": "走 Twilio：开通 WhatsApp 沙箱（手机发送加入码即可参与测试）→ 把 Account SID、Auth Token、（whatsapp: 前缀的）发送号码写进本机环境变量 TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM → 回到这里填写显示名称并启用。收信需要一条公网回调地址，联调时使用临时隧道。",
+            "whatsapp": "走 Twilio：开通 WhatsApp 沙箱（手机发送加入码即可参与测试）→ 把 Account SID、Auth Token、（whatsapp: 前缀的）发送号码写进本机环境变量 TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM → 回到这里填写显示名称并启用。收信需要一条公网回调地址，联调时使用临时隧道。可选：把 TWILIO_STATUS_CALLBACK 设为本平台 /api/v1/channels/whatsapp/status 的公网地址，即可接收「已送达 / 失败」回执。",
             "langbot": "试验通道（本机）：LangBot 负责对接各社交平台并把消息推送进来，平台处理后的回复经 LangBot 发送接口直达买方。步骤：① 本机环境变量设置 LANGBOT_API_KEY（LangBot 面板「API Keys」生成）② 在 LangBot 面板把上方收信地址登记为 Webhook 并启用 ③ 回到这里填写 bot_uuid 并启用渠道。",
         }
         host = self.headers.get("Host", "127.0.0.1:8137")
