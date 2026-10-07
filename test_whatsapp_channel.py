@@ -23,6 +23,9 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools" / "channels"))
 
 from app import (  # noqa: E402
+    AI_PAUSED_ANSWER,
+    CHANNEL_HUMAN_HINT,
+    NO_PUBLISHED_PRODUCT_ANSWER,
     enqueue_outbound,
     make_server,
     retry_outbound_message,
@@ -247,3 +250,143 @@ class WhatsAppOutboundTests(unittest.TestCase):
         self.assertFalse(json.loads(late_body)["changed"])
         row = self.db.conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
         self.assertEqual(row["delivery_status"], "sent")
+
+
+class WhatsAppInboundTests(unittest.TestCase):
+    """切片②：收信 webhook → 统一大脑（AI/人工）→ 回复经出站总线真送达。"""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.mock = mock_whatsapp.MockTwilioServer(auth_token="twilio-in-token")
+        cls.env_names = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM", "TWILIO_API_BASE",
+                         "TWILIO_STATUS_CALLBACK", "TWILIO_PUBLIC_BASE",
+                         "DIFY_QA_URL", "DIFY_QA_APP_KEY", "DIFY_KB_DATASET_ID", "DIFY_KB_API_KEY", "DIFY_KB_URL")
+        cls.env_backup = {name: os.environ.get(name) for name in cls.env_names}
+        for name in cls.env_names:
+            os.environ.pop(name, None)
+        cls.server = make_server(Path(cls.temp_dir.name) / "app.db", port=0)
+        cls.db = cls.server.RequestHandlerClass.db
+        cls.db.seed_demo_users()
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.admin = login(cls.server, "demo-admin@example.invalid", "demo-admin")
+        os.environ.update({
+            "TWILIO_ACCOUNT_SID": "ACin0000000000000000000000000000",
+            "TWILIO_AUTH_TOKEN": "twilio-in-token",
+            "TWILIO_WHATSAPP_FROM": "whatsapp:+14155238886",
+            "TWILIO_API_BASE": cls.mock.base_url(),
+            "TWILIO_STATUS_CALLBACK": f"http://127.0.0.1:{cls.server.server_port}/api/v1/channels/whatsapp/status",
+        })
+        cls.webhook_url = f"http://127.0.0.1:{cls.server.server_port}/api/v1/channels/whatsapp/webhook"
+        cls.db.save_channel_account("demo-tenant", "whatsapp", {"display_name": "链路测试"}, "demo-admin@example.invalid")
+        cls.db.set_channel_enabled("demo-tenant", "whatsapp", True, "demo-admin@example.invalid")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.mock.stop()
+        cls.temp_dir.cleanup()
+        for name, value in cls.env_backup.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def _messages_n(self, conv_id):
+        return self.db.conn.execute("SELECT COUNT(*) AS n FROM messages WHERE conversation_id=?", (conv_id,)).fetchone()["n"]
+
+    def test_inbound_duplicate_dedup(self):
+        sid = "SM-dup-0001"
+        text = "需求：流量 10 m3/h、介质清水"
+        status, _body = self.mock.inject_inbound("whatsapp:+491700000099", text, self.webhook_url, message_sid=sid)
+        self.assertEqual(status, 200)
+        identity = self.db.get_channel_identity("demo-tenant", "whatsapp", "+491700000099")
+        self.assertIsNotNone(identity)
+        conv_id = identity["conversation_id"]
+        after_first = self._messages_n(conv_id)
+        # 同一 MessageSid 重复投递（Twilio 重试）→ duplicate：不再落库、不再回复
+        status2, body2 = self.mock.inject_inbound("whatsapp:+491700000099", text, self.webhook_url, message_sid=sid)
+        self.assertEqual(status2, 200)
+        self.assertEqual(json.loads(body2).get("outcome"), "duplicate")
+        self.assertEqual(self._messages_n(conv_id), after_first)
+
+    def test_inbound_requirement_flow_reply_delivered_via_twilio(self):
+        sent_before = len(self.mock.sent_messages())
+        status, body = self.mock.inject_inbound(
+            "whatsapp:+491700000111", "请报价：flow 15 m3/h, head 30 m, medium clean water", self.webhook_url, message_sid="SM-in-req-1"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body).get("outcome"), "extracted")
+        identity = self.db.get_channel_identity("demo-tenant", "whatsapp", "+491700000111")
+        self.assertIsNotNone(identity)
+        self.assertEqual(identity["display_name"], "WhatsApp 用户 +491700000111")
+        conv_id = identity["conversation_id"]
+        buyer = self.db.conn.execute(
+            "SELECT * FROM messages WHERE tenant_id='demo-tenant' AND external_message_id='SM-in-req-1'"
+        ).fetchone()
+        self.assertIsNotNone(buyer)
+        self.assertEqual(buyer["role"], "buyer")
+        self.assertEqual(buyer["channel"], "whatsapp")
+        self.assertEqual(buyer["conversation_id"], conv_id)
+        sent = self.mock.sent_messages()[sent_before:]
+        self.assertTrue(sent)
+        reply = sent[-1]
+        self.assertEqual(reply["to"], "whatsapp:+491700000111")
+        self.assertEqual(reply["from"], "whatsapp:+14155238886")
+        self.assertIn("已记录以下工况", reply["body"])
+        self.assertIn("「确认」", reply["body"])
+        reply_row = self.db.conn.execute(
+            "SELECT * FROM messages WHERE conversation_id=? ORDER BY rowid DESC LIMIT 1", (conv_id,)
+        ).fetchone()
+        self.assertEqual(reply_row["delivery_status"], "sent")
+
+    def test_inbound_signature_fail_closed(self):
+        params = {"MessageSid": "SM-bad-sig-1", "From": "whatsapp:+491700000222", "Body": "你好", "To": "whatsapp:+14155238886"}
+        status, _ = raw_post(self.server, "/api/v1/channels/whatsapp/webhook", params, signature="ZmFrZQ==")
+        self.assertEqual(status, 403)
+        status, _ = raw_post(self.server, "/api/v1/channels/whatsapp/webhook", params, signature=None)
+        self.assertEqual(status, 403)
+        row = self.db.conn.execute("SELECT * FROM messages WHERE external_message_id='SM-bad-sig-1'").fetchone()
+        self.assertIsNone(row)
+
+    def test_inbound_channel_disabled_skipped(self):
+        self.db.set_channel_enabled("demo-tenant", "whatsapp", False, "demo-admin@example.invalid")
+        try:
+            status, body = self.mock.inject_inbound("whatsapp:+491700000333", "你好", self.webhook_url, message_sid="SM-off-1")
+            self.assertEqual(status, 200)
+            self.assertIn("channel_disabled", body)
+            row = self.db.conn.execute("SELECT * FROM messages WHERE external_message_id='SM-off-1'").fetchone()
+            self.assertIsNone(row)
+        finally:
+            self.db.set_channel_enabled("demo-tenant", "whatsapp", True, "demo-admin@example.invalid")
+
+    def test_human_takeover_same_thread(self):
+        # ① 买方提问（无资料语境）→ AI「不能确认」+ 转人工提示，经真通道送达
+        sent_before = len(self.mock.sent_messages())
+        status, _ = self.mock.inject_inbound("whatsapp:+491700000444", "What is the flow range?", self.webhook_url, message_sid="SM-ask-1")
+        self.assertEqual(status, 200)
+        identity = self.db.get_channel_identity("demo-tenant", "whatsapp", "+491700000444")
+        self.assertIsNotNone(identity)
+        conv_id = identity["conversation_id"]
+        sent = self.mock.sent_messages()[sent_before:]
+        self.assertTrue(sent)
+        self.assertIn(NO_PUBLISHED_PRODUCT_ANSWER, sent[-1]["body"])
+        self.assertIn(CHANNEL_HUMAN_HINT, sent[-1]["body"])
+        # ② 人工在收件箱接管：同一会话直接回复 → 同一号码、同一条对话送达
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/whatsapp/{conv_id}/reply", {"body": "人工同事来跟进：请留一下型号。"}, self.admin)
+        self.assertEqual(status, 303)
+        self.assertIn("notice=sent", headers.get("Location", ""))
+        self.assertEqual(self.mock.sent_messages()[-1]["to"], "whatsapp:+491700000444")
+        self.assertEqual(self.mock.sent_messages()[-1]["body"], "人工同事来跟进：请留一下型号。")
+        # ③ 暂停 AI 后买方再问 → 「已暂停」文案（AI 不抢话）
+        status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/whatsapp/{conv_id}/ai-toggle", {}, self.admin)
+        self.assertEqual(status, 303)
+        sent_before2 = len(self.mock.sent_messages())
+        status, _ = self.mock.inject_inbound("whatsapp:+491700000444", "在吗？", self.webhook_url, message_sid="SM-ask-2")
+        self.assertEqual(status, 200)
+        sent2 = self.mock.sent_messages()[sent_before2:]
+        self.assertTrue(sent2)
+        self.assertEqual(sent2[-1]["body"], AI_PAUSED_ANSWER)

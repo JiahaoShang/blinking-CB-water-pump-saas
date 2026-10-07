@@ -6264,10 +6264,10 @@ def process_channel_message(db: Database, ai, tenant_id: str, channel: str, exte
             first = next((item for item in results if item.get("status") in {"candidate", "needs_confirmation"}), None)
             if first:
                 product_id = first.get("product_id")
-        # 第二波：LangBot 渠道的资料问答优先走 Dify 引擎（平台仍是唯一主脑：落库、转人工、出站都在平台）。
-        if channel == "langbot":
+        # 第二波：LangBot / WhatsApp 渠道的资料问答优先走 Dify 引擎（平台仍是唯一主脑：落库、转人工、出站都在平台）。
+        if channel in ("langbot", "whatsapp"):
             status, answer_text, answer_product_id, version_id, citations, _reason, qa_source = answer_question_prefer_dify(
-                db, ai, tenant_id, conversation_id, text, product_id, f"langbot:{external_user_id}"
+                db, ai, tenant_id, conversation_id, text, product_id, f"{channel}:{external_user_id}"
             )
         else:
             status, answer_text, answer_product_id, version_id, citations, _reason = answer_question_with_mode(db, ai, tenant_id, conversation_id, text, product_id)
@@ -6345,6 +6345,28 @@ def handle_langbot_event(db: Database, ai, tenant_id: str, event: dict) -> dict 
             meta["bot_uuid"] = bot_uuid
         db.update_channel_identity_meta(tenant_id, "langbot", external_user_id, meta)
     return result
+
+
+def handle_whatsapp_inbound(db: Database, ai, tenant_id: str, params: dict) -> dict:
+    """Twilio 入站消息（WhatsApp）→ 统一大脑 process_channel_message。
+
+    - MessageSid 为消息去重键；From 去掉 `whatsapp:` 前缀后作为外部用户 ID；
+    - 显示名取 WhatsApp ProfileName，缺省回退「WhatsApp 用户 <号码>」；
+    - 非文本消息（图片/文件等）：首期跳过（ignored_non_text），不落库不回复。
+    """
+    if not isinstance(params, dict):
+        return {"action": "ignored"}
+    message_sid = str(params.get("MessageSid") or "").strip()
+    from_raw = str(params.get("From") or "").strip()
+    text = str(params.get("Body") or "").strip()
+    profile = str(params.get("ProfileName") or "").strip()
+    if not message_sid or not from_raw:
+        return {"action": "ignored_malformed"}
+    external_user_id = from_raw[len("whatsapp:"):] if from_raw.startswith("whatsapp:") else from_raw
+    if not text:
+        return {"action": "ignored_non_text"}
+    display_name = profile or f"WhatsApp 用户 {external_user_id}"
+    return process_channel_message(db, ai, tenant_id, "whatsapp", external_user_id, display_name, text, message_sid)
 
 
 def render_rfq_link_form(field_config: dict, values: dict, error: str = "", existing_short: str = "") -> str:
@@ -7993,6 +8015,9 @@ class Handler(BaseHTTPRequestHandler):
         if langbot_hook_match:
             self.handle_langbot_webhook(langbot_hook_match.group(1))
             return
+        if path == "/api/v1/channels/whatsapp/webhook":
+            self.handle_whatsapp_webhook()
+            return
         if path == "/api/v1/channels/whatsapp/status":
             self.handle_whatsapp_status()
             return
@@ -9546,16 +9571,16 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── V1-04 切片③④：渠道收信入口（LangBot Webhook）/ RFQ 填写链接公开页 / 任务回复投递 ──
 
-    def handle_whatsapp_status(self) -> None:
-        """Twilio 状态回调（WhatsApp）：验签（fail-closed）→ 推进投递状态（delivered / failed）。
+    def _twilio_verified_params(self) -> dict | None:
+        """读取并验签 Twilio 表单回调（fail-closed）。
 
+        返回参数字典；未配置 TWILIO_AUTH_TOKEN、缺签名或签名不符时，已发送 403 并返回 None。
         验签 URL 重建：优先 TWILIO_PUBLIC_BASE（隧道场景可设）；否则 X-Forwarded-Proto + Host。
-        未配置 TWILIO_AUTH_TOKEN 时一律拒绝（fail-closed）。
         """
         auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
         if not auth_token:
             self.send_json({"error": "channel_not_configured"}, 403)
-            return
+            return None
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length).decode("utf-8") if length else ""
         params = {key: values[0] for key, values in parse_qs(raw, keep_blank_values=True).items()}
@@ -9573,6 +9598,13 @@ class Handler(BaseHTTPRequestHandler):
         ).decode("ascii")
         if not provided or not hmac.compare_digest(expected, provided):
             self.send_json({"error": "invalid_signature"}, 403)
+            return None
+        return params
+
+    def handle_whatsapp_status(self) -> None:
+        """Twilio 状态回调（WhatsApp）：验签（fail-closed）→ 推进投递状态（delivered / failed）。"""
+        params = self._twilio_verified_params()
+        if params is None:
             return
         message_sid = str(params.get("MessageSid", "")).strip()
         status = str(params.get("MessageStatus", "")).strip().lower()
@@ -9583,6 +9615,29 @@ class Handler(BaseHTTPRequestHandler):
             error_text = f"投递失败：{message or status}" + (f"（code={code}）" if code else "")
         changed = apply_whatsapp_delivery_status(self.db, message_sid, status, error_text)
         self.send_json({"ok": True, "changed": changed})
+
+    def handle_whatsapp_webhook(self) -> None:
+        """Twilio 入站消息（WhatsApp）：验签 fail-closed → 会话落库 → 统一大脑分流（AI / 人工接管）。
+
+        单租户假设：取启用的 whatsapp 渠道账户（多租户路由＝F-25，产品化时再做）。
+        渠道停用 → 200 skipped（不处理，不让 Twilio 无谓重试）；处理异常 → 500（Twilio 会重试，消息去重兜底）。
+        """
+        params = self._twilio_verified_params()
+        if params is None:
+            return
+        account = self.db.conn.execute(
+            "SELECT * FROM channel_accounts WHERE channel='whatsapp' AND status='enabled' ORDER BY rowid LIMIT 1"
+        ).fetchone()
+        if not account:
+            self.send_json({"ok": True, "skipped": "channel_disabled"}, 200)
+            return
+        try:
+            outcome = handle_whatsapp_inbound(self.db, self.ai, account["tenant_id"], params)
+        except Exception:
+            self.send_json({"ok": False, "error": "processing_failed"}, 500)
+            return
+        self.send_json({"ok": True, "outcome": (outcome or {}).get("action", "ignored")}, 200)
+
 
     def handle_langbot_webhook(self, token: str) -> None:
         """LangBot Webhook 收信：URL 令牌即凭据（LangBot 不签名，fail-closed）。
@@ -10022,7 +10077,7 @@ class Handler(BaseHTTPRequestHandler):
         elif notice_code == "kb_not_configured":
             notice = "<div class='notice'>知识库同步尚未配置（需本机变量 DIFY_KB_DATASET_ID 与 DIFY_KB_API_KEY）。</div>"
         guides = {
-            "whatsapp": "走 Twilio：开通 WhatsApp 沙箱（手机发送加入码即可参与测试）→ 把 Account SID、Auth Token、（whatsapp: 前缀的）发送号码写进本机环境变量 TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM → 回到这里填写显示名称并启用。收信需要一条公网回调地址，联调时使用临时隧道。可选：把 TWILIO_STATUS_CALLBACK 设为本平台 /api/v1/channels/whatsapp/status 的公网地址，即可接收「已送达 / 失败」回执。",
+            "whatsapp": "走 Twilio：开通 WhatsApp 沙箱（手机发送加入码即可参与测试）→ 把 Account SID、Auth Token、（whatsapp: 前缀的）发送号码写进本机环境变量 TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM → 回到这里填写显示名称并启用。把下方「收信地址」「状态回调地址」登记到 Twilio 的 Sandbox 设置或发件人配置（地址需公网可达，联调时用临时隧道；隧道域名可设本机变量 TWILIO_PUBLIC_BASE，本页即显示公网地址）。",
             "langbot": "试验通道（本机）：LangBot 负责对接各社交平台并把消息推送进来，平台处理后的回复经 LangBot 发送接口直达买方。步骤：① 本机环境变量设置 LANGBOT_API_KEY（LangBot 面板「API Keys」生成）② 在 LangBot 面板把上方收信地址登记为 Webhook 并启用 ③ 回到这里填写 bot_uuid 并启用渠道。",
         }
         host = self.headers.get("Host", "127.0.0.1:8137")
@@ -10072,6 +10127,17 @@ class Handler(BaseHTTPRequestHandler):
                 kb_block = (
                     f"<div class='field-state' style='margin-top:8px'><b>问答引擎（Dify）</b>：{'已接通' if qa_ok else '未配置（需本机变量 DIFY_QA_APP_KEY）'}；"
                     f"知识库已同步 {synced_docs} 篇 · 最近同步 {esc(last_sync)}。</div>{sync_control}"
+                )
+            elif channel == "whatsapp":
+                public_base = os.environ.get("TWILIO_PUBLIC_BASE", "").strip().rstrip("/")
+                base = public_base or f"http://{host}"
+                hook_url = f"{base}/api/v1/channels/whatsapp/webhook"
+                callback_url = f"{base}/api/v1/channels/whatsapp/status"
+                receive_block = (
+                    f"<div class='field-state' style='margin-top:8px'><b>收发链路</b>：把下面两个地址填进 Twilio 的 Sandbox 设置——"
+                    f"「WHEN A MESSAGE COMES IN」<code>{esc(hook_url)}</code>；"
+                    f"「STATUS CALLBACK URL」<code>{esc(callback_url)}</code>。<br>"
+                    f"地址需公网可达（联调时用临时隧道）；隧道域名可设本机变量 TWILIO_PUBLIC_BASE，本页即显示公网地址。</div>"
                 )
             cards.append(f"""<section class='card' style='margin-top:16px'>
 <div class='panel-title'><h2>{esc(CHANNEL_LABELS[channel])} {badge} {secret_badge}</h2></div>
