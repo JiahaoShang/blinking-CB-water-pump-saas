@@ -10063,11 +10063,16 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b""
         provided = self.headers.get("X-Webhook-Hmac", "")
         if hmac_key and provided:
-            expected_sig = hmac.new(hmac_key.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+            # WAHA 头的算法在 X-Webhook-Hmac-Algorithm（默认 sha512）；兼容 hex / base64 两种编码表达。
+            algorithm = (self.headers.get("X-Webhook-Hmac-Algorithm", "") or "sha512").strip().lower()
+            if algorithm not in hashlib.algorithms_available:
+                algorithm = "sha512"
+            mac = hmac.new(hmac_key.encode("utf-8"), raw, algorithm)
+            candidates = {mac.hexdigest().lower(), base64.b64encode(mac.digest()).decode("ascii").lower()}
             provided_clean = provided.strip().lower()
-            if provided_clean.startswith("sha256="):
+            if provided_clean.startswith("sha256=") or provided_clean.startswith("sha512="):
                 provided_clean = provided_clean.split("=", 1)[1]
-            if not hmac.compare_digest(expected_sig, provided_clean):
+            if not any(hmac.compare_digest(candidate, provided_clean) for candidate in candidates):
                 self.send_json({"error": "invalid_signature"}, 403)
                 return
         try:

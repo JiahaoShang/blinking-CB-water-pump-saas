@@ -92,7 +92,7 @@ class WhatsAppPersonalTests(unittest.TestCase):
         }
         return {"event": "message", "session": "default", "payload": payload}
 
-    def _post(self, event, token=None, hmac_value=None):
+    def _post(self, event, token=None, hmac_value=None, hmac_algorithm=None):
         raw = json.dumps(event).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base}/api/v1/channels/whatsapp-personal/webhook/{token or TOKEN}",
@@ -102,6 +102,8 @@ class WhatsAppPersonalTests(unittest.TestCase):
         )
         if hmac_value is not None:
             request.add_header("X-Webhook-Hmac", hmac_value)
+        if hmac_algorithm is not None:
+            request.add_header("X-Webhook-Hmac-Algorithm", hmac_algorithm)
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
                 return response.status, response.read().decode("utf-8")
@@ -232,13 +234,19 @@ class WhatsAppPersonalTests(unittest.TestCase):
             status, body = self._post(self._event("你好", "3EB0H1"))
             self.assertEqual(status, 200)
             # 带错误签名 → 403
-            status, _ = self._post(self._event("你好", "3EB0H2"), hmac_value="sha256=" + "0" * 64)
+            status, _ = self._post(self._event("你好", "3EB0H2"), hmac_value="0" * 128, hmac_algorithm="sha512")
             self.assertEqual(status, 403)
-            # 带正确签名 → 200
+            # 带正确签名（WAHA 默认 sha512）→ 200
             event = self._event("你好", "3EB0H3")
             raw = json.dumps(event).encode("utf-8")
-            good = "sha256=" + hmac.new(HMAC_KEY.encode("utf-8"), raw, hashlib.sha256).hexdigest()
-            status, _ = self._post(event, hmac_value=good)
+            good = hmac.new(HMAC_KEY.encode("utf-8"), raw, hashlib.sha512).hexdigest()
+            status, _ = self._post(event, hmac_value=good, hmac_algorithm="sha512")
+            self.assertEqual(status, 200)
+            # 指定 sha256 算法也支持 → 200
+            event2 = self._event("你好", "3EB0H4")
+            raw2 = json.dumps(event2).encode("utf-8")
+            good2 = hmac.new(HMAC_KEY.encode("utf-8"), raw2, hashlib.sha256).hexdigest()
+            status, _ = self._post(event2, hmac_value=good2, hmac_algorithm="sha256")
             self.assertEqual(status, 200)
         finally:
             os.environ.pop("WHATSAPP_PERSONAL_HMAC_KEY", None)
