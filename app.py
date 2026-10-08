@@ -6048,6 +6048,36 @@ def _whatsapp_personal_reset_state() -> None:
         _WHATSAPP_PERSONAL_SENT_TEXTS.clear()
 
 
+def _whatsapp_personal_self_ids() -> set:
+    raw = os.environ.get("WHATSAPP_PERSONAL_SELF_IDS", "")
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _whatsapp_personal_is_self_chat(from_jid: str, to_jid: str) -> bool:
+    """是否"自聊"（发给自己）：to 指回自己。
+
+    背景（真机实测）：账号迁移 LID 后，自聊消息的 from/to 可能一方是「8617…@c.us」、
+    另一方是「…@lid」——不能只做字符串相等；以本机配置的自有 ID 集合（PN+LID 双格式）判定。
+    未配置集合时退化为原样相等比较。
+    """
+    self_ids = _whatsapp_personal_self_ids()
+    if not self_ids:
+        return from_jid == to_jid
+    return from_jid == to_jid or to_jid in self_ids
+
+
+def _whatsapp_personal_debug(summary: dict) -> None:
+    """诊断日志（WHATSAPP_PERSONAL_DEBUG=1 时启用）：逐条记录入站事件摘要与处理结果。"""
+    if os.environ.get("WHATSAPP_PERSONAL_DEBUG", "").strip() != "1":
+        return
+    try:
+        path = ROOT / "data" / "whatsapp_personal_events.log"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(summary, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, "").strip() or default)
@@ -6473,7 +6503,7 @@ def process_channel_message(db: Database, ai, tenant_id: str, channel: str, exte
             if first:
                 product_id = first.get("product_id")
         # 第二波：LangBot / WhatsApp 渠道的资料问答优先走 Dify 引擎（平台仍是唯一主脑：落库、转人工、出站都在平台）。
-        if channel in ("langbot", "whatsapp"):
+        if channel in ("langbot", "whatsapp", "whatsapp_personal"):
             status, answer_text, answer_product_id, version_id, citations, _reason, qa_source = answer_question_prefer_dify(
                 db, ai, tenant_id, conversation_id, text, product_id, f"{channel}:{external_user_id}"
             )
@@ -6647,11 +6677,15 @@ def handle_whatsapp_personal_event(db: Database, ai, tenant_id: str, event: dict
     """
     if not isinstance(event, dict):
         return {"action": "ignored"}
-    if str(event.get("event") or "") != "message":
-        return {"action": "ignored_event", "event": str(event.get("event") or "")}
+    event_type = str(event.get("event") or "")
+    if event_type not in ("message", "message.any"):
+        return {"action": "ignored_event", "event": event_type}
     payload = event.get("payload") or {}
     if not isinstance(payload, dict):
         return {"action": "ignored"}
+    # 本桥经 API 发出的消息会以 message.any 形式回流（source=api）：直接判回声，不进平台。
+    if str(payload.get("source") or "").strip().lower() == "api":
+        return {"action": "ignored_echo"}
     from_jid = str(payload.get("from") or "").strip()
     to_jid = str(payload.get("to") or "").strip()
     if not from_jid:
@@ -6668,10 +6702,11 @@ def handle_whatsapp_personal_event(db: Database, ai, tenant_id: str, event: dict
         return {"action": "ignored_malformed"}
     text = str(payload.get("body") or "").strip()
     from_me = bool(payload.get("fromMe"))
-    if from_me and from_jid != to_jid:
-        return {"action": "ignored_outgoing"}
-    if from_me and _whatsapp_personal_was_sent(message_id, text):
-        return {"action": "ignored_echo"}
+    if from_me:
+        if not _whatsapp_personal_is_self_chat(from_jid, to_jid):
+            return {"action": "ignored_outgoing"}
+        if _whatsapp_personal_was_sent(message_id, text):
+            return {"action": "ignored_echo"}
     if not text or payload.get("hasMedia"):
         return {"action": "ignored_non_text"}
     data = payload.get("_data") or {}
@@ -10091,6 +10126,22 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             self.send_json({"ok": False, "error": "processing_failed"}, 500)
             return
+        _payload = event.get("payload") if isinstance(event, dict) else {}
+        _payload = _payload if isinstance(_payload, dict) else {}
+        _raw_id = _payload.get("id")
+        _debug_id = str(_raw_id.get("_serialized") if isinstance(_raw_id, dict) else _raw_id or "")
+        _whatsapp_personal_debug({
+            "at": now_iso(),
+            "event": str(event.get("event") or "") if isinstance(event, dict) else "",
+            "from": str(_payload.get("from") or ""),
+            "to": str(_payload.get("to") or ""),
+            "fromMe": bool(_payload.get("fromMe")),
+            "source": str(_payload.get("source") or ""),
+            "id": _debug_id[:80],
+            "hasMedia": bool(_payload.get("hasMedia")),
+            "body": str(_payload.get("body") or "")[:80],
+            "outcome": outcome.get("action") if isinstance(outcome, dict) else str(outcome),
+        })
         self.send_json({"ok": True, "outcome": outcome}, 200)
 
     def handle_langbot_webhook(self, token: str) -> None:

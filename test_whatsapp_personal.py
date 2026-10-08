@@ -26,6 +26,41 @@ import app as app_module  # noqa: E402
 from app import CHANNEL_LABELS, channel_secret_status, inbox_sections, make_server  # noqa: E402
 import mock_waha  # noqa: E402
 
+class _MockDify:
+    """最小 Dify 问答模拟（/chat-messages → 返回固定答案）。"""
+
+    def __init__(self):
+        import http.server
+        import threading as _threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                body = json.dumps({
+                    "answer": "DIFY-MOCK：现有产品包括 CB-120C 与 SLICE-T1。",
+                    "metadata": {"retriever_resources": []},
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self._server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        _threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def base_url(self):
+        return f"http://127.0.0.1:{self._server.server_port}/v1"
+
+    def stop(self):
+        self._server.shutdown()
+        self._server.server_close()
+
+
 TOKEN = "personal-token-0123456789abcdef"
 API_KEY = "waha-test-api-key"
 HMAC_KEY = "waha-test-hmac-key"
@@ -80,7 +115,7 @@ class WhatsAppPersonalTests(unittest.TestCase):
         app_module._whatsapp_personal_reset_state()
 
     # ── 工具 ──
-    def _event(self, text, msg_id, from_jid="861700000999@c.us", name="Shan", from_me=False, to_jid=None, has_media=False):
+    def _event(self, text, msg_id, from_jid="861700000999@c.us", name="Shan", from_me=False, to_jid=None, has_media=False, source=None):
         payload = {
             "id": {"_serialized": msg_id},
             "from": from_jid,
@@ -90,7 +125,9 @@ class WhatsAppPersonalTests(unittest.TestCase):
             "hasMedia": has_media,
             "_data": {"notifyName": name},
         }
-        return {"event": "message", "session": "default", "payload": payload}
+        if source:
+            payload["source"] = source
+        return {"event": "message.any", "session": "default", "payload": payload}
 
     def _post(self, event, token=None, hmac_value=None, hmac_algorithm=None):
         raw = json.dumps(event).encode("utf-8")
@@ -171,6 +208,41 @@ class WhatsAppPersonalTests(unittest.TestCase):
         # 回声（桥自己发出的消息被回推）→ 防护拦截
         status, body = self._post(self._event("已记录以下工况（回声）", reply_id, from_me=True))
         self.assertEqual(json.loads(body)["outcome"]["action"], "ignored_echo")
+        # API 来源（本桥发出）即便是新 id 也直接判回声
+        status, body = self._post(self._event("由桥发出", "3EB0API9", from_me=True, source="api"))
+        self.assertEqual(json.loads(body)["outcome"]["action"], "ignored_echo")
+
+    def test_self_chat_lid_mismatch_detected(self):
+        """自聊但 from/to 为不同格式（PN vs LID）→ 依据 SELF_IDS 集合判定为自聊并放行。"""
+        os.environ["WHATSAPP_PERSONAL_SELF_IDS"] = "861700000999@c.us,999888777@lid"
+        try:
+            status, body = self._post(self._event("自测LID：流量 7 m³/h", "3EB0LID1", from_jid="999888777@lid", to_jid="861700000999@c.us", from_me=True))
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["outcome"]["action"], "extracted")
+        finally:
+            os.environ.pop("WHATSAPP_PERSONAL_SELF_IDS", None)
+
+    def test_question_prefers_dify_on_personal_channel(self):
+        """回归修复：个人版渠道的问题必须走 Dify 优先分流（此前遗漏在 tuple 外）。"""
+        mock_dify = _MockDify()
+        saved = {key: os.environ.get(key) for key in ("DIFY_QA_URL", "DIFY_QA_APP_KEY")}
+        os.environ["DIFY_QA_URL"] = mock_dify.base_url()
+        os.environ["DIFY_QA_APP_KEY"] = "mock-key"
+        try:
+            sent_before = len(self.mock.sent_texts())
+            status, body = self._post(self._event("你们有哪些产品？", "3EB0DIFY1"))
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["outcome"].get("qa_source"), "dify")
+            sent = self.mock.sent_texts()[sent_before:]
+            self.assertTrue(sent)
+            self.assertIn("DIFY-MOCK", sent[-1]["text"])
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            mock_dify.stop()
 
     def test_duplicate_dedup(self):
         self._post(self._event("需求：流量 11 m³/h", "3EB0DUP1"))
