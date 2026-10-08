@@ -6942,6 +6942,19 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_twiml(self, body: str = "<Response/>", status: int = 200) -> None:
+        """Twilio 消息 webhook 的标准应答：text/xml + 合法 TwiML。
+
+        空 <Response/> 表示不通过 TwiML 附加动作（我们的回复一律走 REST API，平台是唯一主脑）。
+        返回 JSON 会被 Twilio 判为 12300 Invalid Content-Type，故必须 XML。
+        """
+        data = f"<?xml version=\"1.0\" encoding=\"UTF-8\"?>{body}".encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/xml; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def send_reference_file(self, filename: str, content_type: str) -> None:
         data = (ROOT / "reference-client" / filename).read_bytes()
         self.send_response(200)
@@ -9629,14 +9642,15 @@ class Handler(BaseHTTPRequestHandler):
             "SELECT * FROM channel_accounts WHERE channel='whatsapp' AND status='enabled' ORDER BY rowid LIMIT 1"
         ).fetchone()
         if not account:
-            self.send_json({"ok": True, "skipped": "channel_disabled"}, 200)
+            self.send_twiml()
             return
         try:
             outcome = handle_whatsapp_inbound(self.db, self.ai, account["tenant_id"], params)
         except Exception:
+            # 500 让 Twilio 重试（消息去重兜底）；4xx/5xx 无需 TwiML 体。
             self.send_json({"ok": False, "error": "processing_failed"}, 500)
             return
-        self.send_json({"ok": True, "outcome": (outcome or {}).get("action", "ignored")}, 200)
+        self.send_twiml()
 
 
     def handle_langbot_webhook(self, token: str) -> None:

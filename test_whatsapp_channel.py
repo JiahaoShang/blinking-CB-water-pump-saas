@@ -310,7 +310,7 @@ class WhatsAppInboundTests(unittest.TestCase):
         # 同一 MessageSid 重复投递（Twilio 重试）→ duplicate：不再落库、不再回复
         status2, body2 = self.mock.inject_inbound("whatsapp:+491700000099", text, self.webhook_url, message_sid=sid)
         self.assertEqual(status2, 200)
-        self.assertEqual(json.loads(body2).get("outcome"), "duplicate")
+        self.assertIn("<Response", body2)
         self.assertEqual(self._messages_n(conv_id), after_first)
 
     def test_inbound_requirement_flow_reply_delivered_via_twilio(self):
@@ -319,7 +319,7 @@ class WhatsAppInboundTests(unittest.TestCase):
             "whatsapp:+491700000111", "请报价：flow 15 m3/h, head 30 m, medium clean water", self.webhook_url, message_sid="SM-in-req-1"
         )
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body).get("outcome"), "extracted")
+        self.assertIn("<Response", body)  # 切片③：Twilio 应答必须 TwiML XML（否则 12300）
         identity = self.db.get_channel_identity("demo-tenant", "whatsapp", "+491700000111")
         self.assertIsNotNone(identity)
         self.assertEqual(identity["display_name"], "WhatsApp 用户 +491700000111")
@@ -357,7 +357,7 @@ class WhatsAppInboundTests(unittest.TestCase):
         try:
             status, body = self.mock.inject_inbound("whatsapp:+491700000333", "你好", self.webhook_url, message_sid="SM-off-1")
             self.assertEqual(status, 200)
-            self.assertIn("channel_disabled", body)
+            self.assertIn("<Response", body)
             row = self.db.conn.execute("SELECT * FROM messages WHERE external_message_id='SM-off-1'").fetchone()
             self.assertIsNone(row)
         finally:
