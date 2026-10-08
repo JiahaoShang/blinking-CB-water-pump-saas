@@ -9646,12 +9646,31 @@ class Handler(BaseHTTPRequestHandler):
         if not account:
             self.send_twiml()
             return
+        # 试用期应答载体（TWILIO_TRIAL_TWIML_REPLY=1，默认关）：
+        # Twilio 试用禁自由文本 API（21654），探针：把刚生成且投递失败的回复文本随 webhook 应答带回。
+        trial_carrier = os.environ.get("TWILIO_TRIAL_TWIML_REPLY", "").strip() == "1"
+        before_rowid = 0
+        if trial_carrier:
+            snapshot = self.db.conn.execute(
+                "SELECT COALESCE(MAX(rowid), 0) AS n FROM messages WHERE tenant_id=? AND role='assistant'",
+                (account["tenant_id"],),
+            ).fetchone()
+            before_rowid = snapshot["n"] if snapshot else 0
         try:
             outcome = handle_whatsapp_inbound(self.db, self.ai, account["tenant_id"], params)
         except Exception:
             # 500 让 Twilio 重试（消息去重兜底）；4xx/5xx 无需 TwiML 体。
             self.send_json({"ok": False, "error": "processing_failed"}, 500)
             return
+        if trial_carrier:
+            fresh = self.db.conn.execute(
+                "SELECT content, delivery_status FROM messages "
+                "WHERE tenant_id=? AND role='assistant' AND rowid>? ORDER BY rowid DESC LIMIT 1",
+                (account["tenant_id"], before_rowid),
+            ).fetchone()
+            if fresh and (fresh["delivery_status"] or "") == "failed" and str(fresh["content"] or "").strip():
+                self.send_twiml(f"<Response><Message>{esc(str(fresh['content']))}</Message></Response>")
+                return
         self.send_twiml()
 
 

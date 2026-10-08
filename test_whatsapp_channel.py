@@ -434,3 +434,23 @@ class WhatsAppInboundTests(unittest.TestCase):
         row = self.db.conn.execute("SELECT delivery_status, delivery_error FROM messages WHERE id=?", (msg_id,)).fetchone()
         self.assertEqual(row["delivery_status"], "failed")
         self.assertIn("ValueError", row["delivery_error"])
+
+    def test_trial_twiml_reply_carrier(self):
+        """试用期应答载体：投递失败的回复文本随 webhook 应答（TwiML Message）带回；默认关。"""
+        # 默认关：不应携带 <Message>
+        status, body = self.mock.inject_inbound("whatsapp:+491700000666", "需要：流量 8 m3/h", self.webhook_url, message_sid="SM-carrier-off")
+        self.assertEqual(status, 200)
+        self.assertNotIn("<Message>", body)
+        # 打开载体 + 制造投递失败（不可达基地址）：携带回复文本
+        os.environ["TWILIO_TRIAL_TWIML_REPLY"] = "1"
+        saved_base = os.environ.get("TWILIO_API_BASE")
+        os.environ["TWILIO_API_BASE"] = "http://127.0.0.1:1"
+        try:
+            status, body = self.mock.inject_inbound("whatsapp:+491700000777", "需求：流量 9 m3/h、介质清水", self.webhook_url, message_sid="SM-carrier-on")
+            self.assertEqual(status, 200)
+            self.assertIn("<Message>", body)
+            self.assertIn("已记录以下工况", body)
+        finally:
+            os.environ.pop("TWILIO_TRIAL_TWIML_REPLY", None)
+            if saved_base is not None:
+                os.environ["TWILIO_API_BASE"] = saved_base
