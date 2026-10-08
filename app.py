@@ -5577,7 +5577,7 @@ def channel_secret_status(channel: str) -> dict:
 # 出站：发送适配器把已保存的消息投递到渠道（delivery_status = queued → sent / failed，失败原因可见）；
 # 分流：与网页聊天同口径——工程师追问优先、暂停 AI 不自动答复、「人工」转交、「确认」确认工况并匹配、
 #       提问样文本走有据问答（资料外给转人工提示）、其余走需求识别与整理。
-CHANNEL_OFFICIAL_API_BASE = {"langbot": "http://127.0.0.1:5300"}
+CHANNEL_OFFICIAL_API_BASE = {"whatsapp": "https://api.twilio.com", "langbot": "http://127.0.0.1:5300"}
 # 渠道内提示文案（入库即不可变：只描述可用动作，不作状态承诺）
 CHANNEL_HUMAN_HINT = "如需工程师人工核实，请回复「人工」。"
 CHANNEL_HUMAN_GUIDE = "还没有待核实的问题。请先发送您想核实的具体问题，再回复「人工」转交工程师。"
@@ -6002,6 +6002,8 @@ def dispatch_outbound(db: Database, tenant_id: str, message_id: str) -> tuple[bo
         external_id = send_channel_text(channel, config, identity["external_user_id"], channel_outbound_text(message))
     except ChannelSendError as error:
         return _mark_outbound_failed(db, message_id, str(error))
+    except Exception as error:  # 防御：程序性异常也必须留痕（否则消息永远悬在 queued，静默失联）
+        return _mark_outbound_failed(db, message_id, f"发送异常：{type(error).__name__}: {error}")
     # 无外部回执 ID（如 LangBot 发送接口不回传消息 ID）→ 置 NULL：
     # 空串会被唯一索引（idx_messages_external，条件 IS NOT NULL）计入，导致同渠道第二条无法投递。
     external_message_id = f"{identity['external_user_id']}:{external_id}" if external_id else None

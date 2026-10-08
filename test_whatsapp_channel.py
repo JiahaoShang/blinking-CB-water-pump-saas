@@ -26,6 +26,8 @@ from app import (  # noqa: E402
     AI_PAUSED_ANSWER,
     CHANNEL_HUMAN_HINT,
     NO_PUBLISHED_PRODUCT_ANSWER,
+    channel_api_base,
+    dispatch_outbound,
     enqueue_outbound,
     make_server,
     retry_outbound_message,
@@ -390,3 +392,45 @@ class WhatsAppInboundTests(unittest.TestCase):
         sent2 = self.mock.sent_messages()[sent_before2:]
         self.assertTrue(sent2)
         self.assertEqual(sent2[-1]["body"], AI_PAUSED_ANSWER)
+
+    def test_channel_api_base_defaults_to_twilio(self):
+        """回归：whatsapp 基地址必须永远有解析结果（环境 > 配置 > 官方默认 api.twilio.com）。
+
+        此前官方默认表缺 whatsapp 条目，LIVE 环境未设 TWILIO_API_BASE 时基地址为空串，
+        URL 变裸路径导致 ValueError 静默炸在发送步（消息悬 queued）。此用例锁死该行为。
+        """
+        saved = os.environ.pop("TWILIO_API_BASE", None)
+        try:
+            self.assertEqual(channel_api_base("whatsapp", {}), "https://api.twilio.com")
+            os.environ["TWILIO_API_BASE"] = "https://api.example.test/"
+            self.assertEqual(channel_api_base("whatsapp", {}), "https://api.example.test")  # 环境优先
+            self.assertEqual(channel_api_base("whatsapp", {"api_base": "https://cfg.test/"}), "https://api.example.test")
+            del os.environ["TWILIO_API_BASE"]
+            self.assertEqual(channel_api_base("whatsapp", {"api_base": "https://cfg.test/"}), "https://cfg.test")  # 其次配置
+        finally:
+            os.environ.pop("TWILIO_API_BASE", None)
+            if saved is not None:
+                os.environ["TWILIO_API_BASE"] = saved
+
+    def test_dispatch_unexpected_exception_is_recorded(self):
+        """防御：发送步发生非 ChannelSendError 的意外异常，也必须落成可见失败（绝不悬在 queued）。"""
+        sid = "SM-defensive-1"
+        status, _ = self.mock.inject_inbound("whatsapp:+491700000888", "需求：流量 12 m3/h", self.webhook_url, message_sid=sid)
+        self.assertEqual(status, 200)
+        identity = self.db.get_channel_identity("demo-tenant", "whatsapp", "+491700000888")
+        self.assertIsNotNone(identity)
+        # 造一条 queued 消息，然后让发送器抛意外异常
+        msg_id = self.db.save_message("demo-tenant", identity["conversation_id"], "assistant", "待发文本", "grounded-answer",
+                                      channel="whatsapp", delivery_status="queued")
+        import app as app_module
+        original = app_module.send_channel_text
+        app_module.send_channel_text = lambda *a, **k: (_ for _ in ()).throw(ValueError("unknown url type: '/api'"))
+        try:
+            sent, error = app_module.dispatch_outbound(self.db, "demo-tenant", msg_id)
+        finally:
+            app_module.send_channel_text = original
+        self.assertFalse(sent)
+        self.assertIn("发送异常", error)
+        row = self.db.conn.execute("SELECT delivery_status, delivery_error FROM messages WHERE id=?", (msg_id,)).fetchone()
+        self.assertEqual(row["delivery_status"], "failed")
+        self.assertIn("ValueError", row["delivery_error"])
