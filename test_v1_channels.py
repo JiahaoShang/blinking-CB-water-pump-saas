@@ -260,8 +260,8 @@ class ChannelDataTests(unittest.TestCase):
             self.assertEqual(AUDIT_ACTION_LABELS.get(action), label, action)
         self.assertEqual(AUDIT_ENTITY_LABELS.get("channel"), "渠道")
         self.assertIn("inbox", GRANTABLE_MODULE_KEYS)
-        # 2026-10 撤除旧 Telegram 直连后：渠道集合收敛为 WhatsApp + LangBot 单轨
-        self.assertEqual(CHANNEL_KEYS, ("whatsapp", "langbot"))
+        # 2026-10 撤除旧 Telegram 直连后：渠道集合＝WhatsApp + LangBot；2026-10-09 起新增「WhatsApp（个人版）」桥（WAHA）
+        self.assertEqual(CHANNEL_KEYS, ("whatsapp", "langbot", "whatsapp_personal"))
 
 
 class ChannelConsoleTests(unittest.TestCase):

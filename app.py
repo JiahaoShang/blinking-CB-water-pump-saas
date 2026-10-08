@@ -21,6 +21,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import hmac
 from datetime import datetime, timedelta, timezone
@@ -5445,8 +5446,8 @@ LEGACY_ROLE_MODULES = {"sales": ("rfqs", "sales"), "engineer": ("tasks", "rfqs",
 # ── V1-04 外部渠道接入（WhatsApp / LangBot）：渠道账户与会话收件箱 ──────────────
 # 渠道消息与网页聊天共用同一批会话/消息对象；渠道账户只存公开配置，
 # 机密凭证（bot 令牌 / Twilio 凭据）一律走本机环境变量读取，不入库、不落 Git、不回显。
-CHANNEL_KEYS = ("whatsapp", "langbot")
-CHANNEL_LABELS = {"whatsapp": "WhatsApp", "langbot": "LangBot"}
+CHANNEL_KEYS = ("whatsapp", "langbot", "whatsapp_personal")
+CHANNEL_LABELS = {"whatsapp": "WhatsApp", "langbot": "LangBot", "whatsapp_personal": "WhatsApp（个人版）"}
 # 会话收件箱的子模块（导航分别展示；web=网站聊天；langbot=LangBot 接入的社交平台）
 # ── 收件箱来源平台（2026-10 信息架构调整）──
 # 模块 = 真实来源平台：LangBot 仅作信息路由，平台侧按事件的 adapter（已归一）把会话归入对应平台模块；
@@ -5454,6 +5455,7 @@ CHANNEL_LABELS = {"whatsapp": "WhatsApp", "langbot": "LangBot"}
 INBOX_PLATFORM_REGISTRY = (
     {"slug": "telegram", "label": "Telegram", "icon": "plat-telegram", "adapters": ("telegram",), "order": 10},
     {"slug": "whatsapp", "label": "WhatsApp", "icon": "phone", "adapters": (), "native": True, "order": 20},
+    {"slug": "whatsapp_personal", "label": "WhatsApp（个人版）", "icon": "phone", "adapters": ("whatsapp_personal",), "native": True, "order": 25},
     {"slug": "wechat", "label": "微信", "icon": "plat-wechat", "adapters": ("微信", "openclaw-weixin", "openclaw", "wechatpad", "wechatpadpro"), "order": 30},
     {"slug": "wecom", "label": "企业微信", "icon": "plat-wecom", "adapters": ("企业微信", "wecom", "wecombot"), "order": 40},
     {"slug": "wecomcs", "label": "微信客服", "icon": "plat-wecom", "adapters": ("微信客服", "wecomcs"), "order": 45},
@@ -5559,9 +5561,11 @@ def inbox_sections(db, tenant_id: str) -> list:
 
 TWILIO_SECRET_ENV = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM")
 META_SECRET_ENV = ("META_WHATSAPP_TOKEN", "META_PHONE_NUMBER_ID", "META_APP_SECRET", "META_VERIFY_TOKEN")
+WHATSAPP_PERSONAL_SECRET_ENV = ("WHATSAPP_PERSONAL_TOKEN", "WHATSAPP_PERSONAL_API_KEY")
 CHANNEL_SECRET_ENV = {
     "whatsapp": TWILIO_SECRET_ENV,
     "langbot": ("LANGBOT_API_KEY",),
+    "whatsapp_personal": WHATSAPP_PERSONAL_SECRET_ENV,
 }
 
 
@@ -5585,7 +5589,7 @@ def whatsapp_guide_text() -> str:
         "隧道域名可设本机变量 TWILIO_PUBLIC_BASE，本页即显示公网地址）。"
     )
 # 模拟/测试用基地址（生产不设置即用官方默认）；适配器在后续切片接入。
-CHANNEL_API_BASE_ENV = {"whatsapp": "TWILIO_API_BASE", "langbot": "LANGBOT_API_BASE"}
+CHANNEL_API_BASE_ENV = {"whatsapp": "TWILIO_API_BASE", "langbot": "LANGBOT_API_BASE", "whatsapp_personal": "WHATSAPP_PERSONAL_BASE"}
 
 
 def channel_secret_status(channel: str) -> dict:
@@ -5606,7 +5610,7 @@ def channel_secret_status(channel: str) -> dict:
 # 出站：发送适配器把已保存的消息投递到渠道（delivery_status = queued → sent / failed，失败原因可见）；
 # 分流：与网页聊天同口径——工程师追问优先、暂停 AI 不自动答复、「人工」转交、「确认」确认工况并匹配、
 #       提问样文本走有据问答（资料外给转人工提示）、其余走需求识别与整理。
-CHANNEL_OFFICIAL_API_BASE = {"whatsapp": "https://api.twilio.com", "langbot": "http://127.0.0.1:5300"}
+CHANNEL_OFFICIAL_API_BASE = {"whatsapp": "https://api.twilio.com", "langbot": "http://127.0.0.1:5300", "whatsapp_personal": "http://127.0.0.1:3100"}
 # 渠道内提示文案（入库即不可变：只描述可用动作，不作状态承诺）
 CHANNEL_HUMAN_HINT = "如需工程师人工核实，请回复「人工」。"
 CHANNEL_HUMAN_GUIDE = "还没有待核实的问题。请先发送您想核实的具体问题，再回复「人工」转交工程师。"
@@ -5954,6 +5958,8 @@ def send_channel_text(channel: str, config: dict, external_user_id: str, text: s
         if whatsapp_provider() == "meta":
             return _send_whatsapp_meta(config, external_user_id, text)
         return _send_whatsapp_twilio(config, external_user_id, text)
+    if channel == "whatsapp_personal":
+        return _send_whatsapp_personal(config, external_user_id, text)
     raise ChannelSendError("该渠道的发送通道尚未开通")
 
 
@@ -6022,6 +6028,127 @@ def _send_whatsapp_meta(config: dict, external_user_id: str, text: str) -> str:
         sid = ""
     if not sid:
         raise ChannelSendError("渠道接口返回失败（无消息编号）")
+    return sid
+
+
+# ── WhatsApp 个人版（WAHA 桥）· 节奏层（防封） ──────────────────────────────
+# 照抄 WAHA 官方《How to Avoid Blocking》指南：只回复、拟人四步（已读→输入中→随机等待→发送）、
+# 全局限速。节奏层状态仅存内存（进程重启即重置，偏保守）。
+_WHATSAPP_PERSONAL_PACING_LOCK = threading.Lock()
+_WHATSAPP_PERSONAL_SENT_AT: list = []
+_WHATSAPP_PERSONAL_SENT_IDS: list = []
+_WHATSAPP_PERSONAL_SENT_TEXTS: list = []
+
+
+def _whatsapp_personal_reset_state() -> None:
+    """清空节奏层与回声防护状态（测试与运维用）。"""
+    with _WHATSAPP_PERSONAL_PACING_LOCK:
+        _WHATSAPP_PERSONAL_SENT_AT.clear()
+        _WHATSAPP_PERSONAL_SENT_IDS.clear()
+        _WHATSAPP_PERSONAL_SENT_TEXTS.clear()
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
+def _whatsapp_personal_pace(text: str) -> float:
+    """拟人节奏（防封）：最小间隔 + 每分钟/每小时上限；返回"输入中"应持续的秒数。
+
+    超限时抛出 ChannelSendError（该条不发送，原因可见、可人工重试）。
+    """
+    if os.environ.get("WHATSAPP_PERSONAL_PACING", "1").strip().lower() in ("0", "off", "false"):
+        return None
+    min_gap = max(0.0, _env_float("WHATSAPP_PERSONAL_MIN_GAP", 3.0))
+    max_per_min = max(1, int(_env_float("WHATSAPP_PERSONAL_MAX_PER_MIN", 8)))
+    max_per_hour = max(1, int(_env_float("WHATSAPP_PERSONAL_MAX_PER_HOUR", 60)))
+    typing_base = max(0.0, _env_float("WHATSAPP_PERSONAL_TYPING_BASE", 1.5))
+    typing_per_char = max(0.0, _env_float("WHATSAPP_PERSONAL_TYPING_PER_CHAR", 0.03))
+    typing_max = max(0.0, _env_float("WHATSAPP_PERSONAL_TYPING_MAX", 6.0))
+    with _WHATSAPP_PERSONAL_PACING_LOCK:
+        now = time.time()
+        recent = [stamp for stamp in _WHATSAPP_PERSONAL_SENT_AT if stamp >= now - 3600]
+        _WHATSAPP_PERSONAL_SENT_AT[:] = recent
+        if sum(1 for stamp in recent if stamp >= now - 60) >= max_per_min:
+            raise ChannelSendError(f"节奏层（防封）：已达每分钟上限 {max_per_min} 条，本条未发送，请稍后重试")
+        if len(recent) >= max_per_hour:
+            raise ChannelSendError(f"节奏层（防封）：已达每小时上限 {max_per_hour} 条，本条未发送，请稍后重试")
+        last = recent[-1] if recent else 0.0
+        gap_wait = max(0.0, min_gap - (now - last))
+        if gap_wait > 0:
+            time.sleep(gap_wait)
+        _WHATSAPP_PERSONAL_SENT_AT.append(time.time())
+    typing_delay = min(typing_max, typing_base + typing_per_char * max(0, len(text or "")))
+    return typing_delay
+
+
+def _whatsapp_personal_notify(base: str, api_key: str, session: str, chat_id: str, action: str) -> None:
+    """拟人状态通知（已读 / 输入中）——尽力而为：失败静默，不影响发送本体。"""
+    paths = {"seen": "/api/sendSeen", "typing_start": "/api/startTyping", "typing_stop": "/api/stopTyping"}
+    path = paths.get(action)
+    if not path:
+        return
+    try:
+        channel_http_json(base + path, {"session": session, "chatId": chat_id}, timeout=5, headers={"X-Api-Key": api_key})
+    except Exception:
+        pass
+
+
+def _whatsapp_personal_remember_sent(message_id: str, text: str) -> None:
+    """记录本桥发出的消息 ID/文本（回声防护：自聊场景下避免"自己回自己"的循环）。"""
+    with _WHATSAPP_PERSONAL_PACING_LOCK:
+        if message_id:
+            _WHATSAPP_PERSONAL_SENT_IDS.append(message_id)
+            _WHATSAPP_PERSONAL_SENT_IDS[:] = _WHATSAPP_PERSONAL_SENT_IDS[-200:]
+        if text:
+            _WHATSAPP_PERSONAL_SENT_TEXTS.append(text)
+            _WHATSAPP_PERSONAL_SENT_TEXTS[:] = _WHATSAPP_PERSONAL_SENT_TEXTS[-50:]
+
+
+def _whatsapp_personal_was_sent(message_id: str, text: str) -> bool:
+    with _WHATSAPP_PERSONAL_PACING_LOCK:
+        return (bool(message_id) and message_id in _WHATSAPP_PERSONAL_SENT_IDS) or (bool(text) and text in _WHATSAPP_PERSONAL_SENT_TEXTS)
+
+
+def _send_whatsapp_personal(config: dict, external_user_id: str, text: str) -> str:
+    """WhatsApp 个人版（经本机 WAHA 桥）：节奏层 → 已读/输入中 → sendText；返回消息 ID。
+
+    环境变量：WHATSAPP_PERSONAL_BASE（默认 http://127.0.0.1:3100）、WHATSAPP_PERSONAL_API_KEY；
+    节奏参数：WHATSAPP_PERSONAL_PACING / _MIN_GAP / _MAX_PER_MIN / _MAX_PER_HOUR / _TYPING_*。
+    """
+    base = channel_api_base("whatsapp_personal", config)
+    api_key = os.environ.get("WHATSAPP_PERSONAL_API_KEY", "").strip()
+    if not api_key:
+        raise ChannelSendError("缺少环境变量 WHATSAPP_PERSONAL_API_KEY")
+    session = str(config.get("session") or "default").strip() or "default"
+    jid = str(external_user_id or "").strip()
+    if "@" not in jid:
+        digits = re.sub(r"\D", "", jid)
+        if not digits:
+            raise ChannelSendError("缺少买方号码，无法发送")
+        jid = f"{digits}@c.us"
+    typing_delay = _whatsapp_personal_pace(text)
+    if typing_delay is not None:
+        _whatsapp_personal_notify(base, api_key, session, jid, "seen")
+        _whatsapp_personal_notify(base, api_key, session, jid, "typing_start")
+        if typing_delay > 0:
+            time.sleep(typing_delay)
+        _whatsapp_personal_notify(base, api_key, session, jid, "typing_stop")
+    data = channel_http_json(
+        f"{base}/api/sendText",
+        {"session": session, "chatId": jid, "text": text},
+        headers={"X-Api-Key": api_key},
+    )
+    sid = ""
+    raw_id = data.get("id")
+    if isinstance(raw_id, dict):
+        sid = str(raw_id.get("_serialized") or raw_id.get("id") or "").strip()
+    elif isinstance(raw_id, str):
+        sid = raw_id.strip()
+    _whatsapp_personal_remember_sent(sid, text)
     return sid
 
 
@@ -6508,6 +6635,51 @@ def handle_whatsapp_meta_event(db: Database, ai, tenant_id: str, payload: dict) 
                 if apply_whatsapp_delivery_status(db, sid, "delivered" if status in ("delivered", "read") else "failed", error_text):
                     actions["statuses"] += 1
     return actions
+
+
+def handle_whatsapp_personal_event(db: Database, ai, tenant_id: str, event: dict) -> dict:
+    """WAHA 事件 → 渠道消息处理（WhatsApp 个人版桥）。
+
+    - 只处理 event=="message" 的文本消息；群聊/状态广播/媒体跳过；
+    - fromMe 消息默认跳过（自己发给别人的，绝不进平台）；唯一例外＝"自聊"（from==to，便于自测），
+      且对自聊做了回声防护（本桥发出的消息 ID/文本不会再次进平台，避免自回环）；
+    - 消息 ID（id._serialized）＝ 去重键；notifyName ＝ 显示名。
+    """
+    if not isinstance(event, dict):
+        return {"action": "ignored"}
+    if str(event.get("event") or "") != "message":
+        return {"action": "ignored_event", "event": str(event.get("event") or "")}
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        return {"action": "ignored"}
+    from_jid = str(payload.get("from") or "").strip()
+    to_jid = str(payload.get("to") or "").strip()
+    if not from_jid:
+        return {"action": "ignored_malformed"}
+    if from_jid.endswith("@g.us") or from_jid == "status@broadcast":
+        return {"action": "ignored_groupchat"}
+    message_id = ""
+    raw_id = payload.get("id")
+    if isinstance(raw_id, dict):
+        message_id = str(raw_id.get("_serialized") or raw_id.get("id") or "").strip()
+    elif isinstance(raw_id, str):
+        message_id = raw_id.strip()
+    if not message_id:
+        return {"action": "ignored_malformed"}
+    text = str(payload.get("body") or "").strip()
+    from_me = bool(payload.get("fromMe"))
+    if from_me and from_jid != to_jid:
+        return {"action": "ignored_outgoing"}
+    if from_me and _whatsapp_personal_was_sent(message_id, text):
+        return {"action": "ignored_echo"}
+    if not text or payload.get("hasMedia"):
+        return {"action": "ignored_non_text"}
+    data = payload.get("_data") or {}
+    display_name = str(payload.get("notifyName") or (data.get("notifyName") if isinstance(data, dict) else "") or "").strip()
+    if not display_name:
+        display_name = f"WhatsApp（个人版）用户 {from_jid.split('@')[0]}"
+    result = process_channel_message(db, ai, tenant_id, "whatsapp_personal", from_jid, display_name, text, message_id)
+    return result
 
 
 def render_rfq_link_form(field_config: dict, values: dict, error: str = "", existing_short: str = "") -> str:
@@ -8172,6 +8344,10 @@ class Handler(BaseHTTPRequestHandler):
         if langbot_hook_match:
             self.handle_langbot_webhook(langbot_hook_match.group(1))
             return
+        personal_hook_match = re.fullmatch(r"/api/v1/channels/whatsapp-personal/webhook/([A-Za-z0-9_-]{16,96})", path)
+        if personal_hook_match:
+            self.handle_whatsapp_personal_webhook(personal_hook_match.group(1))
+            return
         if path == "/api/v1/channels/whatsapp/webhook":
             self.handle_whatsapp_webhook()
             return
@@ -8638,7 +8814,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.db.save_channel_account(self.tenant_id, channel, config, self.actor)
                 self.redirect("/admin/channels?notice=saved")
                 return
-            match = re.fullmatch(r"/admin/channels/(whatsapp|langbot)/toggle", path)
+            match = re.fullmatch(r"/admin/channels/(whatsapp|langbot|whatsapp_personal)/toggle", path)
             if match:
                 channel = match.group(1)
                 account = self.db.get_channel_account(self.tenant_id, channel)
@@ -9872,6 +10048,46 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_json({"ok": True, "outcome": outcome}, 200)
 
+    def handle_whatsapp_personal_webhook(self, token: str) -> None:
+        """WhatsApp 个人版（WAHA 桥）事件入口：URL 令牌 fail-closed → 统一大脑。
+
+        HMAC 加固：若配置 WHATSAPP_PERSONAL_HMAC_KEY 且请求带 X-Webhook-Hmac，必须验签通过；
+        未带签名头时仅凭 URL 令牌（与既有桥同口径，后续可升级为强制签名）。
+        """
+        expected = os.environ.get("WHATSAPP_PERSONAL_TOKEN", "").strip()
+        if not expected or not hmac.compare_digest(str(token), expected):
+            self.send_json({"error": "invalid_token"}, 403)
+            return
+        hmac_key = os.environ.get("WHATSAPP_PERSONAL_HMAC_KEY", "").strip()
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        provided = self.headers.get("X-Webhook-Hmac", "")
+        if hmac_key and provided:
+            expected_sig = hmac.new(hmac_key.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+            provided_clean = provided.strip().lower()
+            if provided_clean.startswith("sha256="):
+                provided_clean = provided_clean.split("=", 1)[1]
+            if not hmac.compare_digest(expected_sig, provided_clean):
+                self.send_json({"error": "invalid_signature"}, 403)
+                return
+        try:
+            event = json.loads(raw.decode("utf-8"))
+        except Exception:
+            self.send_json({"ok": True, "skipped": "malformed"}, 200)
+            return
+        account = self.db.conn.execute(
+            "SELECT * FROM channel_accounts WHERE channel='whatsapp_personal' AND status='enabled' ORDER BY rowid LIMIT 1"
+        ).fetchone()
+        if not account:
+            self.send_json({"ok": True, "skipped": "channel_disabled"}, 200)
+            return
+        try:
+            outcome = handle_whatsapp_personal_event(self.db, self.ai, account["tenant_id"], event)
+        except Exception:
+            self.send_json({"ok": False, "error": "processing_failed"}, 500)
+            return
+        self.send_json({"ok": True, "outcome": outcome}, 200)
+
     def handle_langbot_webhook(self, token: str) -> None:
         """LangBot Webhook 收信：URL 令牌即凭据（LangBot 不签名，fail-closed）。
 
@@ -10312,6 +10528,7 @@ class Handler(BaseHTTPRequestHandler):
         guides = {
             "whatsapp": whatsapp_guide_text(),
             "langbot": "试验通道（本机）：LangBot 负责对接各社交平台并把消息推送进来，平台处理后的回复经 LangBot 发送接口直达买方。步骤：① 本机环境变量设置 LANGBOT_API_KEY（LangBot 面板「API Keys」生成）② 在 LangBot 面板把上方收信地址登记为 Webhook 并启用 ③ 回到这里填写 bot_uuid 并启用渠道。",
+            "whatsapp_personal": "本机桥（WAHA）：把你的 WhatsApp 个人号接入平台。步骤：① 本机 WAHA 桥已就绪（端口 3100）② 手机 WhatsApp → 设置 → 已连接的设备 → 扫码（二维码由 WAHA 控制台或助手生成）③ 回到这里填写显示名称并启用。之后消息自动进「会话收件箱 → WhatsApp（个人版）」，回复经同一账号发出（含拟人节奏与限速保护）。",
         }
         host = self.headers.get("Host", "127.0.0.1:8137")
         cards = []
@@ -10382,6 +10599,12 @@ class Handler(BaseHTTPRequestHandler):
                         f"「STATUS CALLBACK URL」<code>{esc(callback_url)}</code>。<br>"
                         f"地址需公网可达（联调时用临时隧道）；隧道域名可设本机变量 TWILIO_PUBLIC_BASE，本页即显示公网地址。</div>"
                     )
+            elif channel == "whatsapp_personal":
+                receive_block = (
+                    f"<div class='field-state' style='margin-top:8px'><b>桥接状态</b>：本机 WAHA 桥（端口 3100）→ 平台收信 "
+                    f"<code>http://127.0.0.1:8137/api/v1/channels/whatsapp-personal/webhook/•••</code>（URL 令牌即凭据，已配置、不回显）。<br>"
+                    f"扫码与连接状态：<a href='http://127.0.0.1:3100/dashboard' target='_blank'>WAHA 控制台（127.0.0.1:3100/dashboard）</a>，或让助手生成二维码图片直接扫。</div>"
+                )
             cards.append(f"""<section class='card' style='margin-top:16px'>
 <div class='panel-title'><h2>{esc(CHANNEL_LABELS[channel])} {badge} {secret_badge}</h2></div>
 <form method='post' action='/admin/channels/{channel}'>
