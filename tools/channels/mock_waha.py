@@ -55,7 +55,8 @@ class MockWahaServer:
                         }
                         mock._sent.append(record)
                     self._send(201, {
-                        "id": {"_serialized": f"true_{payload.get('chatId')}_MOCK{n}"},
+                        "key": {"remoteJid": payload.get("chatId"), "fromMe": True, "id": f"3EB0MOCK{n}"},
+                        "status": "PENDING",
                         "timestamp": 1700000000,
                     })
                     return

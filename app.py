@@ -6173,11 +6173,15 @@ def _send_whatsapp_personal(config: dict, external_user_id: str, text: str) -> s
         headers={"X-Api-Key": api_key},
     )
     sid = ""
-    raw_id = data.get("id")
-    if isinstance(raw_id, dict):
-        sid = str(raw_id.get("_serialized") or raw_id.get("id") or "").strip()
-    elif isinstance(raw_id, str):
-        sid = raw_id.strip()
+    raw_key = data.get("key")
+    if isinstance(raw_key, dict):
+        sid = str(raw_key.get("id") or raw_key.get("_serialized") or "").strip()
+    if not sid:
+        raw_id = data.get("id")
+        if isinstance(raw_id, dict):
+            sid = str(raw_id.get("_serialized") or raw_id.get("id") or "").strip()
+        elif isinstance(raw_id, str):
+            sid = raw_id.strip()
     _whatsapp_personal_remember_sent(sid, text)
     return sid
 

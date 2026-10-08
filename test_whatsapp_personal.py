@@ -182,7 +182,7 @@ class WhatsAppPersonalTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(reply["delivery_status"], "sent")
         self.assertTrue(str(reply["external_message_id"]).startswith("861700000999@c.us:"))
-        self.assertIn("_MOCK", str(reply["external_message_id"]))
+        self.assertIn("3EB0MOCK", str(reply["external_message_id"]))
         # 节奏关闭 → 不产生已读/输入中通知
         self.assertEqual(len(self.mock.notifications()), notes_before)
 
@@ -204,7 +204,7 @@ class WhatsAppPersonalTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["outcome"]["action"], "extracted")
         sent = self.mock.sent_texts()
         self.assertTrue(sent)
-        reply_id = f"true_861700000999@c.us_MOCK{len(sent)}"
+        reply_id = f"3EB0MOCK{len(sent)}"
         # 回声（桥自己发出的消息被回推）→ 防护拦截
         status, body = self._post(self._event("已记录以下工况（回声）", reply_id, from_me=True))
         self.assertEqual(json.loads(body)["outcome"]["action"], "ignored_echo")
