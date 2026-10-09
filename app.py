@@ -5250,7 +5250,12 @@ WHATSAPP_PERSONAL_BIND_JS = """
         }
         if (data.status === 'WORKING') {
           stopQr();
-          setLine('已连接 · ' + (data.me_name || '本机账号') + '（该号码正在自动回复；断开需在手机端「已连接的设备」操作）。');
+          var name = data.me_name || '本机账号';
+          if (data.channel_enabled === false) {
+            setLine('已连接 · ' + name + '（渠道当前停用——在卡片里点「启用渠道」即可恢复收发）。');
+          } else {
+            setLine('已连接 · ' + name + '（渠道已启用，可直接收发消息）。');
+          }
           actions.style.display = 'none';
           schedule(15000);
           return;
@@ -6178,6 +6183,7 @@ _WHATSAPP_PERSONAL_SENT_IDS: list = []
 _WHATSAPP_PERSONAL_SENT_TEXTS: list = []
 _WHATSAPP_PERSONAL_START_GATE_LOCK = threading.Lock()
 _WHATSAPP_PERSONAL_START_LAST_AT: list = [0.0]
+_WHATSAPP_PERSONAL_LAST_STATUS: dict = {"value": ""}
 
 
 def _whatsapp_personal_reset_state() -> None:
@@ -6187,11 +6193,23 @@ def _whatsapp_personal_reset_state() -> None:
         _WHATSAPP_PERSONAL_SENT_IDS.clear()
         _WHATSAPP_PERSONAL_SENT_TEXTS.clear()
         _WHATSAPP_PERSONAL_START_LAST_AT[0] = 0.0
+        _WHATSAPP_PERSONAL_LAST_STATUS["value"] = ""
 
 
 def _whatsapp_personal_self_ids() -> set:
     raw = os.environ.get("WHATSAPP_PERSONAL_SELF_IDS", "")
     return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _whatsapp_personal_event_status(event: dict) -> str:
+    """从 session.status 事件取会话状态（WAHA 载荷：payload.status）。"""
+    payload = event.get("payload") if isinstance(event, dict) else None
+    status = ""
+    if isinstance(payload, dict):
+        status = str(payload.get("status") or "").strip()
+    if not status and isinstance(event, dict):
+        status = str(event.get("status") or "").strip()
+    return status.upper()
 
 
 def _whatsapp_personal_chat_from_message_id(message_id: str) -> str:
@@ -10506,10 +10524,31 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             self.send_json({"ok": True, "skipped": "malformed"}, 200)
             return
+        event_type = str(event.get("event") or "") if isinstance(event, dict) else ""
+        # 会话状态事件：无论渠道启用与否都跟踪（用于「扫码成功 → 自动启用渠道」的体验）。
+        status_value = ""
+        previous_status = _WHATSAPP_PERSONAL_LAST_STATUS["value"]
+        if event_type == "session.status":
+            status_value = _whatsapp_personal_event_status(event)
+            if status_value:
+                _WHATSAPP_PERSONAL_LAST_STATUS["value"] = status_value
         account = self.db.conn.execute(
-            "SELECT * FROM channel_accounts WHERE channel='whatsapp_personal' AND status='enabled' ORDER BY rowid LIMIT 1"
+            "SELECT * FROM channel_accounts WHERE channel='whatsapp_personal' ORDER BY rowid LIMIT 1"
         ).fetchone()
         if not account:
+            self.send_json({"ok": True, "skipped": "channel_disabled"}, 200)
+            return
+        if account["status"] != "enabled":
+            # 渠道停用：消息事件一律跳过；但「扫码成功」（SCAN_QR_CODE → WORKING）自动启用渠道——
+            # 对齐「扫码即用」体验（用户 2026-10-09 反馈）；手动停用的渠道在无扫码流程时不被打扰。
+            if event_type == "session.status" and status_value == "WORKING" and previous_status == "SCAN_QR_CODE":
+                self.db.set_channel_enabled(account["tenant_id"], "whatsapp_personal", True, "system:scan-auto-enable")
+                _whatsapp_personal_debug({
+                    "at": now_iso(), "event": event_type, "from": "", "to": "", "fromMe": False,
+                    "source": "", "id": "", "hasMedia": False, "body": "", "outcome": "auto_enabled",
+                })
+                self.send_json({"ok": True, "outcome": {"action": "auto_enabled", "status": status_value}}, 200)
+                return
             self.send_json({"ok": True, "skipped": "channel_disabled"}, 200)
             return
         try:
@@ -10999,14 +11038,16 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True, **state}
 
     def admin_whatsapp_personal_session_state(self) -> None:
-        """扫码绑定区（JSON）：桥可达性 + 会话状态 + 登录名（供渠道页轮询）。"""
+        """扫码绑定区（JSON）：桥可达性 + 会话状态 + 登录名 + 渠道启用态（供渠道页轮询）。"""
         config = self._whatsapp_personal_page_config()
+        account = self.db.get_channel_account(self.tenant_id, "whatsapp_personal")
+        channel_enabled = bool(account and account["status"] == "enabled")
         try:
             state = whatsapp_personal_session_state(config)
         except ChannelSendError as error:
-            self.send_json({"ok": False, "error": str(error), "session": _whatsapp_personal_session(config)})
+            self.send_json({"ok": False, "error": str(error), "session": _whatsapp_personal_session(config), "channel_enabled": channel_enabled})
             return
-        self.send_json({"ok": True, **state})
+        self.send_json({"ok": True, "channel_enabled": channel_enabled, **state})
 
     def admin_whatsapp_personal_qr(self) -> None:
         """扫码绑定区：代理当前二维码图片（先查状态——WAHA 非扫码态会挂起，已在助手层规避）。"""
@@ -11046,7 +11087,7 @@ class Handler(BaseHTTPRequestHandler):
         guides = {
             "whatsapp": whatsapp_guide_text(),
             "langbot": "试验通道（本机）：LangBot 负责对接各社交平台并把消息推送进来，平台处理后的回复经 LangBot 发送接口直达买方。步骤：① 本机环境变量设置 LANGBOT_API_KEY（LangBot 面板「API Keys」生成）② 在 LangBot 面板把上方收信地址登记为 Webhook 并启用 ③ 回到这里填写 bot_uuid 并启用渠道。",
-            "whatsapp_personal": "本机桥（WAHA）：把你的 WhatsApp 个人号接入平台。步骤：① 在下方「手机扫码绑定」区直接扫二维码（每 15 秒自动刷新，扫码成功即时变为「已连接」）② 填写显示名称并启用渠道。之后消息自动进「会话收件箱 → WhatsApp（个人版）」，回复经同一账号发出（含拟人节奏与限速保护）。",
+            "whatsapp_personal": "本机桥（WAHA）：把你的 WhatsApp 个人号接入平台。步骤：① 在下方「手机扫码绑定」区直接扫二维码（每 15 秒自动刷新）② 扫码成功即时变为「已连接」并自动启用渠道——无需其他操作即可收发。之后消息自动进「会话收件箱 → WhatsApp（个人版）」，回复经同一账号发出（含拟人节奏与限速保护）。",
         }
         host = self.headers.get("Host", "127.0.0.1:8137")
         cards = []

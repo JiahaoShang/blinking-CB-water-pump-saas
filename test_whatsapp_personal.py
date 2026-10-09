@@ -311,6 +311,7 @@ class WhatsAppPersonalTests(unittest.TestCase):
         self.assertEqual(data["status"], "WORKING")
         self.assertEqual(data["status_label"], "已连接")
         self.assertEqual(data["me_name"], "MockUser")
+        self.assertTrue(data["channel_enabled"])
 
         # 已连接 → 二维码接口 409（不触碰 WAHA 会挂起的路径）
         status, headers, raw = _http(self.server, "GET", "/admin/channels/whatsapp-personal/qr.png", cookie=self.admin_cookie)
@@ -402,6 +403,34 @@ class WhatsAppPersonalTests(unittest.TestCase):
         self.assertIn("账号未连接", page)
         self.assertNotIn("已记录以下工况", page)
         self.mock.set_status("WORKING")
+
+    def _status_event(self, status, session="default"):
+        return {"event": "session.status", "session": session, "payload": {"name": session, "status": status}}
+
+    def test_scan_success_auto_enables_channel(self):
+        """扫码成功（SCAN_QR_CODE → WORKING）→ 渠道自动启用；单独 WORKING 不打扰手动停用。"""
+        try:
+            self.db.set_channel_enabled("demo-tenant", "whatsapp_personal", False, "test")
+            # ① 无扫码前置的 WORKING → 不自动启用（尊重手动停用）
+            status, raw = self._post(self._status_event("WORKING"))
+            self.assertEqual(status, 200)
+            account = self.db.get_channel_account("demo-tenant", "whatsapp_personal")
+            self.assertEqual(account["status"], "disabled")
+            # ② 扫码流程：SCAN_QR_CODE → WORKING → 自动启用 + 审计
+            status, raw = self._post(self._status_event("SCAN_QR_CODE"))
+            self.assertEqual(status, 200)
+            status, raw = self._post(self._status_event("WORKING"))
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(raw)["outcome"]["action"], "auto_enabled")
+            account = self.db.get_channel_account("demo-tenant", "whatsapp_personal")
+            self.assertEqual(account["status"], "enabled")
+            row = self.db.conn.execute(
+                "SELECT action, actor FROM audit_log WHERE entity_id='whatsapp_personal' ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            self.assertEqual(row["action"], "channel_enabled")
+            self.assertEqual(row["actor"], "system:scan-auto-enable")
+        finally:
+            self.db.set_channel_enabled("demo-tenant", "whatsapp_personal", True, "test-restore")
 
     def test_duplicate_dedup(self):
         self._post(self._event("需求：流量 11 m³/h", "3EB0DUP1"))
