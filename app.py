@@ -7945,6 +7945,9 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
     def console_page(self, title: str, body: str, active: str, lang: str = "zh") -> str:
         tenant = self.db.conn.execute("SELECT name FROM tenants WHERE id=?", (self.tenant_id,)).fetchone()
         clean_path = urlparse(self.path).path.rstrip("/") or "/admin"
+        from console_guidance import guided_console_body
+        if self.user_role == "admin" or any(self.has_module(key) for key in GRANTABLE_MODULE_KEYS):
+            body = guided_console_body(body, clean_path, active, lang)
         return console_layout(
             title, body, active, lang=lang, path=clean_path,
             actor=self.actor if self.user_id else "",
@@ -9765,7 +9768,7 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
             else:
                 actions = f"<form method='post' action='/admin/products/{product_id}/fields/{esc(field['field_key'])}/approve' class='inline'><button class='secondary'>重新核准</button></form>"
             audience_label = '对外问答' if field['audience'] == 'external' else '仅内部知识'
-            actions += f"<form method='post' action='/admin/products/{product_id}/fields/{esc(field['field_key'])}/audience'><select name='audience'><option value='external'{' selected' if field['audience'] == 'external' else ''}>对外问答</option><option value='internal'{' selected' if field['audience'] == 'internal' else ''}>仅内部知识</option></select><button class='secondary'>保存使用范围</button></form>"
+            actions += f"<details class='detail-toggle'><summary>调整使用范围</summary><form method='post' action='/admin/products/{product_id}/fields/{esc(field['field_key'])}/audience'><select name='audience'><option value='external'{' selected' if field['audience'] == 'external' else ''}>对外问答</option><option value='internal'{' selected' if field['audience'] == 'internal' else ''}>仅内部知识</option></select><button class='secondary'>保存使用范围</button></form></details>"
             review_bits.append(audience_label)
             field_rows.append(
                 f"<tr><td><b>{esc(field['label'])}</b><br><span class='field-state'>{esc(field['field_key'])} · {esc(origin_labels.get(field['origin'], field['origin']))}</span></td>"
@@ -12265,8 +12268,8 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
                 base = f"{base}（买家填写：{row['requested_model']}）" if base else f"买家填写：{row['requested_model']}"
             return base or "未指定型号"
         items = "".join(
-            f"<div class='simple-item'><div><strong>{esc(rfq['id'])} · {esc(model_label(rfq))}</strong>"
-            f"<small>{esc(rfq['contact_email'] or '未提供联系人')} · <span class='badge'>{esc(rfq['status'])}</span> · {esc(rfq['created_at'])}</small></div>"
+            f"<div class='simple-item'><div><strong>{esc(rfq['company'] or rfq['contact_name'] or rfq['contact_email'] or '待确认客户')} · {esc(model_label(rfq))}</strong>"
+            f"<small>{esc(rfq['contact_email'] or '未提供联系人')} · <span class='badge'>{esc(rfq['status'])}</span> · {esc(rfq['created_at'])}</small><small>询价编号：{esc(rfq['id'])}</small></div>"
             f"<div class='actions'><a class='button secondary' href='/admin/rfqs/{rfq['id']}'>查看 →</a></div></div>"
             for rfq in rfqs
         ) or "<div class='muted-block'>暂无 RFQ。买方提交询价后会出现在这里。</div>"
@@ -12400,8 +12403,8 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
                 follow_up = "<span class='badge withdrawn'>停止主动联系</span>"
             changed = (f"<span class='badge pending_review'>买方已修改 {record['buyer_revision_count']} 次</span>" if record["buyer_revision_count"] else "")
             items.append(
-                f"<div class='simple-item'><div><strong>{esc(record['id'])} · {esc(record['model'] or '未指定型号')} <span class='badge'>{esc(stage_labels.get(record['stage'], record['stage'] or '未分配'))}</span></strong>"
-                f"<small>{esc(record['company'] or record['contact_email'] or '未提供联系人')} · 负责人：{esc(record['owner'] or '未分配')} · 跟进：{follow_up} · RFQ：{esc(record['status'])} {changed}</small></div>"
+                f"<div class='simple-item'><div><strong>{esc(record['company'] or record['contact_email'] or '待确认客户')} · {esc(record['model'] or '未指定型号')} <span class='badge'>{esc(stage_labels.get(record['stage'], record['stage'] or '未分配'))}</span></strong>"
+                f"<small>{esc(record['company'] or record['contact_email'] or '未提供联系人')} · 负责人：{esc(record['owner'] or '未分配')} · 跟进：{follow_up} · RFQ：{esc(record['status'])} {changed}</small><small>询价编号：{esc(record['id'])}</small></div>"
                 f"<div class='actions'><a class='button' href='/admin/sales/{record['id']}'>打开线索 →</a></div></div>"
             )
         filtered_note = "" if len(visible) == len(records) else f" · 已筛选 {len(visible)} / {len(records)} 条"
