@@ -9225,6 +9225,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.redirect(f"/admin/channels?notice={'enabled' if enabled else 'disabled'}")
                 return
             if path == "/admin/channels/whatsapp-personal/session/start":
+                # 诊断审计（2026-10-09 排查风暴来源）：记录调用方（客户端地址 / UA / 来源页）。
+                try:
+                    audit_line = json.dumps({
+                        "at": now_iso(),
+                        "client": f"{self.client_address[0]}:{self.client_address[1]}",
+                        "ua": str(self.headers.get("User-Agent", ""))[:160],
+                        "referer": str(self.headers.get("Referer", ""))[:120],
+                    }, ensure_ascii=False)
+                    with open(ROOT / "data" / "whatsapp_personal_start_audit.log", "a", encoding="utf-8") as audit_fh:
+                        audit_fh.write(audit_line + "\n")
+                except Exception:
+                    pass
                 # 扫码绑定区「启动 / 重置会话并取码」：按状态自愈（启动/重启/重建），前端随后轮询状态。
                 try:
                     result = whatsapp_personal_start_session(self._whatsapp_personal_page_config())
