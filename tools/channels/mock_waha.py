@@ -32,6 +32,9 @@ class MockWahaServer:
         self.status = status
         self.session_name = session_name
         self.start_calls = 0
+        self.restart_calls = 0
+        self.stop_calls = 0
+        self.deleted = 0
         self._sent: list[dict] = []
         self._notifications: list[dict] = []
         self._lock = threading.Lock()
@@ -95,6 +98,22 @@ class MockWahaServer:
                     return
                 self._send(404, {"message": f"unsupported path {self.path}", "statusCode": 404})
 
+            def do_DELETE(self):
+                if not self._auth_ok():
+                    self._send(401, {"message": "Unauthorized", "statusCode": 401})
+                    return
+                parts = self._parts()
+                if len(parts) == 3 and parts[:2] == ["api", "sessions"]:
+                    if parts[2] != mock.session_name:
+                        self._send(404, {"message": "Session not found", "statusCode": 404})
+                        return
+                    with mock._lock:
+                        mock.deleted += 1
+                        mock.status = "STOPPED"
+                    self._send(201, {"name": mock.session_name, "status": "STOPPED"})
+                    return
+                self._send(404, {"message": f"unsupported path {self.path}", "statusCode": 404})
+
             def do_POST(self):
                 payload = self._read_json()
                 if not self._auth_ok():
@@ -130,6 +149,24 @@ class MockWahaServer:
                         mock.start_calls += 1
                         mock.status = "SCAN_QR_CODE"
                     self._send(201, {"name": mock.session_name, "status": "STARTING"})
+                    return
+                if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "restart":
+                    if parts[2] != mock.session_name:
+                        self._send(404, {"message": "Session not found", "statusCode": 404})
+                        return
+                    with mock._lock:
+                        mock.restart_calls += 1
+                        mock.status = "SCAN_QR_CODE"
+                    self._send(201, {"name": mock.session_name, "status": "STARTING"})
+                    return
+                if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "stop":
+                    if parts[2] != mock.session_name:
+                        self._send(404, {"message": "Session not found", "statusCode": 404})
+                        return
+                    with mock._lock:
+                        mock.stop_calls += 1
+                        mock.status = "STOPPED"
+                    self._send(201, {"name": mock.session_name, "status": "STOPPED"})
                     return
                 if parts == ["api", "sessions"]:
                     name = str(payload.get("name") or mock.session_name)

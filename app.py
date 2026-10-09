@@ -5263,8 +5263,13 @@ WHATSAPP_PERSONAL_BIND_JS = """
           return;
         }
         stopQr();
-        if (data.status === 'STOPPED' || data.status === 'FAILED' || data.status === 'UNKNOWN') {
+        if (data.status === 'FAILED') {
+          setLine('会话启动失败（可自愈）：点「重置会话并取码」自动重启或重建，并生成新二维码。');
+          startBtn.textContent = '重置会话并取码';
+          actions.style.display = '';
+        } else if (data.status === 'STOPPED' || data.status === 'UNKNOWN') {
           setLine('会话未启动（' + (data.status_label || data.status) + '）。点下方按钮启动并获取二维码。');
+          startBtn.textContent = '启动会话并取码';
           actions.style.display = '';
         } else {
           setLine('会话状态：' + (data.status_label || data.status) + '…');
@@ -5282,19 +5287,27 @@ WHATSAPP_PERSONAL_BIND_JS = """
   startBtn.addEventListener('click', function () {
     startBtn.disabled = true;
     var original = startBtn.textContent;
-    startBtn.textContent = '正在启动…';
+    startBtn.textContent = '正在处理…（最长约 20 秒）';
     fetch('/admin/channels/whatsapp-personal/session/start', {method: 'POST'})
       .then(function (resp) { return resp.json(); })
       .then(function (data) {
         startBtn.disabled = false;
         startBtn.textContent = original;
-        if (!data.ok) { setLine('启动失败：' + (data.error || '未知原因')); }
+        if (!data.ok) {
+          setLine('启动失败：' + (data.error || '未知原因'));
+          actions.style.display = '';
+          schedule(6000);
+          return;
+        }
+        var noteLabels = {started: '已启动会话', created: '已创建会话', restarted: '已重启会话', recreated: '已重建会话', already: '会话已在运行', busy: '上一条启动请求还在处理'};
+        setLine('已处理（' + (noteLabels[data.note] || '已发起启动') + '），正在等待状态变化…');
         poll();
       })
       .catch(function () {
         startBtn.disabled = false;
         startBtn.textContent = original;
         setLine('启动请求失败（网络错误），请稍后重试。');
+        schedule(6000);
       });
   });
 
@@ -6163,6 +6176,8 @@ _WHATSAPP_PERSONAL_PACING_LOCK = threading.Lock()
 _WHATSAPP_PERSONAL_SENT_AT: list = []
 _WHATSAPP_PERSONAL_SENT_IDS: list = []
 _WHATSAPP_PERSONAL_SENT_TEXTS: list = []
+_WHATSAPP_PERSONAL_START_GATE_LOCK = threading.Lock()
+_WHATSAPP_PERSONAL_START_LAST_AT: list = [0.0]
 
 
 def _whatsapp_personal_reset_state() -> None:
@@ -6171,6 +6186,7 @@ def _whatsapp_personal_reset_state() -> None:
         _WHATSAPP_PERSONAL_SENT_AT.clear()
         _WHATSAPP_PERSONAL_SENT_IDS.clear()
         _WHATSAPP_PERSONAL_SENT_TEXTS.clear()
+        _WHATSAPP_PERSONAL_START_LAST_AT[0] = 0.0
 
 
 def _whatsapp_personal_self_ids() -> set:
@@ -6370,47 +6386,117 @@ def whatsapp_personal_qr_image(config: dict, timeout: int = 8) -> tuple[bytes, s
     return raw, content_type if content_type.startswith("image/") else "image/png"
 
 
+def _whatsapp_personal_bridge_post(base: str, api_key: str, path: str, payload: dict, timeout: int = 15) -> dict:
+    """对 WAHA 发 POST（会话启停/重启共用）：返回 JSON dict；HTTP 错误带 http_status。"""
+    request = urllib_request.Request(
+        f"{base}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-Api-Key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+        data = json.loads(raw) if raw.strip() else {}
+        return data if isinstance(data, dict) else {}
+    except urllib_error.HTTPError as error:
+        detail = ""
+        try:
+            body = json.loads(error.read().decode("utf-8"))
+            detail = str(body.get("message") or body.get("error") or "").strip()
+        except Exception:
+            detail = ""
+        err = ChannelSendError(f"桥接口拒绝：HTTP {error.code}{'（' + detail + '）' if detail else ''}")
+        err.http_status = error.code
+        raise err from error
+    except (urllib_error.URLError, TimeoutError, OSError) as error:
+        raise ChannelSendError(f"桥服务不可达：{error}") from error
+
+
+def _whatsapp_personal_delete_session(base: str, api_key: str, session: str, timeout: int = 15) -> None:
+    """删除 WAHA 会话（登出+清理；404 视为已不存在）。"""
+    request = urllib_request.Request(
+        f"{base}/api/sessions/{quote(session, safe='')}",
+        headers={"X-Api-Key": api_key},
+        method="DELETE",
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            response.read()
+    except urllib_error.HTTPError as error:
+        if error.code != 404:
+            raise ChannelSendError(f"删除会话失败：HTTP {error.code}") from error
+    except (urllib_error.URLError, TimeoutError, OSError) as error:
+        raise ChannelSendError(f"桥服务不可达：{error}") from error
+
+
 def whatsapp_personal_start_session(config: dict, timeout: int = 15) -> dict:
-    """启动 WAHA 会话（不存在则先创建）：渠道页「启动会话并取码」用。"""
+    """「启动 / 重置会话并取码」：按状态自愈（启动 / 重启 / 重建）+ 防连点风暴。
+
+    真机教训（2026-10-09）：FAILED 状态下反复 start 无效、连点会把桥刷爆——本函数按阶梯自愈：
+    - 已运行 / 等待扫码 / 启动中 → 直接返回现状（noop）；
+    - STOPPED → start（不存在则创建）；
+    - 其他异常态（FAILED 等）→ restart（接口不可用则 stop+start）；
+    - 仍未恢复 → 删除重建（失败态无鉴权可丢，重建必得全新二维码）。
+    每个动作后短轮询确认新状态；2.5 秒内的重复请求直接返回现状（note=busy）。
+    """
     base, api_key, session = _whatsapp_personal_bridge(config)
     if not api_key:
         raise ChannelSendError("缺少环境变量 WHATSAPP_PERSONAL_API_KEY")
     if not base:
         raise ChannelSendError("桥接地址未配置")
 
-    def _post(url: str, payload: dict) -> dict:
-        request = urllib_request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json", "X-Api-Key": api_key},
-            method="POST",
-        )
-        try:
-            with urllib_request.urlopen(request, timeout=timeout) as response:
-                raw = response.read().decode("utf-8")
-            data = json.loads(raw) if raw.strip() else {}
-            return data if isinstance(data, dict) else {}
-        except urllib_error.HTTPError as error:
-            detail = ""
-            try:
-                body = json.loads(error.read().decode("utf-8"))
-                detail = str(body.get("message") or body.get("error") or "").strip()
-            except Exception:
-                detail = ""
-            err = ChannelSendError(f"启动会话失败：HTTP {error.code}{'（' + detail + '）' if detail else ''}")
-            err.http_status = error.code
-            raise err from error
-        except (urllib_error.URLError, TimeoutError, OSError) as error:
-            raise ChannelSendError(f"桥服务不可达：{error}") from error
+    now = time.time()
+    with _WHATSAPP_PERSONAL_START_GATE_LOCK:
+        if now - _WHATSAPP_PERSONAL_START_LAST_AT[0] < 2.5:
+            state = whatsapp_personal_session_state(config)
+            return {"session": state["session"], "status": state["status"], "status_label": state["status_label"], "note": "busy"}
+        _WHATSAPP_PERSONAL_START_LAST_AT[0] = now
 
-    try:
-        data = _post(f"{base}/api/sessions/{quote(session, safe='')}/start", {})
-    except ChannelSendError as error:
-        if getattr(error, "http_status", 0) == 404:
-            data = _post(f"{base}/api/sessions", {"name": session, "start": True})
-        else:
-            raise
-    return {"session": session, "status": str(data.get("status") or "STARTING").strip() or "STARTING"}
+    good = ("SCAN_QR_CODE", "WORKING", "STARTING")
+
+    def _wait_window(seconds: float = 6.0) -> dict:
+        deadline = time.time() + seconds
+        state = whatsapp_personal_session_state(config)
+        while state["status"] not in good and time.time() < deadline:
+            time.sleep(1.0)
+            state = whatsapp_personal_session_state(config)
+        return state
+
+    def _finish(note: str) -> dict:
+        state = _wait_window()
+        return {"session": session, "status": state["status"], "status_label": state["status_label"], "me_name": state["me_name"], "note": note}
+
+    state = whatsapp_personal_session_state(config)
+    if state["status"] in good:
+        return {"session": session, "status": state["status"], "status_label": state["status_label"], "me_name": state["me_name"], "note": "already"}
+    if state["status"] == "STOPPED":
+        try:
+            _whatsapp_personal_bridge_post(base, api_key, f"/api/sessions/{quote(session, safe='')}/start", {}, timeout=timeout)
+            result = _finish("started")
+        except ChannelSendError as error:
+            if getattr(error, "http_status", 0) == 404:
+                _whatsapp_personal_bridge_post(base, api_key, "/api/sessions", {"name": session, "start": True}, timeout=timeout)
+                result = _finish("created")
+            else:
+                raise
+    else:
+        # FAILED / UNKNOWN 等异常态：优先 restart；接口不可用则 stop+start
+        try:
+            _whatsapp_personal_bridge_post(base, api_key, f"/api/sessions/{quote(session, safe='')}/restart", {}, timeout=timeout)
+        except ChannelSendError as error:
+            if getattr(error, "http_status", 0) not in (404, 405, 422):
+                raise
+            _whatsapp_personal_bridge_post(base, api_key, f"/api/sessions/{quote(session, safe='')}/stop", {}, timeout=timeout)
+            time.sleep(1.0)
+            _whatsapp_personal_bridge_post(base, api_key, f"/api/sessions/{quote(session, safe='')}/start", {}, timeout=timeout)
+        result = _finish("restarted")
+    if result["status"] in good:
+        return result
+    # 最后手段：删除重建（失败态无鉴权可丢；重建必得全新二维码）
+    _whatsapp_personal_delete_session(base, api_key, session, timeout=timeout)
+    _whatsapp_personal_bridge_post(base, api_key, "/api/sessions", {"name": session, "start": True}, timeout=timeout)
+    return _finish("recreated")
 
 
 def _send_whatsapp_personal(config: dict, external_user_id: str, text: str) -> str:
@@ -9139,11 +9225,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.redirect(f"/admin/channels?notice={'enabled' if enabled else 'disabled'}")
                 return
             if path == "/admin/channels/whatsapp-personal/session/start":
-                # 扫码绑定区「启动会话并取码」：启动 WAHA 会话（不存在则创建），前端随后轮询状态。
+                # 扫码绑定区「启动 / 重置会话并取码」：按状态自愈（启动/重启/重建），前端随后轮询状态。
                 try:
                     result = whatsapp_personal_start_session(self._whatsapp_personal_page_config())
                 except ChannelSendError as error:
                     self.send_json({"ok": False, "error": str(error)}, 502)
+                    return
+                except Exception as error:  # 防御：任何异常都给页面一个可读结果（不裸奔 500）
+                    self.send_json({"ok": False, "error": f"启动异常：{type(error).__name__}: {error}"}, 500)
                     return
                 self.send_json({"ok": True, **result})
                 return
@@ -10604,6 +10693,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(self.console_page("未找到", "<div class='error'>页面不存在。</div>", ""), 404)
             return
         label = section["label"]
+        # 个人版：未连接（未登录）时不显示历史聊天记录（用户设定，2026-10-09）
+        bridge = None
+        if section["kind"] == "native" and section.get("native_channel") == "whatsapp_personal":
+            bridge = self.whatsapp_personal_inbox_state()
+            if not (bridge.get("ok") and bridge.get("status") == "WORKING"):
+                reason = str(bridge.get("error") or "").strip() or f"当前状态：{bridge.get('status_label') or '未连接'}"
+                gate_body = f"""
+<div class='toolbar'><div><h1>{esc(label)}</h1><div class='muted'>会话收件箱 · 按来源平台分开。</div></div></div>
+<section class='card'><div class='panel-title'><h2>账号未连接</h2><span class='badge pending_review'>未连接</span></div>
+<p class='muted'>{esc(reason)}。未连接期间不显示历史聊天记录；完成手机扫码绑定后，历史会话会在这里恢复显示。</p>
+<p><a class='button' href='/admin/channels'>去「渠道接入」扫码绑定</a></p></section>"""
+                self.send_html(self.console_page(f"{label} · 会话", gate_body, f"inbox_{slug}"))
+                return
         if section["kind"] == "web":
             source_where, params = "c.source IN ('web','website_api')", ()
         elif section["kind"] == "native":
@@ -10669,8 +10771,11 @@ class Handler(BaseHTTPRequestHandler):
         else:
             empty = f"{label} 已接入（LangBot），还没有消息；确认 LangBot 中对应平台的机器人已启用、并把平台收信地址登记为 Webhook。"
         list_html = "".join(items) or f"<div class='muted-block'>{esc(empty)}</div>"
+        bridge_badge = ""
+        if bridge is not None and bridge.get("ok"):
+            bridge_badge = f"<div class='field-state'><span class='badge approved'>已连接 · {esc(bridge.get('me_name') or '本机账号')}</span></div>"
         body = f"""
-<div class='toolbar'><div><h1>{esc(label)}</h1><div class='muted'>会话收件箱 · 按来源平台分开；消息经 LangBot 或原生通道进入平台后自动归入对应平台模块。</div></div></div>
+<div class='toolbar'><div><h1>{esc(label)}</h1>{bridge_badge}<div class='muted'>会话收件箱 · 按来源平台分开；消息经 LangBot 或原生通道进入平台后自动归入对应平台模块。</div></div></div>
 <section class='card'><div class='panel-title'><h2>最近会话</h2><span class='muted'>按最后活动倒序 · 最多 50 条</span></div>
 <div class='simple-list'>{list_html}</div></section>"""
         self.send_html(self.console_page(f"{label} · 会话", body, f"inbox_{slug}"))
@@ -10683,6 +10788,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(self.console_page("未找到", "<div class='error'>会话不存在或不属于这个平台。</div>", ""), 404)
             return
         label = section["label"]
+        # 个人版：未连接时不显示历史聊天记录（用户设定，2026-10-09）
+        if section["kind"] == "native" and section.get("native_channel") == "whatsapp_personal":
+            bridge = self.whatsapp_personal_inbox_state()
+            if not (bridge.get("ok") and bridge.get("status") == "WORKING"):
+                reason = str(bridge.get("error") or "").strip() or f"当前状态：{bridge.get('status_label') or '未连接'}"
+                gate_body = f"""
+<div class='toolbar'><div><a class='button secondary' href='/admin/inbox/{slug}'>← 返回{esc(label)}列表</a></div></div>
+<section class='card'><div class='panel-title'><h2>账号未连接</h2><span class='badge pending_review'>未连接</span></div>
+<p class='muted'>{esc(reason)}。未连接期间不显示历史聊天记录；完成手机扫码绑定后可继续查看此会话。</p>
+<p><a class='button' href='/admin/channels'>去「渠道接入」扫码绑定</a></p></section>"""
+                self.send_html(self.console_page(f"{label} · 会话", gate_body, f"inbox_{slug}"))
+                return
         is_web = section["kind"] == "web"
         sent_html = (
             "<div class='notice'>回复已发送——买方在网站聊天窗口里可见。</div>"
@@ -10860,6 +10977,14 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(account["config_json"]) if account and account["config_json"] else {}
         except (json.JSONDecodeError, TypeError):
             return {}
+
+    def whatsapp_personal_inbox_state(self) -> dict:
+        """会话收件箱（个人版）用：桥连接状态；桥不可达返回 ok=False（页面显示原因）。"""
+        try:
+            state = whatsapp_personal_session_state(self._whatsapp_personal_page_config())
+        except ChannelSendError as error:
+            return {"ok": False, "error": str(error), "status": "UNREACHABLE", "status_label": "桥不可达"}
+        return {"ok": True, **state}
 
     def admin_whatsapp_personal_session_state(self) -> None:
         """扫码绑定区（JSON）：桥可达性 + 会话状态 + 登录名（供渠道页轮询）。"""
