@@ -5605,7 +5605,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
 <div class='side-foot'><details class='account-menu'><summary aria-label='打开账号菜单'><span class='tenant-avatar' aria-hidden='true'>{esc((actor or 'U')[:1].upper())}</span><span class='account-label'>{esc(actor or '未登录')}<small>{esc(role_label)}</small></span>{svg_icon('menu')}</summary><div class='account-popover'><a href='/admin/preferences'>{svg_icon('sliders')}设置</a><a href='/logout'>{svg_icon('users')}退出登录</a></div></details><a href='/inquiry' target='_blank'>打开买方演示页 ↗</a></div>
 </aside>
 <div class='shell'>
-<header class='topbar'><button class='menu-btn' id='console-menu' aria-label='打开导航'>{svg_icon('menu')}</button><span class='crumb'>{crumb}</span><span class='grow'></span><button class='theme-toggle' id='themeToggle' type='button' title='切换浅色 / 深色（快捷键 D）' aria-label='切换主题'>{THEME_TOGGLE_SVG}</button><a href='{lang_target}'>{'English' if lang == 'zh' else '中文'}</a><a href='/logout'>退出登录</a></header>
+<header class='topbar'><button class='menu-btn' id='console-menu' aria-label='打开导航'>{svg_icon('menu')}</button><span class='crumb'>{crumb}</span><span class='grow'></span><button class='theme-toggle' id='themeToggle' type='button' title='切换浅色 / 深色（快捷键 D）' aria-label='切换主题'>{THEME_TOGGLE_SVG}</button><a href='{lang_target}'>{'English' if lang == 'zh' else '中文'}</a></header>
 <main>{body}</main>
 </div>
 </div>
