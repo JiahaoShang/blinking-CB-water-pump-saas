@@ -6053,6 +6053,15 @@ def _whatsapp_personal_self_ids() -> set:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
+def _whatsapp_personal_chat_from_message_id(message_id: str) -> str:
+    """从消息 ID 的 _serialized 形态解析会话 jid：`true_<chatJid>_<msgId>`。
+
+    真机实测：手机自己发出的消息（app 来源）`to` 可能为空——聊天对象只在消息 ID 里。
+    """
+    match = re.match(r"^(?:true|false)_(.+)_[^_]+$", str(message_id or ""))
+    return str(match.group(1)).strip() if match else ""
+
+
 def _whatsapp_personal_is_self_chat(from_jid: str, to_jid: str) -> bool:
     """是否"自聊"（发给自己）：to 指回自己。
 
@@ -6707,7 +6716,8 @@ def handle_whatsapp_personal_event(db: Database, ai, tenant_id: str, event: dict
     text = str(payload.get("body") or "").strip()
     from_me = bool(payload.get("fromMe"))
     if from_me:
-        if not _whatsapp_personal_is_self_chat(from_jid, to_jid):
+        chat_jid = to_jid or _whatsapp_personal_chat_from_message_id(message_id)
+        if not _whatsapp_personal_is_self_chat(from_jid, chat_jid):
             return {"action": "ignored_outgoing"}
         if _whatsapp_personal_was_sent(message_id, text):
             return {"action": "ignored_echo"}

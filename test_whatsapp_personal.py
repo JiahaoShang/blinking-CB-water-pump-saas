@@ -244,6 +244,21 @@ class WhatsAppPersonalTests(unittest.TestCase):
                     os.environ[key] = value
             mock_dify.stop()
 
+    def test_self_chat_empty_to_parsed_from_serialized(self):
+        """真机回归：app 发出的自聊消息 to 为空 → 用 _serialized 的 chatJid 判定自聊并放行。"""
+        os.environ["WHATSAPP_PERSONAL_SELF_IDS"] = "861700000999@c.us,999888777@lid"
+        try:
+            event = self._event("自测空to：流量 6 m³/h", "true_999888777@lid_3EB0ZZ1", from_jid="999888777@lid", to_jid="", from_me=True)
+            status, body = self._post(event)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["outcome"]["action"], "extracted")
+            # chatJid 指向别人（朋友）→ 仍应忽略
+            event2 = self._event("发给朋友的消息", "true_8617111000000@c.us_3EB0ZZ2", from_jid="999888777@lid", to_jid="", from_me=True)
+            status, body = self._post(event2)
+            self.assertEqual(json.loads(body)["outcome"]["action"], "ignored_outgoing")
+        finally:
+            os.environ.pop("WHATSAPP_PERSONAL_SELF_IDS", None)
+
     def test_duplicate_dedup(self):
         self._post(self._event("需求：流量 11 m³/h", "3EB0DUP1"))
         identity = self.db.get_channel_identity("demo-tenant", "whatsapp_personal", "861700000999@c.us")
