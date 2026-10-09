@@ -2,6 +2,28 @@
 import json
 import re
 
+CHANNEL_GUIDE_STYLE = '''<style>
+.channel-heading{display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:24px}
+.channel-heading h1{margin:0 0 8px}.channel-heading p,.channel-description p{margin:0;color:var(--text-2)}
+.channel-guide{color:var(--text-2);margin:0 0 24px}.channel-guide span{margin-left:16px}
+.channel-list{padding:8px 24px}.channel-row{display:flex;align-items:center;gap:20px;padding:24px 0}
+.channel-row+.channel-row{border-top:1px solid var(--border)}
+.channel-mark{width:40px;height:40px;border:1px solid var(--border);border-radius:10px;display:grid;place-items:center;font-weight:600}
+.channel-description{flex:1;min-width:0}.channel-description h2{font-size:16px;margin:0 0 6px;overflow-wrap:anywhere}
+.channel-description p,.channel-status,.channel-settings{font-size:13px}.channel-status{color:var(--text-2)}
+.channel-empty{text-align:center;padding:48px 16px}.channel-empty p{max-width:460px;margin:12px auto 24px;color:var(--text-2)}
+.channel-dialog{width:min(480px,calc(100vw - 40px));padding:28px;border:1px solid var(--border);border-radius:16px;background:var(--surface);color:var(--text-1)}
+.channel-dialog::backdrop{background:rgba(0,0,0,.45)}.channel-dialog label{display:block;margin-top:18px}
+.channel-actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:24px}.channel-extra{margin-top:24px}.channel-extra summary{cursor:pointer;padding:12px 0}
+.channel-steps{display:flex;gap:24px;list-style:none;padding:0;margin:24px 0;color:var(--text-2);font-size:14px}
+.channel-steps [aria-current=step]{color:var(--text-1);font-weight:600}.channel-focus{max-width:680px;margin-top:16px}
+.channel-focus h2{margin:0 0 12px}.channel-more{max-width:680px;margin-top:28px;color:var(--text-2)}
+.channel-more .card{margin-top:12px}.channel-more label{display:block;margin-top:14px}
+.channel-knowledge{padding:16px 0;margin:16px 0;border-top:1px solid var(--border)}
+.channel-focus[hidden]{display:none}.channel-dialog input[type=checkbox]{width:auto}
+@media(max-width:720px){.channel-heading{align-items:flex-start}.channel-guide span{display:block;margin:8px 0 0}.channel-row{flex-wrap:wrap;gap:12px}.channel-description{flex-basis:70%}.channel-status{flex-basis:100%;margin-left:52px}.channel-row .button{margin-left:52px}.channel-steps{gap:12px;font-size:12px}.channel-list{padding:8px 16px}}
+</style>'''
+
 
 class BusinessChannelUI:
     def business_object_authorized(self, path, method):
@@ -256,23 +278,50 @@ class BusinessChannelUI:
     def business_channels_page(self, query):
         from app import esc
         users = {u['id']: u for u in self.db.list_users(self.tenant_id)}
-        cards = []
+        rows = []
         for a in self.db.list_business_connections(self.tenant_id, self.user_id):
             config = json.loads(a['config_json'])
             platform = a['platform'] or ('WhatsApp' if a['channel'] != 'langbot' else 'Telegram')
             owner = users.get(a['owner_user_id'])
-            cards.append(f'''<section class="card"><h2>{esc(platform)} · {esc(a['label'] or config.get('display_name') or '企业业务账号')}</h2>
-                <p>负责人：{esc(owner['display_name'] if owner else '待管理员关联')} · 企业所有</p>
-                <p>AI 自动回复：{'已开启' if a['ai_enabled'] else '未开启' if not a['legacy'] else '原连接设置（待核对）'}</p>
-                <a class="button secondary" href="/admin/channels/accounts/{a['id']}">管理连接</a></section>''')
-        owner_options = ''.join(f'<option value="{u["id"]}">{esc(u["display_name"])}</option>' for u in users.values() if u['active'])
-        owner_field = f'<label>关联负责人<select name="owner_user_id">{owner_options}</select></label>' if self.user_role == 'admin' else ''
-        body = f'''<div class="toolbar"><div><h1>渠道账号</h1><p class="muted">连接企业业务账号，按账号独立接待；新连接默认关闭 AI 自动回复。</p></div></div>
-            <div class="grid">{''.join(cards) or '<p>还没有你可管理的连接。</p>'}</div>
-            <section class="card" style="margin-top:16px"><h2>添加业务账号</h2><form method="post" action="/admin/channels/accounts">
-            <label>平台<select name="platform"><option>WhatsApp</option><option>Telegram</option></select></label>
-            <label>账号名称<input name="label" required maxlength="100" placeholder="例如 张三业务号"></label>{owner_field}
-            <p><button>添加并连接</button></p></form></section>'''
+            connected = bool(config.get('bot_uuid')) and a['status'] == 'enabled'
+            status = 'AI 接待中' if connected and a['ai_enabled'] else '已连接 · 人工接待' if connected else '等待连接'
+            action = '查看会话' if connected and a['ai_enabled'] else '设置 AI 接待' if connected else '继续连接'
+            base = '/admin/channels/accounts/' + a['id']
+            href = '/admin/inbox/telegram' if connected and a['ai_enabled'] and self.has_module('inbox') else base
+            if href == base and connected and a['ai_enabled']:
+                action = '查看接待设置'
+            if a['channel'] == 'whatsapp_personal':
+                status, action = '正在检查连接…', '继续设置'
+            elif a['channel'] == 'whatsapp':
+                status, action = '需核对连接', '查看接入说明'
+            rows.append(f'''<article class="channel-row" data-account="{a['id']}">
+                <div class="channel-mark" aria-hidden="true">{esc(platform[:1])}</div>
+                <div class="channel-description"><h2>{esc(a['label'] or config.get('display_name') or '企业业务账号')}</h2>
+                <p>{esc(platform)} · {esc(owner['display_name'] if owner else '待分配负责人')}</p></div>
+                <span class="channel-status" data-channel-status>{status}</span>
+                <a class="button" data-channel-next href="{href}">{action}</a>
+                <a class="channel-settings" href="{base}">管理连接</a></article>''')
+        owner_options = ''.join(f'<option value="{u["id"]}"{" selected" if u["id"] == self.user_id else ""}>{esc(u["display_name"])}</option>' for u in users.values() if u['active'])
+        owner_field = f'<details class="channel-extra"><summary>分配给其他成员</summary><label>负责人<select name="owner_user_id">{owner_options}</select></label></details>' if self.user_role == 'admin' else ''
+        empty = '<div class="channel-empty"><h2>从连接第一个账号开始</h2><p>连接后，客户消息会进入收件箱。你可以先人工回复，准备好企业资料后再开启 AI。</p><button onclick="document.getElementById(\'add-account\').showModal()">连接第一个账号</button></div>'
+        add_button = '<button onclick="document.getElementById(\'add-account\').showModal()">添加账号</button>' if rows else ''
+        body = f'''{CHANNEL_GUIDE_STYLE}<div class="channel-heading"><div><h1>渠道账号</h1><p>把客户消息接进来，再决定是否让 AI 接待。</p></div>
+            {add_button}</div>
+            <p class="channel-guide">选择平台 → 连接账号 → 确认资料并开启 AI <span>也可以只用人工接待</span></p>
+            <section class="card channel-list">{''.join(rows) if rows else empty}</section>
+            <dialog id="add-account" class="channel-dialog"><h2>连接一个业务账号</h2><p>先选平台，下一步会告诉你如何连接。</p>
+            <form method="post" action="/admin/channels/accounts"><label>平台<select name="platform"><option>WhatsApp</option><option>Telegram</option></select></label>
+            <label>给账号起个名字<input name="label" required maxlength="100" placeholder="例如 海外销售一组"></label>
+            <p class="muted">方便团队识别，可以使用部门或负责人的名字。新账号默认关闭 AI。</p>{owner_field}
+            <div class="channel-actions"><button>下一步：连接账号</button><button type="button" class="secondary" onclick="document.getElementById('add-account').close()">取消</button></div></form></dialog>
+            <script>(function(){{document.querySelectorAll('[data-account]').forEach(async function(row){{var id=row.dataset.account;
+            var stateUrl='/admin/channels/accounts/'+id+'/state';
+            if(!row.querySelector('[data-channel-status]').textContent.includes('正在检查'))return;
+            try{{var r=await fetch(stateUrl);var d=await r.json();var status=row.querySelector('[data-channel-status]');var next=row.querySelector('[data-channel-next]');
+            if(!d.ok){{status.textContent='连接待检查';next.textContent='检查连接';return;}}
+            if(d.status==='WORKING'){{status.textContent=d.ai_enabled?'AI 接待中':'已连接 · 人工接待';next.textContent=d.ai_enabled?'查看接待设置':'设置 AI 接待';}}
+            else{{status.textContent=d.status==='SCAN_QR_CODE'?'等待手机扫码':d.status==='STARTING'?'连接准备中':'等待连接';next.textContent='继续连接';}}
+            }}catch(e){{row.querySelector('[data-channel-status]').textContent='连接待检查';}}}});}})();</script>'''
         self.send_html(self.console_page('渠道账号', body, 'channels'))
 
     def business_account_page(self, a, query):
@@ -280,41 +329,55 @@ class BusinessChannelUI:
         config = json.loads(a['config_json'])
         base = '/admin/channels/accounts/' + a['id']
         title = a['label'] or config.get('display_name') or '企业业务账号'
-        notice = '<div class="notice">操作已保存。</div>' if query.get('notice') == ['saved'] else ''
+        connected = bool(config.get('bot_uuid')) and a['status'] == 'enabled'
+        notice = '<div class="notice">设置已保存。</div>' if query.get('notice') == ['saved'] else ''
         if a['channel'] == 'whatsapp_personal':
-            connection = f'''<p id="connection-state">正在检查账号连接…</p><img id="connection-qr" alt="手机扫码连接业务账号" style="display:none;max-width:260px">
-                <form method="post" action="{base}/start"><button>连接或重新连接账号</button></form>
-                <p class="muted">打开 WhatsApp → 已连接的设备 → 连接设备，扫描二维码。</p>
-                <script>(function(){{var timer,qrUrl;async function poll(){{try{{var r=await fetch('{base}/state');var d=await r.json();var state=document.getElementById('connection-state');
-                state.textContent=d.ok?(d.status==='WORKING'?'已连接 · '+(d.name||'业务账号'):d.status==='SCAN_QR_CODE'?'等待手机扫码':'账号尚未连接'):'连接暂不可用，请稍后重试';
-                var img=document.getElementById('connection-qr');img.style.display=d.status==='SCAN_QR_CODE'?'':'none';
-                if(d.status==='SCAN_QR_CODE'){{var q=await fetch('{base}/qr');if(q.ok){{var next=URL.createObjectURL(await q.blob());img.src=next;if(qrUrl)URL.revokeObjectURL(qrUrl);qrUrl=next;}}}}
-                }}catch(e){{document.getElementById('connection-state').textContent='连接暂不可用，请稍后重试';}}timer=setTimeout(poll,5000);}}poll();window.addEventListener('pagehide',function(){{clearTimeout(timer);if(qrUrl)URL.revokeObjectURL(qrUrl);}});}})();</script>'''
+            connection = f'''<p id="connection-state" role="status">正在检查连接…</p><div id="connection-help"><p>点击下方按钮，然后用手机上的 WhatsApp 扫码。</p>
+                <p class="muted">WhatsApp → 设置 → 已连接的设备 → 连接设备</p>
+                <form method="post" action="{base}/start"><button>开始连接</button></form></div>
+                <img id="connection-qr" alt="手机扫码连接业务账号" style="display:none;max-width:260px">
+                <script>(function(){{var timer,qrUrl;async function poll(){{try{{var r=await fetch('{base}/state');var d=await r.json();var working=d.ok&&d.status==='WORKING';
+                document.getElementById('connection-state').textContent=working?'已连接 · '+(d.name||'业务账号'):!d.ok?'连接暂不可用，请稍后重试':d.status==='SCAN_QR_CODE'?'用手机扫描下方二维码':d.status==='STARTING'?'正在准备连接，请稍候…':'尚未连接';
+                document.getElementById('connection-help').hidden=working;
+                document.getElementById('ai-reception').hidden=!working;
+                document.getElementById('step-connect').setAttribute('aria-current',working?'false':'step');
+                document.getElementById('step-knowledge').setAttribute('aria-current',working&&!d.ai_enabled?'step':'false');
+                document.getElementById('step-ai').setAttribute('aria-current',working&&d.ai_enabled?'step':'false');
+                var img=document.getElementById('connection-qr');img.style.display=d.ok&&d.status==='SCAN_QR_CODE'?'':'none';
+                if(d.ok&&d.status==='SCAN_QR_CODE'){{var q=await fetch('{base}/qr');if(q.ok){{var next=URL.createObjectURL(await q.blob());img.src=next;if(qrUrl)URL.revokeObjectURL(qrUrl);qrUrl=next;}}}}
+                }}catch(e){{document.getElementById('connection-state').textContent='连接暂不可用，请稍后重试';document.getElementById('ai-reception').hidden=true;}}
+                timer=setTimeout(poll,5000);}}poll();window.addEventListener('pagehide',function(){{clearTimeout(timer);if(qrUrl)URL.revokeObjectURL(qrUrl);}});}})();</script>'''
         elif a['channel'] == 'langbot':
-            connection = f'''<p>{'已完成授权 · ' + esc(config.get('account_name', '企业机器人')) if config.get('bot_uuid') else '尚未连接'}</p>
-                <p class="muted">Telegram 使用企业机器人接待。先在 Telegram 的 BotFather 创建机器人，再填入其授权令牌。</p>
-                <form method="post" action="{base}/connect"><label>机器人授权令牌<input type="password" name="credential" required autocomplete="off"></label>
-                <p><button>授权连接</button></p></form>'''
+            connection = '<p>已连接 · ' + esc(config.get('account_name', '企业机器人')) + '</p>' if connected else f'''<p>Telegram 通过企业机器人接待客户。</p>
+                <ol><li>在 Telegram 中打开 <a href="https://t.me/BotFather" target="_blank" rel="noopener">BotFather</a>，发送 /newbot 创建机器人。</li><li>复制它给你的授权令牌，粘贴到下方。</li></ol>
+                <form method="post" action="{base}/connect"><label>机器人授权令牌<input type="password" name="credential" required autocomplete="off" placeholder="粘贴 BotFather 提供的令牌"></label>
+                <p><button>连接机器人</button></p></form>'''
         else:
-            connection = '<p>官方业务账号的开通条件仍需满足，当前连接方式暂未提供自助授权。</p>'
+            connection = '<p>此账号暂不支持自助连接，请联系平台运营方完成接入。</p>'
         grants = ''
         if self.user_role == 'admin':
             users = [u for u in self.db.list_users(self.tenant_id) if u['active']]
             options = ''.join(f'<option value="{u["id"]}">{esc(u["display_name"])}</option>' for u in users)
-            grants = f'''<section class="card" style="margin-top:16px"><h2>成员授权</h2>
-                <form method="post" action="{base}/owner"><label>关联负责人<select name="owner_user_id">{options}</select></label><p><button>保存负责人</button></p></form>
+            owners = ''.join(f'<option value="{u["id"]}"{" selected" if u["id"] == a["owner_user_id"] else ""}>{esc(u["display_name"])}</option>' for u in users)
+            grants = f'''<details><summary>团队权限</summary><div class="card">
+                <form method="post" action="{base}/owner"><label>负责人<select name="owner_user_id">{owners}</select></label><p><button>保存负责人</button></p></form>
                 <form method="post" action="{base}/grant"><label>协作成员<select name="user_id">{options}</select></label>
-                <select name="grant"><option value="1">授予账号使用权限</option><option value="0">撤销账号使用权限</option></select><p><button>保存授权</button></p></form>
-                <p class="muted">账号授权不会自动开放功能模块，请在成员管理中分配所需模块权限。</p></section>'''
-        ai_action = f'<form method="post" action="{base}/ai"><input type="hidden" name="enabled" value="0"><button class="secondary">暂停 AI 自动回复</button></form>' if a['ai_enabled'] else f'<button type="button" onclick="document.getElementById(\'ai-confirm\').showModal()">开启 AI 自动问答</button>'
-        body = f'''<p><a href="/admin/channels">← 返回渠道账号</a></p>{notice}<section class="card"><h1>{esc(title)}</h1><p>企业业务账号 · 企业所有</p>{connection}</section>
-            <section class="card" style="margin-top:16px"><h2>AI 自动接待</h2><p>暂停 AI 后消息仍进入收件箱，可人工回复。</p>{ai_action}
-            <dialog id="ai-confirm"><h2>开启前请确认企业资料</h2><p>AI 仅使用已核准、获准对外问答的企业知识。请核对资料内容、版本和授权范围。</p>
-            <p><a href="/admin/knowledge" target="_blank" rel="noopener">查看企业知识</a></p><form method="post" action="{base}/ai"><input type="hidden" name="enabled" value="1">
-            <label><input type="checkbox" name="confirmed" value="1" required>我已确认用于对外问答的企业资料</label><p><button>确认并开启</button>
-            <button type="button" class="secondary" onclick="document.getElementById('ai-confirm').close()">取消</button></p></form></dialog></section>
-            {grants}<section class="card" style="margin-top:16px"><h2>断开连接</h2><p>仅影响本账号，历史按访问权限保留。</p>
-            <form method="post" action="{base}/disconnect" onsubmit="return confirm('确认断开此业务账号？AI 将同时关闭。')"><button class="warn">断开账号连接</button></form></section>'''
+                <label>账号权限<select name="grant"><option value="1">授予账号使用权限</option><option value="0">撤销账号使用权限</option></select></label><p><button>保存授权</button></p></form>
+                <p class="muted">成员还需获得相应功能模块权限。</p></div></details>'''
+        inbox = '<a class="button secondary" href="/admin/inbox/' + ('whatsapp_personal' if a['channel'] == 'whatsapp_personal' else 'telegram' if a['channel'] == 'langbot' else 'whatsapp') + '">查看收件箱</a>' if self.has_module('inbox') else ''
+        ai_action = f'<form method="post" action="{base}/ai"><input type="hidden" name="enabled" value="0"><button class="secondary">暂停 AI 接待</button></form>' if a['ai_enabled'] else '<button type="button" onclick="document.getElementById(\'ai-confirm\').showModal()">开启 AI 自动问答</button>'
+        body = f'''{CHANNEL_GUIDE_STYLE}<p><a href="/admin/channels">← 返回渠道账号</a></p>{notice}<div class="channel-heading"><div><h1>{esc(title)}</h1><p>{esc(a['platform'] or '业务渠道')} · 企业业务账号</p></div></div>
+            <ol class="channel-steps" aria-label="账号接入步骤"><li id="step-connect" aria-current="{'false' if connected else 'step'}">1 连接账号</li><li id="step-knowledge" aria-current="{'step' if connected and not a['ai_enabled'] else 'false'}">2 确认企业资料</li><li id="step-ai" aria-current="{'step' if connected and a['ai_enabled'] else 'false'}">3 开启 AI 接待</li></ol>
+            <section class="card channel-focus"><h2>连接账号</h2>{connection}</section>
+            <section id="ai-reception" class="card channel-focus" {'' if connected else 'hidden'}><h2>{'AI 接待已开启' if a['ai_enabled'] else '连接完成，接下来选择接待方式'}</h2>
+            <p>{'客户消息将由 AI 自动回复，你也可以在收件箱查看和接手。' if a['ai_enabled'] else '现在可以先人工回复。准备好资料后，再开启 AI 自动接待。'}</p>
+            <div class="channel-knowledge"><a href="/admin/knowledge" target="_blank" rel="noopener">查看用于问答的企业资料 ↗</a><p class="muted">AI 只使用已核准、获准对外问答的知识。请先检查内容和版本。</p></div>
+            <div class="channel-actions">{ai_action}{inbox}</div>
+            <dialog id="ai-confirm" class="channel-dialog"><h2>开启前请确认企业资料</h2><p>开启后，AI 将自动回复这个账号收到的客户消息。</p><p><a href="/admin/knowledge" target="_blank" rel="noopener">查看企业知识</a></p>
+            <form method="post" action="{base}/ai"><input type="hidden" name="enabled" value="1"><label><input type="checkbox" name="confirmed" value="1" required> 我已确认用于对外问答的企业资料及授权范围</label>
+            <div class="channel-actions"><button>确认并开启</button><button type="button" class="secondary" onclick="document.getElementById('ai-confirm').close()">取消</button></div></form></dialog></section>
+            <details class="channel-more"><summary>更多设置</summary>{grants}<details><summary>断开账号</summary><div class="card"><p>断开后停止收发消息和 AI 接待。已有业务历史保留。</p>
+            <form method="post" action="{base}/disconnect" onsubmit="return confirm('确认断开此业务账号？AI 将同时关闭。')"><button class="warn">断开账号连接</button></form></div></details></details>'''
         self.send_html(self.console_page(title, body, 'channels'))
 
     def business_transfer_page(self, query):
