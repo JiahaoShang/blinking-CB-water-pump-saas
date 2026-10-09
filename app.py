@@ -11012,12 +11012,20 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
         access_clause, access_args = self.db.conversation_scope(self.tenant_id, self.user_id)
         source_where += ' AND ' + access_clause
         params = (*params, *access_args)
+        from inbox_search import search, highlight, snippet
+        keyword = query.get('q', [''])[0].strip()[:200]
+        hits = search(self.db, self.tenant_id, source_where, params, keyword) if keyword else {}
+        if keyword:
+            ids = list(hits)
+            source_where += ' AND c.id IN (' + ','.join('?' for _ in ids) + ')' if ids else ' AND 0'
+            params = (*params, *ids)
         rows = self.db.conn.execute(
             f"""SELECT c.*,
                 (SELECT COUNT(*) FROM messages m WHERE m.tenant_id=c.tenant_id AND m.conversation_id=c.id) AS message_count,
                 (SELECT m.content FROM messages m WHERE m.conversation_id=c.id ORDER BY m.rowid DESC LIMIT 1) AS last_content,
                 (SELECT r.contact_email FROM rfqs r WHERE r.tenant_id=c.tenant_id AND r.conversation_id=c.id AND r.contact_email<>'' ORDER BY r.created_at DESC LIMIT 1) AS rfq_email,
                 (SELECT l.contact_email FROM leads l WHERE l.tenant_id=c.tenant_id AND l.conversation_id=c.id AND l.contact_email<>'' ORDER BY l.created_at DESC LIMIT 1) AS lead_email,
+                COALESCE((SELECT NULLIF(l.contact_name,'') FROM leads l WHERE l.tenant_id=c.tenant_id AND l.conversation_id=c.id AND l.contact_name<>'' ORDER BY l.created_at DESC LIMIT 1), (SELECT r.contact_name FROM rfqs r WHERE r.tenant_id=c.tenant_id AND r.conversation_id=c.id AND r.contact_name<>'' ORDER BY r.created_at DESC LIMIT 1)) AS customer_name,
                 (SELECT i.display_name FROM channel_identities i WHERE i.tenant_id=c.tenant_id AND i.conversation_id=c.id LIMIT 1) AS ext_name,
                 (SELECT i.external_user_id FROM channel_identities i WHERE i.tenant_id=c.tenant_id AND i.conversation_id=c.id LIMIT 1) AS ext_id,
                 (SELECT COUNT(*) FROM messages m WHERE m.tenant_id=c.tenant_id AND m.conversation_id=c.id AND m.delivery_status='failed') AS failed_count
@@ -11025,10 +11033,12 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
             ORDER BY c.updated_at DESC, c.id DESC LIMIT 50""",
             (self.tenant_id, *params),
         ).fetchall()
+        if keyword:
+            rows = sorted(rows, key=lambda row: list(hits).index(row['id']))
         items = []
         for row in rows:
             if section["kind"] == "web":
-                title = f"网站访客 · {row['id'][:6]}"
+                title = row["customer_name"] if keyword and row["customer_name"] else f"网站访客 · {row['id'][:6]}"
             else:
                 title = row["ext_name"] or row["ext_id"] or f"平台访客 · {row['id'][:6]}"
             contact = row["rfq_email"] or row["lead_email"] or ""
@@ -11042,10 +11052,22 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
             if row["stop_proactive_contact"]:
                 meta_parts.append("<span class='badge withdrawn'>停止主动联系</span>")
             preview = (row["last_content"] or "（暂无消息）").strip().splitlines()[0][:60]
+            result_extra = ''
+            target = f"/admin/inbox/{slug}/{row['id']}"
+            if keyword:
+                target += '?q=' + quote(keyword, safe='')
+                hit = hits[row['id']]
+                if hit['hit_id']:
+                    target += '#message-' + hit['hit_id']
+                    result_extra = f"<small>匹配消息 · {esc((hit['hit_time'] or '')[:16].replace('T',' '))}：{highlight(snippet(hit['hit_content'],keyword),keyword)}</small>"
+                    if hit['hit_count'] > 1:
+                        result_extra += f"<small><a href='{esc(target)}'>查看此会话中的其他结果（共 {hit['hit_count']} 条）</a></small>"
+                account = self.db.get_business_connection(self.tenant_id, row['channel_account_id']) if row['channel_account_id'] else None
+                result_extra += f"<small>所属连接：{esc(account['label'] if account else label)}</small>"
             items.append(
-                f"<div class='simple-item'><div><strong>{esc(title)}</strong>"
-                f"<small>最后一条：{esc(preview)}</small><small>{' · '.join(meta_parts)}</small></div>"
-                f"<div class='actions'><a class='button secondary' href='/admin/inbox/{slug}/{esc(row['id'])}'>查看会话</a></div></div>"
+                f"<div class='simple-item'><div><strong>{highlight(title,keyword)}</strong>"
+                f"<small>最后一条：{esc(preview)}</small>{result_extra}<small>{' · '.join(meta_parts)}</small></div>"
+                f"<div class='actions'><a class='button secondary' href='{esc(target)}'>查看会话</a></div></div>"
             )
         if section["kind"] == "web":
             empty = "还没有网站聊天会话；买方在官网窗口发起咨询后，会在这里统一查看与回复。"
@@ -11063,13 +11085,16 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
             empty = "暂时没有会话。"
         else:
             empty = f"{label} 还没有消息；请在渠道账号中完成连接。"
+        if keyword:
+            empty = "当前渠道的授权范围内没有匹配结果，请更换关键词。"
         list_html = "".join(items) or f"<div class='muted-block'>{esc(empty)}</div>"
         bridge_badge = ""
         if bridge is not None and bridge.get("ok"):
             bridge_badge = f"<div class='field-state'><span class='badge approved'>已连接 · {esc(bridge.get('me_name') or '本机账号')}</span></div>"
         body = f"""
 <div class='toolbar'><div><h1>{esc(label)}</h1>{bridge_badge}<div class='muted'>会话收件箱 · 按来源平台分开；消息按来源平台和业务账号归档，只显示你的授权范围。</div></div></div>
-<section class='card'><div class='panel-title'><h2>最近会话</h2><span class='muted'>按最后活动倒序 · 最多 50 条</span></div>
+<form method='get' action='/admin/inbox/{slug}' class='toolbar' role='search'><label for='inbox-search' class='muted'>搜索当前渠道</label><input id='inbox-search' name='q' type='search' maxlength='200' value='{esc(keyword)}' placeholder='搜索客户、账号或聊天内容' style='flex:1;min-width:180px'><button>搜索</button>{("<a class='button secondary' href='/admin/inbox/"+slug+"'>清空搜索</a>") if keyword else ''}</form>
+<section class='card'><div class='panel-title'><h2>{'搜索结果' if keyword else '最近会话'}</h2><span class='muted'>{'按最近匹配时间倒序' if keyword else '按最后活动倒序'} · 最多 50 个会话</span></div>
 <div class='simple-list'>{list_html}</div></section>"""
         self.send_html(self.console_page(f"{label} · 会话", body, f"inbox_{slug}"))
 
@@ -11087,7 +11112,7 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
             if not (bridge.get("ok") and bridge.get("status") == "WORKING"):
                 reason = str(bridge.get("error") or "").strip() or f"当前状态：{bridge.get('status_label') or '未连接'}"
                 gate_body = f"""
-<div class='toolbar'><div><a class='button secondary' href='/admin/inbox/{slug}'>← 返回{esc(label)}列表</a></div></div>
+<div class='toolbar'><div><a class='button secondary' href='/admin/inbox/{slug}{('?q='+esc(quote(query.get('q',[''])[0][:200],safe=''))) if query.get('q',[''])[0] else ''}'>← 返回{esc(label)}列表</a></div></div>
 <section class='card'><div class='panel-title'><h2>账号未连接</h2><span class='badge pending_review'>未连接</span></div>
 <p class='muted'>{esc(reason)}。未连接期间不显示历史聊天记录；完成手机扫码绑定后可继续查看此会话。</p>
 <p><a class='button' href='/admin/channels'>去「渠道接入」扫码绑定</a></p></section>"""
@@ -11114,6 +11139,11 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
         }
         notice = notices.get(query.get("notice", [""])[0], "")
         messages = self.db.list_messages(self.tenant_id, conversation_id)
+        from inbox_search import highlight
+        keyword = query.get('q', [''])[0].strip()[:200]
+        matched = [m for m in messages if keyword and keyword.lower() in m['content'].lower()]
+        search_links = ''.join(f"<a href='#message-{esc(m['id'])}'>第 {i+1} 条</a> " for i,m in enumerate(matched))
+        search_notice = (f"<div class='notice'>搜索「{esc(keyword)}」：{len(matched)} 条匹配消息。<details><summary>查看匹配消息</summary><div style='max-height:160px;overflow:auto'>{search_links}</div></details></div>" if keyword else '')
         message_rows = []
         for message in messages:
             who, body_text, css = self._inbox_message_view(message)
@@ -11136,7 +11166,7 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
                     )
             side = {"buyer": "left", "system": "center"}.get(css, "right")
             message_rows.append(
-                f"<div class='chat-msg {side} {css}'><div class='chat-bubble'>{esc(body_text)}</div>"
+                f"<div id='message-{esc(message['id'])}' class='chat-msg {side} {css}'><div class='chat-bubble'>{highlight(body_text,keyword)}</div>"
                 f"<div class='chat-meta'><span class='who'>{esc(who)}</span><span class='when'>{when}</span>{delivery_html}</div></div>"
             )
         transcript = "".join(message_rows) or "<div class='muted-block'>这个会话还没有消息。</div>"
@@ -11198,7 +11228,7 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
         if not send_allowed:
             hint = '原账号的连接和发送权限保持独立。'
         body = f"""
-<div class='toolbar'><div><a class='button secondary' href='/admin/inbox/{slug}'>← 返回{esc(label)}列表</a></div><div class='actions'>{stop_badge}</div></div>
+<div class='toolbar'><div><a class='button secondary' href='/admin/inbox/{slug}{('?q='+esc(quote(query.get('q',[''])[0][:200],safe=''))) if query.get('q',[''])[0] else ''}'>← 返回{esc(label)}列表</a></div><div class='actions'>{stop_badge}</div></div>
 {notice}
 <section class='card chat-shell'>
 <header class='chat-head'>
@@ -11207,7 +11237,10 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
 <div class='chat-tools'>{ai_switch}</div>
 </header>
 {chips_row}
+{search_notice}
+<style>.chat-msg:target{{outline:2px solid var(--accent);border-radius:10px;scroll-margin-top:90px}}mark{{background:#ffe899;color:#222}}</style>
 <div class='chat-log'>{transcript}</div>
+<script>if(location.hash.startsWith('#message-')){{var hit=document.getElementById(location.hash.slice(1));if(hit)hit.scrollIntoView({{block:'center'}});}}</script>
 {composer}
 <div class='chat-foot'>{rfq_pill_html}<span class='chat-hint'>{hint}</span></div>
 </section>"""
