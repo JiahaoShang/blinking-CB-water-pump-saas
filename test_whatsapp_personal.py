@@ -11,10 +11,12 @@ import hmac
 import json
 import os
 import sys
+import http.client
 import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -61,6 +63,31 @@ class _MockDify:
         self._server.server_close()
 
 
+def _http(server, method, path, fields=None, cookie=None):
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
+    headers = {}
+    body = None
+    if fields is not None:
+        body = urllib.parse.urlencode(fields)
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    if cookie:
+        headers["Cookie"] = cookie
+    conn.request(method, path, body=body, headers=headers)
+    response = conn.getresponse()
+    raw = response.read()
+    headers_out = dict(response.getheaders())
+    status = response.status
+    conn.close()
+    return status, headers_out, raw
+
+
+def _login(server, email, password):
+    status, headers, _ = _http(server, "POST", "/login", {"email": email, "password": password})
+    if status not in (302, 303) or "Set-Cookie" not in headers:
+        raise AssertionError(f"登录失败: {email} -> {status}")
+    return headers["Set-Cookie"].split(";", 1)[0]
+
+
 TOKEN = "personal-token-0123456789abcdef"
 API_KEY = "waha-test-api-key"
 HMAC_KEY = "waha-test-hmac-key"
@@ -99,6 +126,7 @@ class WhatsAppPersonalTests(unittest.TestCase):
         })
         cls.db.save_channel_account("demo-tenant", "whatsapp_personal", {"display_name": "个人版"}, "demo-admin@example.invalid")
         cls.db.set_channel_enabled("demo-tenant", "whatsapp_personal", True, "demo-admin@example.invalid")
+        cls.admin_cookie = _login(cls.server, "demo-admin@example.invalid", "demo-admin")
 
     @classmethod
     def tearDownClass(cls):
@@ -258,6 +286,73 @@ class WhatsAppPersonalTests(unittest.TestCase):
             self.assertEqual(json.loads(body)["outcome"]["action"], "ignored_outgoing")
         finally:
             os.environ.pop("WHATSAPP_PERSONAL_SELF_IDS", None)
+
+    def test_bind_area_rendered_on_channels_page(self):
+        """渠道页「WhatsApp（个人版）」卡片渲染扫码绑定区（容器 + 脚本接线）。"""
+        status, _, raw = _http(self.server, "GET", "/admin/channels", cookie=self.admin_cookie)
+        self.assertEqual(status, 200)
+        page = raw.decode("utf-8")
+        self.assertIn("waha-bind", page)
+        self.assertIn("waha-qr", page)
+        self.assertIn("waha-start", page)
+        self.assertIn("/admin/channels/whatsapp-personal/session.json", page)
+        self.assertIn("/admin/channels/whatsapp-personal/qr.png", page)
+
+    def test_bind_session_state_and_qr_endpoints(self):
+        """扫码绑定区：状态 JSON（含登录名）/二维码图片；非扫码态 409；未登录重定向。"""
+        status, headers, _ = _http(self.server, "GET", "/admin/channels/whatsapp-personal/session.json")
+        self.assertIn(status, (302, 303))  # 未登录 → 登录页，不泄露内容
+
+        self.mock.set_status("WORKING")
+        status, headers, raw = _http(self.server, "GET", "/admin/channels/whatsapp-personal/session.json", cookie=self.admin_cookie)
+        self.assertEqual(status, 200)
+        data = json.loads(raw)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["status"], "WORKING")
+        self.assertEqual(data["status_label"], "已连接")
+        self.assertEqual(data["me_name"], "MockUser")
+
+        # 已连接 → 二维码接口 409（不触碰 WAHA 会挂起的路径）
+        status, headers, raw = _http(self.server, "GET", "/admin/channels/whatsapp-personal/qr.png", cookie=self.admin_cookie)
+        self.assertEqual(status, 409)
+        self.assertFalse(json.loads(raw)["ok"])
+
+        # 扫码态 → 返回真实 PNG 字节
+        self.mock.set_status("SCAN_QR_CODE")
+        status, headers, raw = _http(self.server, "GET", "/admin/channels/whatsapp-personal/qr.png", cookie=self.admin_cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Type"), "image/png")
+        self.assertTrue(raw.startswith(b"\x89PNG"))
+        status, headers, raw = _http(self.server, "GET", "/admin/channels/whatsapp-personal/session.json", cookie=self.admin_cookie)
+        self.assertEqual(json.loads(raw)["status"], "SCAN_QR_CODE")
+
+    def test_bind_start_session_button(self):
+        """「启动会话并取码」：POST 启动 → mock 收到 start → 状态回到扫码态。"""
+        self.mock.set_status("STOPPED")
+        before = self.mock.start_calls
+        status, headers, raw = _http(self.server, "POST", "/admin/channels/whatsapp-personal/session/start", fields={}, cookie=self.admin_cookie)
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(raw)["ok"])
+        self.assertEqual(self.mock.start_calls, before + 1)
+        self.assertEqual(self.mock.status, "SCAN_QR_CODE")
+
+    def test_bind_bridge_down_is_reported_not_crashed(self):
+        """桥不可达：状态 JSON → ok=false（HTTP 200）；二维码 → 502；均不抛栈。"""
+        saved = os.environ.get("WHATSAPP_PERSONAL_BASE")
+        os.environ["WHATSAPP_PERSONAL_BASE"] = "http://127.0.0.1:9"
+        try:
+            status, headers, raw = _http(self.server, "GET", "/admin/channels/whatsapp-personal/session.json", cookie=self.admin_cookie)
+            self.assertEqual(status, 200)
+            data = json.loads(raw)
+            self.assertFalse(data["ok"])
+            self.assertIn("桥", data["error"])
+            status, headers, raw = _http(self.server, "GET", "/admin/channels/whatsapp-personal/qr.png", cookie=self.admin_cookie)
+            self.assertEqual(status, 502)
+        finally:
+            if saved is None:
+                os.environ.pop("WHATSAPP_PERSONAL_BASE", None)
+            else:
+                os.environ["WHATSAPP_PERSONAL_BASE"] = saved
 
     def test_duplicate_dedup(self):
         self._post(self._event("需求：流量 11 m³/h", "3EB0DUP1"))

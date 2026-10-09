@@ -5180,6 +5180,131 @@ CONSOLE_DOCK_JS = """
 })();
 """
 
+WHATSAPP_PERSONAL_BIND_JS = """
+(function () {
+  var box = document.getElementById('waha-bind');
+  if (!box) { return; }
+  var statusLine = document.getElementById('waha-status-line');
+  var qrWrap = document.getElementById('waha-qr-wrap');
+  var qrImg = document.getElementById('waha-qr');
+  var qrHint = document.getElementById('waha-qr-hint');
+  var actions = document.getElementById('waha-actions');
+  var startBtn = document.getElementById('waha-start');
+  if (!statusLine || !qrWrap || !qrImg || !qrHint || !actions || !startBtn) { return; }
+  var pollTimer = null;
+  var qrTimer = null;
+  var qrObjectUrl = null;
+
+  function setLine(text) { statusLine.textContent = text; }
+
+  function schedule(nextMs) {
+    if (pollTimer) { clearTimeout(pollTimer); }
+    pollTimer = setTimeout(poll, nextMs);
+  }
+
+  function stopQr() {
+    if (qrTimer) { clearInterval(qrTimer); qrTimer = null; }
+    qrWrap.style.display = 'none';
+  }
+
+  function refreshQr() {
+    fetch('/admin/channels/whatsapp-personal/qr.png?ts=' + Date.now(), {cache: 'no-store'})
+      .then(function (resp) {
+        var type = resp.headers.get('content-type') || '';
+        if (resp.ok && type.indexOf('image/') === 0) { return resp.blob(); }
+        return resp.json().then(function (data) { throw data; });
+      })
+      .then(function (blob) {
+        if (qrObjectUrl) { URL.revokeObjectURL(qrObjectUrl); }
+        qrObjectUrl = URL.createObjectURL(blob);
+        qrImg.src = qrObjectUrl;
+        qrWrap.style.display = '';
+        var now = new Date();
+        var hh = ('0' + now.getHours()).slice(-2);
+        var mm = ('0' + now.getMinutes()).slice(-2);
+        var ss = ('0' + now.getSeconds()).slice(-2);
+        qrHint.textContent = '二维码每 15 秒自动刷新（最近刷新 ' + hh + ':' + mm + ':' + ss + '）。打开手机 WhatsApp → 设置 → 已连接的设备 → 连接设备，扫此码。';
+      })
+      .catch(function (data) {
+        stopQr();
+        setLine('二维码暂不可用：' + ((data && (data.error || data.message)) || '桥服务未就绪') + '。');
+      });
+  }
+
+  function startQrLoop() {
+    if (qrTimer) { return; }
+    refreshQr();
+    qrTimer = setInterval(refreshQr, 15000);
+  }
+
+  function poll() {
+    fetch('/admin/channels/whatsapp-personal/session.json?ts=' + Date.now(), {cache: 'no-store'})
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
+        if (!data.ok) {
+          stopQr();
+          setLine('桥服务不可达：' + (data.error || '未知原因') + '。请确认本机 WAHA 已启动，或点下方按钮重试。');
+          actions.style.display = '';
+          schedule(30000);
+          return;
+        }
+        if (data.status === 'WORKING') {
+          stopQr();
+          setLine('已连接 · ' + (data.me_name || '本机账号') + '（该号码正在自动回复；断开需在手机端「已连接的设备」操作）。');
+          actions.style.display = 'none';
+          schedule(15000);
+          return;
+        }
+        if (data.status === 'SCAN_QR_CODE') {
+          setLine('等待扫码：请用手机 WhatsApp 扫描下方二维码完成绑定。');
+          actions.style.display = 'none';
+          startQrLoop();
+          schedule(3000);
+          return;
+        }
+        stopQr();
+        if (data.status === 'STOPPED' || data.status === 'FAILED' || data.status === 'UNKNOWN') {
+          setLine('会话未启动（' + (data.status_label || data.status) + '）。点下方按钮启动并获取二维码。');
+          actions.style.display = '';
+        } else {
+          setLine('会话状态：' + (data.status_label || data.status) + '…');
+          actions.style.display = 'none';
+        }
+        schedule(3000);
+      })
+      .catch(function () {
+        stopQr();
+        setLine('状态获取失败（网络错误），稍后自动重试…');
+        schedule(15000);
+      });
+  }
+
+  startBtn.addEventListener('click', function () {
+    startBtn.disabled = true;
+    var original = startBtn.textContent;
+    startBtn.textContent = '正在启动…';
+    fetch('/admin/channels/whatsapp-personal/session/start', {method: 'POST'})
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
+        startBtn.disabled = false;
+        startBtn.textContent = original;
+        if (!data.ok) { setLine('启动失败：' + (data.error || '未知原因')); }
+        poll();
+      })
+      .catch(function () {
+        startBtn.disabled = false;
+        startBtn.textContent = original;
+        setLine('启动请求失败（网络错误），请稍后重试。');
+      });
+  });
+
+  poll();
+})();
+"""
+
+
+
+
 
 THEME_TOGGLE_SVG = (
     "<svg class='tt-sun' viewBox='0 0 24 24' aria-hidden='true'><circle cx='12' cy='12' r='4'/><path d='M12 2v2'/><path d='M12 20v2'/>"
@@ -6152,6 +6277,142 @@ def _whatsapp_personal_was_sent(message_id: str, text: str) -> bool:
         return (bool(message_id) and message_id in _WHATSAPP_PERSONAL_SENT_IDS) or (bool(text) and text in _WHATSAPP_PERSONAL_SENT_TEXTS)
 
 
+def _whatsapp_personal_session(config: dict) -> str:
+    """WAHA 会话名：渠道配置优先，其次环境变量，最后 default。"""
+    return str(config.get("session") or os.environ.get("WHATSAPP_PERSONAL_SESSION") or "default").strip() or "default"
+
+
+def _whatsapp_personal_bridge(config: dict) -> tuple[str, str, str]:
+    """桥接三元组（base, api_key, session）——发送与扫码绑定区共用。"""
+    base = str(channel_api_base("whatsapp_personal", config) or "").rstrip("/")
+    api_key = os.environ.get("WHATSAPP_PERSONAL_API_KEY", "").strip()
+    return base, api_key, _whatsapp_personal_session(config)
+
+
+def whatsapp_personal_session_state(config: dict, timeout: int = 6) -> dict:
+    """查询 WAHA 会话状态（渠道页「扫码绑定」区用）。桥不可达/异常 → ChannelSendError。"""
+    base, api_key, session = _whatsapp_personal_bridge(config)
+    if not api_key:
+        raise ChannelSendError("缺少环境变量 WHATSAPP_PERSONAL_API_KEY")
+    if not base:
+        raise ChannelSendError("桥接地址未配置")
+    request = urllib_request.Request(
+        f"{base}/api/sessions/{quote(session, safe='')}",
+        headers={"X-Api-Key": api_key},
+        method="GET",
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as error:
+        raise ChannelSendError(f"桥接口拒绝：HTTP {error.code}") from error
+    except (urllib_error.URLError, TimeoutError, OSError) as error:
+        raise ChannelSendError(f"桥服务不可达：{error}") from error
+    except json.JSONDecodeError as error:
+        raise ChannelSendError("桥接口返回内容无法解析") from error
+    if isinstance(data, list):
+        data = next(
+            (item for item in data if isinstance(item, dict) and str(item.get("name") or "") == session),
+            {},
+        )
+    if not isinstance(data, dict):
+        raise ChannelSendError("桥接口返回格式异常")
+    status_raw = str(data.get("status") or "").strip().upper()
+    me = data.get("me") if isinstance(data.get("me"), dict) else {}
+    engine = data.get("engine")
+    engine_name = str(engine.get("engine") if isinstance(engine, dict) else engine or "").strip()
+    labels = {
+        "WORKING": "已连接",
+        "SCAN_QR_CODE": "等待扫码",
+        "STARTING": "启动中",
+        "STOPPED": "未启动",
+        "FAILED": "启动失败",
+    }
+    return {
+        "session": session,
+        "status": status_raw or "UNKNOWN",
+        "status_label": labels.get(status_raw, status_raw or "未知"),
+        "me_name": str(me.get("pushName") or "").strip(),
+        "me_id": str(me.get("id") or "").strip(),
+        "engine": engine_name,
+    }
+
+
+def whatsapp_personal_qr_image(config: dict, timeout: int = 8) -> tuple[bytes, str]:
+    """取当前会话二维码图片（WAHA）。返回 (图片字节, Content-Type)。
+
+    真机实测：WAHA 在非扫码状态调取码接口会挂起不响应——所以先查状态，
+    只有「等待扫码」时才真的去取码，其余状态立即拒绝（带 http_status 供端点映射）。
+    """
+    state = whatsapp_personal_session_state(config, timeout=6)
+    if state["status"] != "SCAN_QR_CODE":
+        error = ChannelSendError(f"会话当前不是扫码状态（{state['status_label']}），无需二维码")
+        error.http_status = 409
+        raise error
+    base, api_key, session = _whatsapp_personal_bridge(config)
+    request = urllib_request.Request(
+        f"{base}/api/{quote(session, safe='')}/auth/qr?format=image",
+        headers={"X-Api-Key": api_key},
+        method="GET",
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+            content_type = str(response.headers.get("Content-Type") or "image/png").split(";")[0].strip()
+    except urllib_error.HTTPError as error:
+        err = ChannelSendError(f"二维码获取失败：HTTP {error.code}")
+        err.http_status = error.code
+        raise err from error
+    except (urllib_error.URLError, TimeoutError, OSError) as error:
+        raise ChannelSendError(f"桥服务不可达：{error}") from error
+    if not raw:
+        raise ChannelSendError("二维码为空（桥未返回内容）")
+    return raw, content_type if content_type.startswith("image/") else "image/png"
+
+
+def whatsapp_personal_start_session(config: dict, timeout: int = 15) -> dict:
+    """启动 WAHA 会话（不存在则先创建）：渠道页「启动会话并取码」用。"""
+    base, api_key, session = _whatsapp_personal_bridge(config)
+    if not api_key:
+        raise ChannelSendError("缺少环境变量 WHATSAPP_PERSONAL_API_KEY")
+    if not base:
+        raise ChannelSendError("桥接地址未配置")
+
+    def _post(url: str, payload: dict) -> dict:
+        request = urllib_request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Api-Key": api_key},
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=timeout) as response:
+                raw = response.read().decode("utf-8")
+            data = json.loads(raw) if raw.strip() else {}
+            return data if isinstance(data, dict) else {}
+        except urllib_error.HTTPError as error:
+            detail = ""
+            try:
+                body = json.loads(error.read().decode("utf-8"))
+                detail = str(body.get("message") or body.get("error") or "").strip()
+            except Exception:
+                detail = ""
+            err = ChannelSendError(f"启动会话失败：HTTP {error.code}{'（' + detail + '）' if detail else ''}")
+            err.http_status = error.code
+            raise err from error
+        except (urllib_error.URLError, TimeoutError, OSError) as error:
+            raise ChannelSendError(f"桥服务不可达：{error}") from error
+
+    try:
+        data = _post(f"{base}/api/sessions/{quote(session, safe='')}/start", {})
+    except ChannelSendError as error:
+        if getattr(error, "http_status", 0) == 404:
+            data = _post(f"{base}/api/sessions", {"name": session, "start": True})
+        else:
+            raise
+    return {"session": session, "status": str(data.get("status") or "STARTING").strip() or "STARTING"}
+
+
 def _send_whatsapp_personal(config: dict, external_user_id: str, text: str) -> str:
     """WhatsApp 个人版（经本机 WAHA 桥）：节奏层 → 已读/输入中 → sendText；返回消息 ID。
 
@@ -6162,7 +6423,7 @@ def _send_whatsapp_personal(config: dict, external_user_id: str, text: str) -> s
     api_key = os.environ.get("WHATSAPP_PERSONAL_API_KEY", "").strip()
     if not api_key:
         raise ChannelSendError("缺少环境变量 WHATSAPP_PERSONAL_API_KEY")
-    session = str(config.get("session") or "default").strip() or "default"
+    session = _whatsapp_personal_session(config)
     jid = str(external_user_id or "").strip()
     if "@" not in jid:
         digits = re.sub(r"\D", "", jid)
@@ -7673,6 +7934,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/channels":
             self.admin_channels(query)
             return
+        if path == "/admin/channels/whatsapp-personal/session.json":
+            self.admin_whatsapp_personal_session_state()
+            return
+        if path == "/admin/channels/whatsapp-personal/qr.png":
+            self.admin_whatsapp_personal_qr()
+            return
         if path == "/admin/analytics":
             self.admin_analytics(query)
             return
@@ -8870,6 +9137,15 @@ class Handler(BaseHTTPRequestHandler):
                 enabled = not (account and account["status"] == "enabled")
                 self.db.set_channel_enabled(self.tenant_id, channel, enabled, self.actor)
                 self.redirect(f"/admin/channels?notice={'enabled' if enabled else 'disabled'}")
+                return
+            if path == "/admin/channels/whatsapp-personal/session/start":
+                # 扫码绑定区「启动会话并取码」：启动 WAHA 会话（不存在则创建），前端随后轮询状态。
+                try:
+                    result = whatsapp_personal_start_session(self._whatsapp_personal_page_config())
+                except ChannelSendError as error:
+                    self.send_json({"ok": False, "error": str(error)}, 502)
+                    return
+                self.send_json({"ok": True, **result})
                 return
             if path == "/admin/channels/sync-dify-kb":
                 if self.user_role != "admin":
@@ -10577,6 +10853,41 @@ class Handler(BaseHTTPRequestHandler):
             notice = "retried_ok" if sent else "retried_fail"
         self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice={notice}")
 
+    def _whatsapp_personal_page_config(self) -> dict:
+        """渠道页「扫码绑定」区读渠道配置（坏 JSON 兜底为空）。"""
+        account = self.db.get_channel_account(self.tenant_id, "whatsapp_personal")
+        try:
+            return json.loads(account["config_json"]) if account and account["config_json"] else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    def admin_whatsapp_personal_session_state(self) -> None:
+        """扫码绑定区（JSON）：桥可达性 + 会话状态 + 登录名（供渠道页轮询）。"""
+        config = self._whatsapp_personal_page_config()
+        try:
+            state = whatsapp_personal_session_state(config)
+        except ChannelSendError as error:
+            self.send_json({"ok": False, "error": str(error), "session": _whatsapp_personal_session(config)})
+            return
+        self.send_json({"ok": True, **state})
+
+    def admin_whatsapp_personal_qr(self) -> None:
+        """扫码绑定区：代理当前二维码图片（先查状态——WAHA 非扫码态会挂起，已在助手层规避）。"""
+        config = self._whatsapp_personal_page_config()
+        try:
+            raw, content_type = whatsapp_personal_qr_image(config)
+        except ChannelSendError as error:
+            upstream = int(getattr(error, "http_status", 0) or 0)
+            status = 409 if 400 <= upstream < 500 else 502
+            self.send_json({"ok": False, "error": str(error)}, status)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+
     def admin_channels(self, query: dict[str, list[str]]) -> None:
         """渠道接入页（管理员）：配置与启停 WhatsApp / LangBot；凭证只读环境变量状态、不回显值。"""
         accounts = self.db.list_channel_accounts(self.tenant_id)
@@ -10598,7 +10909,7 @@ class Handler(BaseHTTPRequestHandler):
         guides = {
             "whatsapp": whatsapp_guide_text(),
             "langbot": "试验通道（本机）：LangBot 负责对接各社交平台并把消息推送进来，平台处理后的回复经 LangBot 发送接口直达买方。步骤：① 本机环境变量设置 LANGBOT_API_KEY（LangBot 面板「API Keys」生成）② 在 LangBot 面板把上方收信地址登记为 Webhook 并启用 ③ 回到这里填写 bot_uuid 并启用渠道。",
-            "whatsapp_personal": "本机桥（WAHA）：把你的 WhatsApp 个人号接入平台。步骤：① 本机 WAHA 桥已就绪（端口 3100）② 手机 WhatsApp → 设置 → 已连接的设备 → 扫码（二维码由 WAHA 控制台或助手生成）③ 回到这里填写显示名称并启用。之后消息自动进「会话收件箱 → WhatsApp（个人版）」，回复经同一账号发出（含拟人节奏与限速保护）。",
+            "whatsapp_personal": "本机桥（WAHA）：把你的 WhatsApp 个人号接入平台。步骤：① 在下方「手机扫码绑定」区直接扫二维码（每 15 秒自动刷新，扫码成功即时变为「已连接」）② 填写显示名称并启用渠道。之后消息自动进「会话收件箱 → WhatsApp（个人版）」，回复经同一账号发出（含拟人节奏与限速保护）。",
         }
         host = self.headers.get("Host", "127.0.0.1:8137")
         cards = []
@@ -10671,9 +10982,16 @@ class Handler(BaseHTTPRequestHandler):
                     )
             elif channel == "whatsapp_personal":
                 receive_block = (
-                    f"<div class='field-state' style='margin-top:8px'><b>桥接状态</b>：本机 WAHA 桥（端口 3100）→ 平台收信 "
-                    f"<code>http://127.0.0.1:8137/api/v1/channels/whatsapp-personal/webhook/•••</code>（URL 令牌即凭据，已配置、不回显）。<br>"
-                    f"扫码与连接状态：<a href='http://127.0.0.1:3100/dashboard' target='_blank'>WAHA 控制台（127.0.0.1:3100/dashboard）</a>，或让助手生成二维码图片直接扫。</div>"
+                    f"<div class='field-state' style='margin-top:8px'><b>手机扫码绑定</b>（在本页直接完成）："
+                    f"<div id='waha-bind' style='margin-top:8px'>"
+                    f"<div id='waha-status-line' class='muted'>正在获取桥接状态…</div>"
+                    f"<div id='waha-qr-wrap' style='display:none;margin-top:8px'>"
+                    f"<img id='waha-qr' alt='WhatsApp 绑定二维码' width='222' height='222' style='background:#fff;padding:8px;border-radius:10px;border:1px solid var(--border)'>"
+                    f"<div id='waha-qr-hint' class='muted' style='margin-top:6px'>二维码每 15 秒自动刷新。打开手机 WhatsApp → 设置 → 已连接的设备 → 连接设备，扫此码。</div>"
+                    f"</div>"
+                    f"<div id='waha-actions' style='margin-top:8px;display:none'><button type='button' class='secondary' id='waha-start'>启动会话并取码</button></div>"
+                    f"</div>"
+                    f"<div class='muted' style='margin-top:8px'>收信地址 <code>http://{esc(host)}/api/v1/channels/whatsapp-personal/webhook/•••</code>（URL 令牌即凭据，已配置、不回显）。消息自动进「会话收件箱 → WhatsApp（个人版）」，回复经同一账号发出（含拟人节奏与限速保护）。</div></div>"
                 )
             cards.append(f"""<section class='card' style='margin-top:16px'>
 <div class='panel-title'><h2>{esc(CHANNEL_LABELS[channel])} {badge} {secret_badge}</h2></div>
@@ -10694,7 +11012,8 @@ class Handler(BaseHTTPRequestHandler):
 {notice}
 <section class='card'><div class='panel-title'><h2>如何工作</h2></div>
 <p class='muted' style='margin:0'>启用并配置凭证后：买方在渠道里的消息会进入「会话收件箱」，与网站聊天走同一批处理（需求确认、有据问答、人工接管、RFQ 填写链接）；卖家在平台里的回复会经渠道直达买方。对客入口已统一为 LangBot 单轨（试验，资料问答由本机 Dify 引擎承担；旧 Telegram 直连代码已按计划撤除）；WhatsApp 接入进行中，微信系渠道随后。新渠道默认关闭，启用与凭证变更全部留痕。</p></section>
-{''.join(cards)}"""
+{''.join(cards)}
+<script>{WHATSAPP_PERSONAL_BIND_JS}</script>"""
         self.send_html(self.console_page("渠道接入", body, "channels"))
 
     def admin_audit(self, query: dict[str, list[str]]) -> None:
