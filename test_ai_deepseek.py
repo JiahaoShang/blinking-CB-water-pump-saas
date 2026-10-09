@@ -654,7 +654,7 @@ class DeepSeekBoundaryTests(unittest.TestCase):
 
     # ---- 管理概览内部状态与接口旅程 ------------------------------------------
 
-    def test_admin_dashboard_shows_mode_and_last_call_status_without_key(self):
+    def test_model_diagnostics_are_in_settings_and_not_dashboard(self):
         mock = self.start_mock([extraction_success({"flow": {"value": "50", "unit": "m³/h"}})])
         self.start_app(mock)
         conversation_id, headers = self.open_conversation()
@@ -663,7 +663,11 @@ class DeepSeekBoundaryTests(unittest.TestCase):
         cookie = self.login_admin()
         status, page = self.admin_get("/admin", cookie)
         self.assertEqual(status, 200)
-        self.assertIn("DeepSeek 模型辅助", page)
+        self.assertNotIn("模型接入", page)
+        self.assertNotIn("DeepSeek 模型辅助", page)
+        status, page = self.admin_get("/admin/preferences", cookie)
+        self.assertEqual(status, 200)
+        self.assertIn("运行诊断", page)
         self.assertIn("deepseek-flash", page)
         self.assertIn("需求提取", page)
         self.assertIn("成功", page)

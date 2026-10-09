@@ -473,6 +473,8 @@ class DeepSeekChatClient:
             "stream": False,
             "temperature": 0.2,
         }
+        if self.config.provider == "custom":
+            body.pop("thinking", None)
         request = urllib.request.Request(
             self._endpoint(),
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -485,7 +487,12 @@ class DeepSeekChatClient:
         )
         started = time.monotonic()
         try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
+            if self.config.provider == "custom":
+                from model_settings import custom_urlopen
+                open_request = custom_urlopen
+            else:
+                open_request = urllib.request.urlopen
+            with open_request(request, timeout=self.config.timeout_seconds) as response:
                 raw = response.read()
                 http_status = int(response.status)
         except urllib.error.HTTPError as error:

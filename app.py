@@ -4530,18 +4530,18 @@ AI_TASK_LABELS_ZH = {AI_TASK_EXTRACTION: "需求提取", AI_TASK_ANSWER: "资料
 
 
 def ai_status_section(db: Database, ai, tenant_id: str) -> str:
-    """管理概览「模型接入」卡片：显式模式 + 最近一次调用的内部状态（可重试/需配置/需排查）。"""
+    """设置页内折叠的运行诊断，不显示密钥。"""
     if ai is None or ai.mode != ai_client.MODE_DEEPSEEK:
         return (
-            "<section class='card' style='margin-top:18px'><div class='panel-title'><h2>模型接入</h2>"
+            "<section class='card' style='margin-top:18px'><div class='panel-title'><h2>运行诊断</h2>"
             "<span class='muted'>AI 调用边界</span></div><div class='simple-item'><div>"
             "<strong>当前模式：本地规则（演示）</strong><small>买方需求提取与资料内问答由本地规则完成，未调用外部模型。"
-            "需要模型辅助时，按 README「启用 DeepSeek 模型辅助」配置 AI_MODE=deepseek 后重启服务。</small></div></div></section>"
+            "平台模型由部署方配置，企业成员无需配置环境变量。</small></div></div></section>"
         )
     latest = db.latest_ai_call(tenant_id)
     rows = [
-        "<div class='simple-item'><div><strong>当前模式：DeepSeek 模型辅助</strong>"
-        f"<small>提供方 DeepSeek · 模型 {esc(ai.config.model)}。模型只做候选抽取与字段定位；"
+        "<div class='simple-item'><div><strong>当前模式：模型辅助</strong>"
+        f"<small>模型 {esc(ai.config.model)}。模型只做候选抽取与字段定位；"
         "数值、答案与引用由平台从已发布核准快照构造。</small></div></div>"
     ]
     if latest is None:
@@ -4565,7 +4565,7 @@ def ai_status_section(db: Database, ai, tenant_id: str) -> str:
             "不含密钥与买家消息。</small></div></div>"
         )
     return (
-        "<section class='card' style='margin-top:18px'><div class='panel-title'><h2>模型接入</h2>"
+        "<section class='card' style='margin-top:18px'><div class='panel-title'><h2>运行诊断</h2>"
         "<span class='muted'>AI 调用边界</span></div><div class='simple-list'>" + "".join(rows) + "</div></section>"
     )
 
@@ -4660,6 +4660,8 @@ hr{border:0;border-top:1px solid var(--border-subtle);margin:16px 0}
 .console .side-link.active .ic{opacity:1;color:var(--nav-accent)}
 .console .side-foot{margin-top:auto;padding:12px 8px 4px;border-top:1px solid var(--nav-line);font-size:11px;color:var(--nav-text-2);line-height:1.9;overflow-wrap:anywhere}
 .console .side-foot a{font-size:11px}
+.console .account-menu{position:relative}.console .account-menu>summary{list-style:none;display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 0;font-size:13px}.console .account-menu>summary::-webkit-details-marker{display:none}.console .account-menu .tenant-avatar{width:32px;height:32px;flex:0 0 32px;border:1px solid var(--nav-line);border-radius:50%;display:grid;place-items:center;background:var(--nav-active);color:var(--nav-text-active);font-weight:600}.console .account-label{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.console .account-label small{display:block;font-size:11px;color:var(--nav-text-2)}.console .account-popover{position:absolute;bottom:100%;left:0;right:0;background:var(--nav-bg);border:1px solid var(--nav-line);border-radius:10px;padding:8px;box-shadow:0 6px 20px #0003;z-index:20}.console .account-popover a{display:flex;align-items:center;gap:9px;padding:9px;color:var(--nav-text);font-size:13px}.console .account-popover a:hover{background:var(--nav-hover);border-radius:6px}
+
 .console .shell{min-width:0;display:flex;flex-direction:column}
 .console .topbar{position:sticky;top:0;z-index:15;height:var(--topbar-h);display:flex;flex-direction:row;align-items:center;gap:10px;padding:0 24px;background:var(--topbar-bg);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
 .console .crumb{font-size:12px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -5581,7 +5583,6 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
         )
         sections.append(f"<div class='side-heading'>{heading}</div>{links}")
     crumb = f"{group_of.get(active, '会话收件箱' if str(active).startswith('inbox_') else '卖家系统')} / <b>{esc(title)}</b>"
-    account = f"当前账号：{esc(actor)}（{esc(role_label)}）" if actor else "未登录"
     tenant_name = tenant or "当前企业"
     return f"""<!doctype html>
 <html lang='{'en' if lang == 'en' else 'zh-CN'}'>
@@ -5601,7 +5602,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
 <div class='side-brand'><img class='brand-mark' src='/assets/brand.png' alt=''><div><strong>Growave</strong><small>SELLER CONSOLE</small></div></div>
 <div class='side-tenant'><span class='tenant-avatar' aria-hidden='true'>{esc(tenant_name[:1])}</span><span>{esc(tenant_name)}</span></div>
 <nav class='side-nav'>{''.join(sections)}</nav>
-<div class='side-foot'>{account}<br><a href='/inquiry' target='_blank'>打开买方演示页 ↗</a></div>
+<div class='side-foot'><details class='account-menu'><summary aria-label='打开账号菜单'><span class='tenant-avatar' aria-hidden='true'>{esc((actor or 'U')[:1].upper())}</span><span class='account-label'>{esc(actor or '未登录')}<small>{esc(role_label)}</small></span>{svg_icon('menu')}</summary><div class='account-popover'><a href='/admin/preferences'>{svg_icon('sliders')}设置</a><a href='/logout'>{svg_icon('users')}退出登录</a></div></details><a href='/inquiry' target='_blank'>打开买方演示页 ↗</a></div>
 </aside>
 <div class='shell'>
 <header class='topbar'><button class='menu-btn' id='console-menu' aria-label='打开导航'>{svg_icon('menu')}</button><span class='crumb'>{crumb}</span><span class='grow'></span><button class='theme-toggle' id='themeToggle' type='button' title='切换浅色 / 深色（快捷键 D）' aria-label='切换主题'>{THEME_TOGGLE_SVG}</button><a href='{lang_target}'>{'English' if lang == 'zh' else '中文'}</a><a href='/logout'>退出登录</a></header>
@@ -7714,6 +7715,10 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
     db: Database
     # AI 调用边界：由 make_server 按显式模式装配（rules 时 ai 为空操作对象，不发外部请求）。
     ai: AIService | None = None
+
+    def ai_for(self, tenant_id):
+        return self.models.service(tenant_id)
+
     # 演示工具（页面按钮 + seed 端点）为部署级开关：默认关闭；唯一开启方式见 make_server / tools/demo/start_demo.py。
     demo_tools = False
     tenant_id = "demo-tenant"
@@ -7774,10 +7779,12 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
         # 访问要求（V1-01 模块授权制）：None=登录即可；"admin"=仅管理员；"module:<key>"=需该模块授权。
         # 未列入的 /admin 子路径一律拒绝（fail-closed），与既往"else=空集"语义一致。
         requirement: str | None = "deny"
-        if path in ("/admin", "/admin/nav-counts"):
+        if path in ("/admin", "/admin/nav-counts") or (path == "/admin/preferences" and method == "GET"):
             requirement = None
         elif path == '/admin/knowledge' or path.startswith('/admin/knowledge/'):
             requirement = None
+        elif path.startswith('/admin/preferences/model/'):
+            requirement = 'admin'
         elif path.startswith('/admin/customer-transfers'):
             requirement = 'admin'
         elif path.startswith('/admin/channels/accounts') or path == '/admin/channels':
@@ -8188,6 +8195,10 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
         if path == "/admin/users":
             self.admin_users(query)
             return
+        if path == "/admin/preferences":
+            from model_settings import settings_page
+            settings_page(self, query)
+            return
         if path == "/admin/settings":
             self.admin_settings(query)
             return
@@ -8481,7 +8492,7 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
                 previous = self.db.get_latest_revision(site["tenant_id"], conversation["id"])
                 previous_values = json.loads(previous["values_json"]) if previous else {}
                 values = extract_requirement_candidates(
-                    self.db, self.ai, site["tenant_id"], conversation["id"], text_value, None, previous_values,
+                    self.db, self.ai_for(site["tenant_id"]), site["tenant_id"], conversation["id"], text_value, None, previous_values,
                 )
                 revision_id = self.db.create_requirement_revision(
                     site["tenant_id"], conversation["id"], values, "candidate", "website_api",
@@ -8742,7 +8753,7 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
                 else:
                     # 第二波：网页聊天入口同样优先走 Dify（与渠道口径一致；引擎不可用时回落本地）。
                     status, answer_text, answered_product_id, version_id, citations, _reason, _qa_source = answer_question_prefer_dify(
-                        self.db, self.ai, site["tenant_id"], conversation["id"], question,
+                        self.db, self.ai_for(site["tenant_id"]), site["tenant_id"], conversation["id"], question,
                         product_id if isinstance(product_id, str) and product_id else None,
                         f"web:{conversation['id']}",
                     )
@@ -9028,7 +9039,7 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
                     explicit[f"{key}_unit"] = str(form.get(f"{key}_unit", ""))
                 try:
                     values = extract_requirement_candidates(
-                        self.db, self.ai, self.tenant_id, conversation_id, message, explicit, previous_values,
+                        self.db, self.ai_for(self.tenant_id), self.tenant_id, conversation_id, message, explicit, previous_values,
                     )
                 except AIUnavailableError:
                     # 模型故障：消息已保存，明确提示可重试；不落草稿、不假装已识别。
@@ -9114,7 +9125,7 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
                     else:
                         # 第二波：旧询价页同口径优先走 Dify（引擎不可用时回落本地）。
                         answer_status, answer_text, answered_product_id, product_version_id, citations, _reason, _qa_source = answer_question_prefer_dify(
-                            self.db, self.ai, self.tenant_id, conversation_id, question,
+                            self.db, self.ai_for(self.tenant_id), self.tenant_id, conversation_id, question,
                             selected_product_id if isinstance(selected_product_id, str) and selected_product_id else None,
                             f"web:{conversation_id}",
                         )
@@ -9498,6 +9509,10 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
             match = re.fullmatch(r"/admin/inbox/([a-z0-9_-]{1,40})/([a-f0-9]+)/messages/([a-f0-9]+)/retry", path)
             if match:
                 self.admin_inbox_message_retry(match.group(1), match.group(2), match.group(3))
+                return
+            if path in ("/admin/preferences/model/connect", "/admin/preferences/model/disconnect"):
+                from model_settings import settings_action
+                settings_action(self, form, disconnect=path.endswith("/disconnect"))
                 return
             if path == "/admin/settings/stages":
                 self.admin_settings_save_stages(form)
@@ -10279,7 +10294,6 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
             f"<div class='actions'><a class='button secondary' href='{href}'>进入</a></div></div>"
             for href, title, description in quick_links
         )
-        ai_section = ai_status_section(self.db, self.ai, self.tenant_id)
         # V1-01 零权限员工：登录后只看到"等待授权"说明，不展示任何运营数字或内部状态。
         no_module_access = self.user_role != "admin" and not any(self.has_module(key) for key in GRANTABLE_MODULE_KEYS)
         if no_module_access:
@@ -10289,7 +10303,6 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
             )
             todo_html = "<div class='muted-block'>开通模块权限后，这里会显示与你相关的待处理事项。</div>"
             quick_html = "<div class='muted-block'>目前没有可用入口。</div>"
-            ai_section = ""
             cards_section = ""
         else:
             cards_section = f"<section class='card' style='margin-top:18px'><details class='detail-toggle' style='border-top:0;margin-top:0;padding-top:0'><summary>查看运营数字</summary><div><section class='metric-grid'>{cards}</section></div></details></section>"
@@ -10299,7 +10312,6 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
 {focus_html}
 <div class='grid'><section class='card'><div class='panel-title'><h2>待处理事项</h2><span class='muted'>只显示需要你行动的事项（跟随账号的模块授权）</span></div><div class='simple-list'>{todo_html}</div></section>
 <section class='card'><div class='panel-title'><h2>常用入口</h2></div><div class='simple-list'>{quick_html}</div></section></div>
-{ai_section}
 {cards_section}
 <div class='footer-note'>概览只读取当前登录账号所属企业的数据；具体修改仍需进入对应模块，并按账号的模块授权执行。</div>
 """
@@ -10635,7 +10647,7 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
             ).fetchone()
             before_rowid = snapshot["n"] if snapshot else 0
         try:
-            outcome = handle_whatsapp_inbound(self.db, self.ai, account["tenant_id"], params, account["id"] if not account["legacy"] else "")
+            outcome = handle_whatsapp_inbound(self.db, self.ai_for(account["tenant_id"]), account["tenant_id"], params, account["id"] if not account["legacy"] else "")
         except Exception:
             # 500 让 Twilio 重试（消息去重兜底）；4xx/5xx 无需 TwiML 体。
             self.send_json({"ok": False, "error": "processing_failed"}, 500)
@@ -10700,7 +10712,7 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
                     matches = [a for a in accounts if phone_id and str(json.loads(a['config_json']).get('phone_number_id') or '') == phone_id]
                     account = matches[0] if len(matches) == 1 else (accounts[0] if len(accounts) == 1 and accounts[0]['legacy'] else None)
                     if account:
-                        outcomes.append(handle_whatsapp_meta_event(self.db, self.ai, account['tenant_id'], {'entry': [{'changes': [change]}]}, account['id'] if not account['legacy'] else ''))
+                        outcomes.append(handle_whatsapp_meta_event(self.db, self.ai_for(account['tenant_id']), account['tenant_id'], {'entry': [{'changes': [change]}]}, account['id'] if not account['legacy'] else ''))
             outcome = outcomes[0] if len(outcomes) == 1 else {'routes': outcomes}
         except Exception:
             self.send_json({"ok": False, "error": "processing_failed"}, 500)
@@ -10774,7 +10786,7 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
             self.send_json({"ok": True, "skipped": "channel_disabled"}, 200)
             return
         try:
-            outcome = handle_whatsapp_personal_event(self.db, self.ai, account["tenant_id"], event, account["id"] if not account["legacy"] else "")
+            outcome = handle_whatsapp_personal_event(self.db, self.ai_for(account["tenant_id"]), account["tenant_id"], event, account["id"] if not account["legacy"] else "")
         except Exception:
             self.send_json({"ok": False, "error": "processing_failed"}, 500)
             return
@@ -10826,7 +10838,7 @@ class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
             self.send_json({'error': 'account_mismatch'}, 403)
             return
         try:
-            outcome = handle_langbot_event(self.db, self.ai, account["tenant_id"], payload, account["id"] if not account["legacy"] else "")
+            outcome = handle_langbot_event(self.db, self.ai_for(account["tenant_id"]), account["tenant_id"], payload, account["id"] if not account["legacy"] else "")
         except Exception:
             self.send_json({"status": "error", "error": "processing_failed"}, 500)
             return
@@ -13093,12 +13105,15 @@ def make_server(
     # 模式显式：不传配置时读取环境变量（默认 rules）；deepseek 缺 Key 在这里明确失败。
     config = ai_config if ai_config is not None else AIConfig.from_env()
     ai_service = AIService(config)
+    from model_settings import EnterpriseModels
+    enterprise_models = EnterpriseModels(db_path, ai_service)
     # 演示工具（页面按钮 + seed 端点）为部署级开关：默认关闭；唯一开启方式 = tools/demo/start_demo.py 传入 demo_tools=True。
     demo_enabled = bool(demo_tools)
 
     class AppHandler(Handler):
         db = database
         ai = ai_service
+        models = enterprise_models
         demo_tools = demo_enabled
 
     server = ThreadingHTTPServer((host, port), AppHandler)
