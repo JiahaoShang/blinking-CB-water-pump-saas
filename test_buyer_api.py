@@ -298,6 +298,10 @@ class BuyerApiTests(unittest.TestCase):
         self.db.publish_product("demo-tenant", product["id"])
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        # 本用例显式授权对应业务；模块权限不再赋予全企业会话可见性。
+        member = self.db.conn.execute('SELECT id FROM users WHERE tenant_id=? AND email=?', ('demo-tenant', 'demo-engineer@example.invalid')).fetchone()
+        self.db.conn.execute('INSERT INTO conversation_access VALUES (?,?,?,?,?)', ('demo-tenant', created['conversation_id'], member['id'], 'fixture:admin', '2026-10-09'))
+        self.db.conn.commit()
         headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
         status, _, grounded = self.request("POST", path + "/questions", {"question": "What is the flow range?", "product_id": product["id"]}, headers)
         self.assertEqual(status, 201)
@@ -329,6 +333,10 @@ class BuyerApiTests(unittest.TestCase):
     def test_engineer_followup_and_buyer_reply_keep_original_task(self):
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        # 本用例显式授权对应业务；模块权限不再赋予全企业会话可见性。
+        member = self.db.conn.execute('SELECT id FROM users WHERE tenant_id=? AND email=?', ('demo-tenant', 'demo-engineer@example.invalid')).fetchone()
+        self.db.conn.execute('INSERT INTO conversation_access VALUES (?,?,?,?,?)', ('demo-tenant', created['conversation_id'], member['id'], 'fixture:admin', '2026-10-09'))
+        self.db.conn.commit()
         headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
         _, _, unresolved = self.request("POST", path + "/questions", {"question": "Can this handle my application?"}, headers)
         _, _, requested = self.request("POST", path + "/human-requests", {"answer_id": unresolved["answer_id"], "reply_path": "conversation"}, headers)
@@ -371,6 +379,10 @@ class BuyerApiTests(unittest.TestCase):
     def test_sales_claim_and_admin_assignment_have_separate_permissions(self):
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        # 本用例显式授权对应业务；模块权限不再赋予全企业会话可见性。
+        member = self.db.conn.execute('SELECT id FROM users WHERE tenant_id=? AND email=?', ('demo-tenant', 'demo-sales@example.invalid')).fetchone()
+        self.db.conn.execute('INSERT INTO conversation_access VALUES (?,?,?,?,?)', ('demo-tenant', created['conversation_id'], member['id'], 'fixture:admin', '2026-10-09'))
+        self.db.conn.commit()
         headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}", "Idempotency-Key": "sales-claim-rfq"}
         _, _, submitted = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.test", "contact_phone": "+49 30 555 0213", "quantity": "2", "region": "DE"}}, headers)
         rfq_id = submitted["rfq_id"]
@@ -392,6 +404,10 @@ class BuyerApiTests(unittest.TestCase):
     def test_buyer_stop_contact_is_visible_to_sales_and_blocks_followup_date(self):
         _, _, created = self.request("POST", "/api/v1/buyer/conversations", {"site_key": "site-a"})
         path = f"/api/v1/buyer/conversations/{created['conversation_id']}"
+        # 本用例显式授权对应业务；模块权限不再赋予全企业会话可见性。
+        member = self.db.conn.execute('SELECT id FROM users WHERE tenant_id=? AND email=?', ('demo-tenant', 'demo-sales@example.invalid')).fetchone()
+        self.db.conn.execute('INSERT INTO conversation_access VALUES (?,?,?,?,?)', ('demo-tenant', created['conversation_id'], member['id'], 'fixture:admin', '2026-10-09'))
+        self.db.conn.commit()
         headers = {"X-Site-Key": "site-a", "Authorization": f"Bearer {created['access_token']}"}
         _, _, submitted = self.request("POST", path + "/rfqs", {"contact_confirmed": True, "contact": {"contact_email": "buyer@example.test", "contact_phone": "+49 30 555 0214", "quantity": "2", "region": "DE"}}, {**headers, "Idempotency-Key": "stop-rfq"})
         rfq_id = submitted["rfq_id"]

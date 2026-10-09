@@ -132,6 +132,7 @@ class LeadStageSettingsTests(SettingsBase):
         # 准备一条线索：默认阶段 + 逾期
         conversation_id = self.db.create_conversation("demo-tenant", "settings-test", "en")
         rfq_id, _ = self.db.create_rfq("demo-tenant", conversation_id, "stage-rfq-1", dict(FULL_CONTACT), "stage test")
+        self.db.assign_conversation_leads("demo-tenant", rfq_id, "demo-sales@example.invalid", "demo-admin@example.invalid")
         # 默认：quote_ready 非终态 → 逾期计入
         self.db.update_lead("demo-tenant", rfq_id, "quote_ready", "2020-01-01", "", "demo-admin@example.invalid")
         summary = self.db.get_admin_summary("demo-tenant")
@@ -151,6 +152,7 @@ class LeadStageSettingsTests(SettingsBase):
         self.assertEqual(json.loads(body)["counts"].get("sales", 0), 0)
         # 销售工作台显示改名后的标签；详情页下拉按新顺序
         self.db.set_user_modules("demo-tenant", self.employee_id, ["sales"], "demo-admin@example.invalid")
+        self.db.assign_conversation_leads("demo-tenant", rfq_id, "v1-employee@example.invalid", "demo-admin@example.invalid")
         sales = login(self.server, "v1-employee@example.invalid", "strong-pass-1")
         _, _, list_page = form_request(self.server, "GET", "/admin/sales", cookie=sales)
         self.assertIn("可以报价了", list_page)

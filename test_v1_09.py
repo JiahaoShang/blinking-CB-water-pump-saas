@@ -251,6 +251,7 @@ class ReplyDraftTests(SalesBase):
 
     def test_send_blocked_when_stop_requested(self):
         # 停止联系后：允许存草稿，但记录发送被阻止（发送前检查）
+        self.db.assign_conversation_leads("demo-tenant", self.rfq_today, "demo-sales@example.invalid", "demo-admin@example.invalid")
         conversation_id = self.db.get_lead_for_rfq("demo-tenant", self.rfq_today)["conversation_id"]
         self.db.stop_proactive_contact("demo-tenant", conversation_id, "请不要联系", "buyer_chat", "buyer")
         status, headers, _ = form_request(self.server, "POST", f"/admin/sales/{self.rfq_today}/replies", {"body": "Should not be sent"}, self.sales)

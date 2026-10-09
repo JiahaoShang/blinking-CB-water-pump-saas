@@ -250,8 +250,8 @@ class WhatsAppPersonalTests(unittest.TestCase):
         finally:
             os.environ.pop("WHATSAPP_PERSONAL_SELF_IDS", None)
 
-    def test_question_prefers_dify_on_personal_channel(self):
-        """回归修复：个人版渠道的问题必须走 Dify 优先分流（此前遗漏在 tuple 外）。"""
+    def test_question_blocks_unrestricted_dify_on_personal_channel(self):
+        """没有检索前授权的共享应用不可用于扫码渠道回答。"""
         mock_dify = _MockDify()
         saved = {key: os.environ.get(key) for key in ("DIFY_QA_URL", "DIFY_QA_APP_KEY")}
         os.environ["DIFY_QA_URL"] = mock_dify.base_url()
@@ -260,10 +260,10 @@ class WhatsAppPersonalTests(unittest.TestCase):
             sent_before = len(self.mock.sent_texts())
             status, body = self._post(self._event("你们有哪些产品？", "3EB0DIFY1"))
             self.assertEqual(status, 200)
-            self.assertEqual(json.loads(body)["outcome"].get("qa_source"), "dify")
+            self.assertEqual(json.loads(body)["outcome"].get("qa_source"), "local")
             sent = self.mock.sent_texts()[sent_before:]
             self.assertTrue(sent)
-            self.assertIn("DIFY-MOCK", sent[-1]["text"])
+            self.assertNotIn("DIFY-MOCK", sent[-1]["text"])
         finally:
             for key, value in saved.items():
                 if value is None:
@@ -292,12 +292,12 @@ class WhatsAppPersonalTests(unittest.TestCase):
         status, _, raw = _http(self.server, "GET", "/admin/channels", cookie=self.admin_cookie)
         self.assertEqual(status, 200)
         page = raw.decode("utf-8")
-        self.assertIn("waha-bind", page)
-        self.assertIn("waha-qr", page)
-        self.assertIn("waha-start", page)
-        self.assertIn("waha-logout", page)
-        self.assertIn("/admin/channels/whatsapp-personal/session.json", page)
-        self.assertIn("/admin/channels/whatsapp-personal/qr.png", page)
+        account = self.db.get_channel_account("demo-tenant", "whatsapp_personal")
+        status, _, raw = _http(self.server, "GET", "/admin/channels/accounts/" + account["id"], cookie=self.admin_cookie)
+        self.assertEqual(status, 200)
+        page = raw.decode("utf-8")
+        for text in ("connection-qr", "connection-state", "/start", "/disconnect", "/state", "/qr"):
+            self.assertIn(text, page)
 
     def test_bind_session_state_and_qr_endpoints(self):
         """扫码绑定区：状态 JSON（含登录名）/二维码图片；非扫码态 409；未登录重定向。"""

@@ -1,10 +1,6 @@
-"""第二波 · Dify 问答引擎接线测试（LangBot 渠道优先走 Dify；平台仍是唯一主脑）。
+"""远程问答授权边界回归：共享 Dify 未具备检索前隔离时使用本地获准知识。
 
-契约：
-- langbot 渠道配置了 DIFY_QA_APP_KEY 时，提问样文本先调 Dify（阻塞模式）；
-- Dify 回答剥离 <think> 推理块；命中 [[NO_ANSWER]] 或空 → 按「资料外」转人工口径回复；
-- Dify 不可用（网络/5xx）→ 静默回落本地资料问答，通道不中断；
-- 未配置 Dify 时行为与旧版完全一致（本地问答）。
+保留回复解析的单元检查；渠道和网站不得将问题发送给未经授权约束的共享应用。
 """
 import json
 import os
@@ -80,7 +76,7 @@ class _DifyQAMock:
 
 
 class DifyQALangBotTests(unittest.TestCase):
-    """LangBot 渠道资料问答：Dify 主路、哨兵转人工、不可用回落、未配置同旧版。"""
+    """渠道和网站问答：未经隔离的远程应用不可用于对外生成。"""
 
     maxDiff = None
 
@@ -145,33 +141,23 @@ class DifyQALangBotTests(unittest.TestCase):
         return [item for item in self.langbot.sent_messages() if item["target_id"] == str(sender_id)]
 
     # ── 用例 ──────────────────────────────────────────────────────────────
-    def test_grounded_answer_via_dify(self):
-        """有依据：Dify 回答（剥推理块）直达买方；引用落库；请求带正确密钥与用户标签。"""
+    def test_unrestricted_remote_retrieval_is_not_used(self):
+        """共享应用未提供检索前授权，即使配置密钥也不得发送企业问题。"""
+        before = len(self.dify.requests)
         status, body = self.post_event(self.event_for(7401, "SLICE-T1 的流量范围是多少？", "ev-d1"))
         self.assertEqual(status, 200)
-        self.assertEqual(body["outcome"], "answered")
-        self.assertEqual(body["qa_source"], "dify")
-        sent = self.sent_to(7401)
-        self.assertTrue(sent)
-        self.assertEqual(sent[-1]["text"], "SLICE-T1 的流量范围为 20-80 m³/h。")
-        answer = self.last_answer(7401)
-        self.assertEqual(answer["answer_status"], "grounded")
-        citations = json.loads(answer["citations_json"])
-        self.assertEqual(citations[0]["filename"], "SLICE-T1 · 测试泵")
-        self.assertEqual(citations[0]["label"], "知识库")
-        req = self.dify.requests[-1]
-        self.assertEqual(req["headers"].get("Authorization"), "Bearer app-test-key")
-        self.assertEqual(req["body"].get("user"), "langbot:7401")
-        self.assertEqual(req["body"].get("response_mode"), "blocking")
+        self.assertEqual(body["qa_source"], "local")
+        self.assertEqual(len(self.dify.requests), before)
+        self.assertTrue(self.sent_to(7401))
 
     def test_no_answer_sentinel_hands_to_human(self):
         """哨兵：[[NO_ANSWER]] → 按资料外转人工口径回复 + needs_human 落库。"""
         status, body = self.post_event(self.event_for(7402, "无依据的天气问题？", "ev-d2"))
         self.assertEqual(status, 200)
         self.assertEqual(body["outcome"], "answer_unresolved")
-        self.assertEqual(body["qa_source"], "dify")
+        self.assertEqual(body["qa_source"], "local")
         sent = self.sent_to(7402)
-        self.assertTrue(any("现有核准资料没有足够依据" in item["text"] for item in sent))
+        self.assertTrue(any("没有可引用的已发布产品资料" in item["text"] for item in sent))
         self.assertTrue(any("「人工」" in item["text"] for item in sent))
         answer = self.last_answer(7402)
         self.assertEqual(answer["answer_status"], "needs_human")
@@ -205,8 +191,8 @@ class DifyQALangBotTests(unittest.TestCase):
         self.assertEqual(_dify_retriever_resources({}), [])
         self.assertEqual(_dify_retriever_resources({"retriever_resources": None}), [])
 
-    def test_web_inquiry_prefers_dify(self):
-        """网页入口（旧询价页提问）：同样优先走 Dify；有据直达、哨兵转人工同口径。"""
+    def test_web_inquiry_blocks_unrestricted_dify(self):
+        """网页入口也限制共享远程检索，缺少本地依据时进入核实路径。"""
         status, headers, _ = form_request(self.server, "GET", "/inquiry")
         self.assertEqual(status, 303)
         path = headers["Location"].split("?", 1)[0]
@@ -221,10 +207,10 @@ class DifyQALangBotTests(unittest.TestCase):
             "SELECT * FROM answers WHERE tenant_id='demo-tenant' AND conversation_id=? ORDER BY rowid DESC LIMIT 1",
             (conversation_id,),
         ).fetchone()
-        self.assertEqual(row["answer_status"], "grounded")
-        self.assertEqual(row["answer_text"], "SLICE-T1 的流量范围为 20-80 m³/h。")
-        self.assertEqual(json.loads(row["citations_json"])[0]["filename"], "SLICE-T1 · 测试泵")
-        self.assertEqual(self.dify.requests[-1]["body"].get("user"), f"web:{conversation_id}")
+        self.assertEqual(row["answer_status"], "needs_human")
+        self.assertIn("没有可引用的已发布产品资料", row["answer_text"])
+        self.assertEqual(json.loads(row["citations_json"]), [])
+        self.assertFalse(self.dify.requests)
         # 哨兵 → 转人工口径（与渠道一致）
         status, _headers, _ = form_request(
             self.server, "POST", path + "/ask",
@@ -236,7 +222,7 @@ class DifyQALangBotTests(unittest.TestCase):
             (conversation_id,),
         ).fetchone()
         self.assertEqual(row2["answer_status"], "needs_human")
-        self.assertIn("现有核准资料没有足够依据", row2["answer_text"])
+        self.assertIn("没有可引用的已发布产品资料", row2["answer_text"])
 
     def test_strip_reasoning_blocks_unit(self):
         cases = [

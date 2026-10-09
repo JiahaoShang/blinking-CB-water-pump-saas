@@ -352,8 +352,10 @@ class ChannelConsoleTests(unittest.TestCase):
         self.assertEqual(status, 403)
         status, _, page = form_request(self.server, "GET", "/admin/channels", cookie=self.admin)
         self.assertEqual(status, 200)
-        for text in ("LangBot", "WhatsApp", "凭证未配置", "LANGBOT_API_KEY", "TWILIO_ACCOUNT_SID", "默认关闭", "渠道接入"):
+        for text in ("WhatsApp", "Telegram", "默认关闭", "渠道账号"):
             self.assertIn(text, page)
+        for text in ("LangBot", "LANGBOT_API_KEY", "TWILIO_ACCOUNT_SID"):
+            self.assertNotIn(text, page)
         # 旧直连已撤除：不再有 Telegram 渠道卡与操作入口（历史说明文案除外）
         self.assertNotIn("/admin/channels/telegram", page)
         self.assertNotIn("TELEGRAM_BOT_TOKEN", page)
@@ -362,7 +364,7 @@ class ChannelConsoleTests(unittest.TestCase):
         self.assertEqual(status, 303)
         self.assertIn("notice=saved", headers.get("Location", ""))
         status, _, page = form_request(self.server, "GET", "/admin/channels", cookie=self.admin)
-        self.assertIn("bot-test-1", page)
+        self.assertNotIn("bot-test-1", page)
         # 员工不能改
         status, _, _ = form_request(self.server, "POST", "/admin/channels/langbot", {"bot_uuid": "bot-hack"}, self.inbox_emp)
         self.assertEqual(status, 403)
@@ -371,7 +373,7 @@ class ChannelConsoleTests(unittest.TestCase):
         self.assertEqual(status, 303)
         self.assertIn("notice=enabled", headers.get("Location", ""))
         status, _, page = form_request(self.server, "GET", "/admin/channels", cookie=self.admin)
-        self.assertIn("已启用", page)
+        self.assertIn("管理连接", page)
         status, headers, _ = form_request(self.server, "POST", "/admin/channels/langbot/toggle", {}, self.admin)
         self.assertIn("notice=disabled", headers.get("Location", ""))
         actions = [
@@ -389,6 +391,9 @@ class ChannelConsoleTests(unittest.TestCase):
         self.db.bind_channel_identity("demo-tenant", "langbot", "console-tg-1", "Console Buyer", conv)
         self.db.update_channel_identity_meta("demo-tenant", "langbot", "console-tg-1", {"adapter": "Telegram"})
         self.db.save_message("demo-tenant", conv, "buyer", "hello", "buyer_web", channel="langbot", external_message_id="console-tg-1")
+        member = self.db.conn.execute("SELECT id FROM users WHERE email=?", ("v104-inbox@example.invalid",)).fetchone()
+        self.db.conn.execute("INSERT INTO conversation_access VALUES (?,?,?,?,?)", ("demo-tenant", conv, member["id"], "fixture:admin", "2026-10-09"))
+        self.db.conn.commit()
         status, _, page = form_request(self.server, "GET", "/admin/inbox/telegram", cookie=self.inbox_emp)
         self.assertEqual(status, 200)
         self.assertIn("Console Buyer", page)
@@ -397,7 +402,7 @@ class ChannelConsoleTests(unittest.TestCase):
         os.environ["LANGBOT_API_KEY"] = "«redacted:lbk-…»"
         status, _, page = form_request(self.server, "GET", "/admin/channels", cookie=self.admin)
         self.assertEqual(status, 200)
-        self.assertIn("凭证已配置", page)
+        self.assertNotIn("LANGBOT_API_KEY", page)
         self.assertNotIn("«redacted:lbk-…»", page)
         self.assertTrue(channel_secret_status("langbot")["configured"])
         whatsapp = channel_secret_status("whatsapp")
@@ -516,6 +521,9 @@ class ConversationInboxTests(unittest.TestCase):
         cls.db.save_message("demo-tenant", cls.other_conv, "buyer", "hi from older import", "buyer_web", channel="langbot", external_message_id="lb-2")
         _LANGBOT_PLATFORMS_CACHE["at"] = 0.0
         cls.fixture_conv = cls.db.create_conversation("demo-tenant", "demo-fixture", "en")
+        for conversation in (cls.web_a, cls.web_b, cls.langbot_conv, cls.other_conv):
+            cls.db.conn.execute("INSERT INTO conversation_access VALUES (?,?,?,?,?)", ("demo-tenant", conversation, inbox_row["id"], "fixture:admin", "2026-10-09"))
+        cls.db.conn.commit()
 
     @classmethod
     def tearDownClass(cls):
@@ -700,6 +708,9 @@ class ConversationInboxTests(unittest.TestCase):
         self.db.save_channel_account("demo-tenant", "whatsapp", {}, "demo-admin@example.invalid")
         self.db.set_channel_enabled("demo-tenant", "whatsapp", True, "demo-admin@example.invalid")
         wa_conv = self.db.create_conversation("demo-tenant", "whatsapp", "en")
+        member = self.db.conn.execute("SELECT id FROM users WHERE email=?", ("v104b-inbox@example.invalid",)).fetchone()
+        self.db.conn.execute("INSERT INTO conversation_access VALUES (?,?,?,?,?)", ("demo-tenant", wa_conv, member["id"], "fixture:admin", "2026-10-09"))
+        self.db.conn.commit()
         self.db.bind_channel_identity("demo-tenant", "whatsapp", "wa-1", "Wa Buyer", wa_conv)
         self.db.save_message("demo-tenant", wa_conv, "buyer", "hi", "whatsapp", channel="whatsapp", external_message_id="wa:1")
         status, headers, _ = form_request(self.server, "POST", f"/admin/inbox/whatsapp/{wa_conv}/reply", {"body": "hi"}, self.inbox_emp)

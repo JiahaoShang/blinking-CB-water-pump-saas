@@ -130,8 +130,11 @@ class DifyKBSyncTests(unittest.TestCase):
         """渠道页往返：一键同步按钮 + 状态行存在；POST 触发同步并回带统计。"""
         status, _, page = form_request(self.server, "GET", "/admin/channels", cookie=self.admin)
         self.assertEqual(status, 200)
-        self.assertIn("同步已核准资料到知识库", page)
-        self.assertIn("问答引擎（Dify）", page)
+        self.assertNotIn("同步已核准资料到知识库", page)
+        self.assertNotIn("Dify", page)
+        status, _, page = form_request(self.server, "GET", "/admin/knowledge", cookie=self.admin)
+        self.assertEqual(status, 200)
+        self.assertIn("企业知识", page)
         status, headers, _ = form_request(self.server, "POST", "/admin/channels/sync-dify-kb", fields={}, cookie=self.admin)
         self.assertEqual(status, 303)
         self.assertIn("/admin/channels?notice=kb_synced", headers.get("Location", ""))

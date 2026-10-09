@@ -35,6 +35,9 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 import ai_client
+from business_channels import BusinessChannels
+from business_channel_ui import BusinessChannelUI
+from knowledge_delivery import knowledge_sync_status, refresh_indexing_status, start_knowledge_worker
 from ai_client import AIConfig, AIConfigurationError, AIService, AIUnavailableError
 
 
@@ -293,7 +296,7 @@ def parse_float(value: str | None) -> float | None:
         return None
 
 
-class Database:
+class Database(BusinessChannels):
     def __init__(self, path: str | os.PathLike[str], *, initialize: bool = True):
         self.path = str(path)
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -938,6 +941,14 @@ class Database:
         # provisions its first administrator via tools/create_admin.py.
         self.conn.commit()
 
+        self.init_business_channels()
+        if 'audience' not in {r['name'] for r in self.conn.execute('PRAGMA table_info(product_fields)')}:
+            self.conn.execute("ALTER TABLE product_fields ADD COLUMN audience TEXT NOT NULL DEFAULT 'external'")
+        for name, definition in (('indexing_status', "TEXT NOT NULL DEFAULT 'pending'"), ('batch', "TEXT NOT NULL DEFAULT ''")):
+            if name not in {r['name'] for r in self.conn.execute('PRAGMA table_info(kb_sync_state)')}:
+                self.conn.execute(f'ALTER TABLE kb_sync_state ADD COLUMN {name} {definition}')
+        self.conn.commit()
+
     def _audit(self, tenant_id: str, entity_type: str, entity_id: str, action: str, actor: str, details: str = "") -> None:
         self.conn.execute(
             "INSERT INTO audit_log(tenant_id, entity_type, entity_id, action, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1463,9 +1474,8 @@ class Database:
         return {row["channel"]: row for row in rows}
 
     def get_channel_account(self, tenant_id: str, channel: str) -> sqlite3.Row | None:
-        return self.conn.execute(
-            "SELECT * FROM channel_accounts WHERE tenant_id=? AND channel=?", (tenant_id, channel)
-        ).fetchone()
+        rows = self.conn.execute("SELECT * FROM channel_accounts WHERE tenant_id=? AND channel=?", (tenant_id, channel)).fetchall()
+        return rows[0] if len(rows) == 1 else None
 
     def save_channel_account(self, tenant_id: str, channel: str, config: dict, actor: str = "demo-admin") -> None:
         """保存渠道公开配置（幂等 upsert）；机密凭证不进这里（走环境变量）。"""
@@ -1501,13 +1511,16 @@ class Database:
         self._audit(tenant_id, "channel", channel, "channel_enabled" if enabled else "channel_disabled", actor, "")
         self.conn.commit()
 
-    def get_channel_identity(self, tenant_id: str, channel: str, external_user_id: str) -> sqlite3.Row | None:
-        return self.conn.execute(
-            "SELECT * FROM channel_identities WHERE tenant_id=? AND channel=? AND external_user_id=?",
-            (tenant_id, channel, external_user_id),
-        ).fetchone()
+    def get_channel_identity(self, tenant_id: str, channel: str, external_user_id: str, account_id: str | None = None) -> sqlite3.Row | None:
+        sql = "SELECT * FROM channel_identities WHERE tenant_id=? AND channel=? AND external_user_id=?"
+        args = [tenant_id, channel, external_user_id]
+        if account_id is not None:
+            sql += " AND account_id=?"
+            args.append(account_id)
+        rows = self.conn.execute(sql, args).fetchall()
+        return rows[0] if len(rows) == 1 else None
 
-    def bind_channel_identity(self, tenant_id: str, channel: str, external_user_id: str, display_name: str, conversation_id: str) -> str:
+    def bind_channel_identity(self, tenant_id: str, channel: str, external_user_id: str, display_name: str, conversation_id: str, account_id: str = "") -> str:
         """外部渠道用户 ↔ 会话绑定（一外部用户一持续会话）；重复绑定的去重由调用方按唯一约束处理。"""
         if channel not in CHANNEL_KEYS:
             raise ValueError("未知渠道")
@@ -1516,8 +1529,8 @@ class Database:
         identity_id = secrets.token_hex(12)
         now = now_iso()
         self.conn.execute(
-            "INSERT INTO channel_identities(id, tenant_id, channel, external_user_id, display_name, conversation_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (identity_id, tenant_id, channel, external_user_id, display_name, conversation_id, now, now),
+            "INSERT INTO channel_identities(id, tenant_id, channel, external_user_id, display_name, conversation_id, created_at, updated_at, account_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (identity_id, tenant_id, channel, external_user_id, display_name, conversation_id, now, now, account_id),
         )
         self.conn.commit()
         return identity_id
@@ -2088,6 +2101,8 @@ class Database:
             "SELECT owner FROM leads WHERE tenant_id=? AND conversation_id=? AND owner IS NOT NULL LIMIT 1",
             (tenant_id, conversation_id),
         ).fetchone()
+        if not existing_owner:
+            existing_owner = self.conn.execute("SELECT u.email AS owner FROM conversations c JOIN users u ON u.id=c.owner_user_id AND u.tenant_id=c.tenant_id WHERE c.tenant_id=? AND c.id=?", (tenant_id, conversation_id)).fetchone()
         self.conn.execute(
             "INSERT INTO leads(id, tenant_id, rfq_id, conversation_id, stage, owner, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (lead_id, tenant_id, rfq_id, conversation_id, "new" if status == "submitted" else "needs_info", existing_owner["owner"] if existing_owner else None, timestamp, timestamp),
@@ -2130,6 +2145,7 @@ class Database:
             raise ValueError("管理员只能分配给已授权「销售工作台」模块的员工")
         with self.conn:
             self.conn.execute("UPDATE leads SET owner=?, updated_at=? WHERE tenant_id=? AND conversation_id=?", (owner_email, now_iso(), tenant_id, lead["conversation_id"]))
+            self.conn.execute("UPDATE conversations SET owner_user_id=?, original_owner_user_id=CASE WHEN original_owner_user_id='' THEN ? ELSE original_owner_user_id END WHERE tenant_id=? AND id=?", (owner['id'], owner['id'], tenant_id, lead['conversation_id']))
             self._audit(tenant_id, "lead", lead["id"], "assigned", actor_email, f"conversation={lead['conversation_id']};owner={owner_email}")
 
     def list_sales_records(self, tenant_id: str) -> list[sqlite3.Row]:
@@ -4301,6 +4317,14 @@ def diff_product_snapshots(old_snapshot: dict, new_snapshot: dict) -> dict:
 
 def source_is_restricted(db: Database, tenant_id: str, field: dict) -> bool:
     """该字段的来源文件是否已被标记「禁止使用」（据此后新回答不得引用其内容）。"""
+    product_id = field.get('product_id')
+    field_id = field.get('id')
+    if field_id:
+        live = db.conn.execute('SELECT audience FROM product_fields WHERE tenant_id=? AND id=?', (tenant_id, field_id)).fetchone()
+        if live and live['audience'] != 'external':
+            return True
+    if field.get('audience', 'external') != 'external':
+        return True
     source_id = field.get("source_document_id")
     if not source_id:
         return False
@@ -4464,7 +4488,7 @@ def answer_question_with_mode(
     allowed = [
         {"key": key, "label_zh": FIELD_LABELS.get(key, key), "label_en": FIELD_LABELS_EN.get(key, key)}
         for key in ANSWER_FIELD_KEYS
-        if fields.get(key) and str(fields[key].get("value", "")).strip()
+        if fields.get(key) and str(fields[key].get("value", "")).strip() and not source_is_restricted(db, tenant_id, fields[key])
     ]
     try:
         selected, meta = ai.select_answer_field(question, allowed)
@@ -4490,19 +4514,12 @@ def answer_question_prefer_dify(
     product_id: str | None,
     user_label: str,
 ) -> tuple[str, str, str | None, str | None, list[dict[str, str]], str, str]:
-    """第二波统一问答入口：配置 Dify 时优先 Dify（哨兵转人工同口径；引擎故障静默回落本地）。
+    """统一问答入口：检索授权尚未接通的共享远程应用停用，使用本地核准知识。
 
     返回 (status, answer_text, product_id, version_id, citations, reason, source)；source ∈ {dify, local}。
     """
-    if dify_qa_config()[1]:
-        try:
-            outcome = dify_ask_question(question, user_label)
-        except DifyQAUnavailableError:
-            outcome = None
-        if outcome is not None:
-            if outcome["status"] == "grounded":
-                return "grounded", outcome["answer"], None, None, outcome["citations"], "", "dify"
-            return "needs_human", NO_APPROVED_BASIS_ANSWER, None, None, [], "dify-no-answer", "dify"
+    # 现有 Dify 应用未在检索前约束企业和文档授权；引用校验无法证明生成上下文安全。
+    # 在正式集成支持检索前授权之前，仅使用本地获准知识回答，后台索引同步仍运行。
     status, answer_text, answer_product_id, version_id, citations, reason = answer_question_with_mode(
         db, ai, tenant_id, conversation_id, question, product_id
     )
@@ -5414,6 +5431,8 @@ def admin_permission_area(path: str) -> tuple[str, str, str]:
 
 def duplicate_leads_section(db: Database, tenant_id: str, lead: sqlite3.Row, is_admin: bool) -> str:
     """重复线索提示区块（V1-08）：提示同邮箱/同公司线索；管理员可人工合并；列出已并入记录。"""
+    if not is_admin:
+        return ''
     hints = db.find_duplicate_lead_hints(tenant_id, lead["id"])
     related = db.merged_related_leads(tenant_id, lead["id"])
     if not hints and not related:
@@ -5521,7 +5540,8 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("tasks", "/admin/tasks", "tool", "人工任务"),
         )),
         ("会话收件箱", tuple(inbox_items or ())),
-        ("产品经营", (("products", "/admin/products", "box", "产品管理"),)),
+        ("产品经营", (("knowledge", "/admin/knowledge", "book", "企业知识"),
+            ("products", "/admin/products", "box", "产品管理"),)),
         ("创意中心", (("creative", "/admin/creative", "palette", "产品展示页"),)),
         ("经营分析", (("analytics", "/admin/analytics", "chart", "分析报表"),)),
         ("团队与接入", (
@@ -5534,7 +5554,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("audit", "/admin/audit", "history", "操作记录"),
         )),
     )
-    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "creative": "创意中心", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "channels": "设置与治理", "audit": "设置与治理", "analytics": "经营分析"}
+    group_of = {"admin": "我的工作", "sales": "客户跟进", "rfqs": "客户跟进", "tasks": "客户跟进", "products": "产品经营", "knowledge": "产品经营", "creative": "创意中心", "users": "团队与接入", "sites": "团队与接入", "settings": "设置与治理", "channels": "设置与治理", "audit": "设置与治理", "analytics": "经营分析"}
     role_label = "管理员" if role == "admin" else ("员工" if role else "未登录")
     lang_target = f"{esc(path)}?lang={'en' if lang == 'zh' else 'zh'}"
     counts = nav_counts or {}
@@ -5627,7 +5647,7 @@ def parse_multipart(handler: BaseHTTPRequestHandler) -> dict[str, str | bytes]:
 DEMO_TOOL_PATHS = {"/admin/products/seed", "/admin/products/seed-lowara", "/admin/demo/seed", "/admin/lowara/seed"}
 
 # V1-01 账号与模块权限：账号只有两种（admin=管理员 / employee=普通员工）；员工的可访问模块由管理员逐项授权。
-GRANTABLE_MODULES = (("products", "产品管理"), ("tasks", "人工任务"), ("rfqs", "RFQ 询价"), ("sales", "销售工作台"), ("sites", "网站 API 接入"), ("creative", "创意中心"), ("inbox", "会话收件箱"))
+GRANTABLE_MODULES = (("products", "产品管理"), ("tasks", "人工任务"), ("rfqs", "RFQ 询价"), ("sales", "销售工作台"), ("sites", "网站 API 接入"), ("creative", "创意中心"), ("inbox", "会话收件箱"), ("channels", "渠道账号管理"))
 GRANTABLE_MODULE_KEYS = tuple(key for key, _label in GRANTABLE_MODULES)
 MODULE_LABELS = dict(GRANTABLE_MODULES)
 # 旧角色名兼容（旧库迁移与既有测试）：等价于"员工 + 对应模块授权"，能力与迁移前一致。
@@ -5868,7 +5888,7 @@ def dify_ask_question(question: str, user_label: str, timeout: int = 45) -> dict
             "product_version": "",
             "field": str(item.get("dataset_name") or ""),
         })
-    return {"status": "grounded", "answer": answer, "citations": citations}
+    return {"status": "grounded", "answer": answer, "citations": citations, "resources": _dify_retriever_resources(data)}
 
 
 def dify_kb_config() -> tuple[str, str, str]:
@@ -5959,13 +5979,14 @@ def sync_kb_to_dify(db: Database, tenant_id: str, actor: str = "demo-admin", for
         digest = hashlib.sha256(doc["text"].encode("utf-8")).hexdigest()
         state = state_rows.get(doc["product_id"])
         try:
-            if state and state["document_id"] and state["content_hash"] == digest and not force:
+            if state and state["document_id"] and state["content_hash"] == digest and not state['last_error'] and not force:
                 stats["skipped"] += 1
                 continue
             if state and state["document_id"]:
-                _dify_kb_request(base, api_key, "POST", f"/v1/datasets/{dataset_id}/documents/{state['document_id']}/update-by-text",
+                updated = _dify_kb_request(base, api_key, "POST", f"/v1/datasets/{dataset_id}/documents/{state['document_id']}/update-by-text",
                                  {"name": doc["name"], "text": doc["text"], "process_rule": {"mode": "automatic"}})
                 upsert_state(doc["product_id"], state["document_id"], digest, "")
+                db.conn.execute("UPDATE kb_sync_state SET batch=?,indexing_status=? WHERE tenant_id=? AND product_id=?", (str((updated or {}).get('batch') or ''), str(((updated or {}).get('document') or {}).get('indexing_status') or 'pending'), tenant_id, doc['product_id']))
                 stats["updated"] += 1
             else:
                 created = _dify_kb_request(base, api_key, "POST", f"/v1/datasets/{dataset_id}/document/create-by-text",
@@ -5974,6 +5995,7 @@ def sync_kb_to_dify(db: Database, tenant_id: str, actor: str = "demo-admin", for
                 if not document_id:
                     raise ChannelSendError("创建知识库文档未返回 document.id")
                 upsert_state(doc["product_id"], document_id, digest, "")
+                db.conn.execute("UPDATE kb_sync_state SET batch=?,indexing_status=? WHERE tenant_id=? AND product_id=?", (str((created or {}).get('batch') or ''), str(((created or {}).get('document') or {}).get('indexing_status') or 'pending'), tenant_id, doc['product_id']))
                 stats["created"] += 1
         except ChannelSendError as error:
             stats["failed"] += 1
@@ -5994,7 +6016,9 @@ def sync_kb_to_dify(db: Database, tenant_id: str, actor: str = "demo-admin", for
             db.conn.execute("UPDATE kb_sync_state SET last_error=?, synced_at=? WHERE tenant_id=? AND product_id=?", (str(error)[:200], now_iso(), tenant_id, product_id))
         db.conn.commit()
 
-    db._audit(tenant_id, "kb_sync", "dify", "synced", actor,
+    refresh_indexing_status(db, tenant_id)
+    if actor != 'system:knowledge-sync' or any(stats[k] for k in ('created', 'updated', 'deleted', 'failed')):
+        db._audit(tenant_id, "kb_sync", "dify", "synced", actor,
               json.dumps({key: stats[key] for key in ("created", "updated", "deleted", "skipped", "failed")}, ensure_ascii=False))
     db.conn.commit()
     return stats
@@ -6051,7 +6075,8 @@ class ChannelSendError(RuntimeError):
 def channel_api_base(channel: str, config: dict) -> str:
     """渠道 API 基地址：环境变量 > 公开配置 > 官方默认。本地模拟用环境变量覆盖。"""
     env_base = os.environ.get(CHANNEL_API_BASE_ENV.get(channel, ""), "").strip()
-    base = env_base or str(config.get("api_base") or "").strip() or CHANNEL_OFFICIAL_API_BASE.get(channel, "")
+    configured = str(config.get("api_base") or "").strip()
+    base = configured if config.get('managed_runtime') and configured else env_base or configured or CHANNEL_OFFICIAL_API_BASE.get(channel, "")
     return base.rstrip("/")
 
 
@@ -6161,7 +6186,7 @@ def _send_whatsapp_twilio(config: dict, external_user_id: str, text: str) -> str
     """
     account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
     auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
-    sender = os.environ.get("TWILIO_WHATSAPP_FROM", "").strip()
+    sender = str(config.get("sender_number") or os.environ.get("TWILIO_WHATSAPP_FROM", "")).strip()
     if not account_sid:
         raise ChannelSendError("缺少环境变量 TWILIO_ACCOUNT_SID")
     if not auth_token:
@@ -6196,7 +6221,7 @@ def _send_whatsapp_meta(config: dict, external_user_id: str, text: str) -> str:
     环境变量：META_WHATSAPP_TOKEN / META_PHONE_NUMBER_ID；可选 META_API_BASE / META_API_VERSION（默认 graph.facebook.com / v23.0）。
     """
     token = os.environ.get("META_WHATSAPP_TOKEN", "").strip()
-    phone_id = os.environ.get("META_PHONE_NUMBER_ID", "").strip()
+    phone_id = str(config.get("phone_number_id") or os.environ.get("META_PHONE_NUMBER_ID", "")).strip()
     if not token:
         raise ChannelSendError("缺少环境变量 META_WHATSAPP_TOKEN")
     if not phone_id:
@@ -6230,6 +6255,7 @@ _WHATSAPP_PERSONAL_SENT_IDS: list = []
 _WHATSAPP_PERSONAL_SENT_TEXTS: list = []
 _WHATSAPP_PERSONAL_START_GATE_LOCK = threading.Lock()
 _WHATSAPP_PERSONAL_START_LAST_AT: list = [0.0]
+_WHATSAPP_PERSONAL_START_BY_SESSION: dict = {}
 _WHATSAPP_PERSONAL_LAST_STATUS: dict = {"value": ""}
 
 
@@ -6240,6 +6266,7 @@ def _whatsapp_personal_reset_state() -> None:
         _WHATSAPP_PERSONAL_SENT_IDS.clear()
         _WHATSAPP_PERSONAL_SENT_TEXTS.clear()
         _WHATSAPP_PERSONAL_START_LAST_AT[0] = 0.0
+        _WHATSAPP_PERSONAL_START_BY_SESSION.clear()
         _WHATSAPP_PERSONAL_LAST_STATUS["value"] = ""
 
 
@@ -6386,6 +6413,8 @@ def whatsapp_personal_session_state(config: dict, timeout: int = 6) -> dict:
         with urllib_request.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except urllib_error.HTTPError as error:
+        if error.code == 404:
+            return {"session": session, "status": "STOPPED", "status_label": "尚未连接", "me_name": "", "me_id": "", "engine": ""}
         raise ChannelSendError(f"桥接口拒绝：HTTP {error.code}") from error
     except (urllib_error.URLError, TimeoutError, OSError) as error:
         raise ChannelSendError(f"桥服务不可达：{error}") from error
@@ -6512,12 +6541,25 @@ def whatsapp_personal_start_session(config: dict, timeout: int = 15) -> dict:
         raise ChannelSendError("桥接地址未配置")
 
     now = time.time()
+    dedicated = bool(config.get('managed_runtime')) or session != 'default'
+    start_key = (base, session)
     with _WHATSAPP_PERSONAL_START_GATE_LOCK:
-        if now - _WHATSAPP_PERSONAL_START_LAST_AT[0] < 2.5:
+        last_start = _WHATSAPP_PERSONAL_START_BY_SESSION.get(start_key, 0.0) if dedicated else _WHATSAPP_PERSONAL_START_LAST_AT[0]
+        if now - last_start < 2.5:
             state = whatsapp_personal_session_state(config)
             return {"session": state["session"], "status": state["status"], "status_label": state["status_label"], "note": "busy"}
-        _WHATSAPP_PERSONAL_START_LAST_AT[0] = now
+        if not dedicated:
+            _WHATSAPP_PERSONAL_START_LAST_AT[0] = now
+        else:
+            _WHATSAPP_PERSONAL_START_BY_SESSION[start_key] = now
 
+    session_payload = {"name": session, "start": True}
+    if config.get('callback_url'):
+        hook = {'url': config['callback_url'], 'events': ['message.any', 'session.status']}
+        hmac_key = os.environ.get('WHATSAPP_PERSONAL_HMAC_KEY', '').strip()
+        if hmac_key:
+            hook['hmac'] = {'key': hmac_key}
+        session_payload['config'] = {'webhooks': [hook]}
     good = ("SCAN_QR_CODE", "WORKING", "STARTING")
 
     def _wait_window(seconds: float = 6.0) -> dict:
@@ -6541,7 +6583,7 @@ def whatsapp_personal_start_session(config: dict, timeout: int = 15) -> dict:
             result = _finish("started")
         except ChannelSendError as error:
             if getattr(error, "http_status", 0) == 404:
-                _whatsapp_personal_bridge_post(base, api_key, "/api/sessions", {"name": session, "start": True}, timeout=timeout)
+                _whatsapp_personal_bridge_post(base, api_key, "/api/sessions", session_payload, timeout=timeout)
                 result = _finish("created")
             else:
                 raise
@@ -6560,11 +6602,11 @@ def whatsapp_personal_start_session(config: dict, timeout: int = 15) -> dict:
         return result
     # 最后手段：删除重建（失败态无鉴权可丢；重建必得全新二维码）
     _whatsapp_personal_delete_session(base, api_key, session, timeout=timeout)
-    _whatsapp_personal_bridge_post(base, api_key, "/api/sessions", {"name": session, "start": True}, timeout=timeout)
+    _whatsapp_personal_bridge_post(base, api_key, "/api/sessions", session_payload, timeout=timeout)
     return _finish("recreated")
 
 
-def whatsapp_personal_logout_session(config: dict, timeout: int = 15) -> dict:
+def whatsapp_personal_logout_session(config: dict, timeout: int = 15, restart: bool = True) -> dict:
     """「退出登录」：让账号从桥上退出（解绑手机），随后自动进入扫码态以便重新绑定。
 
     历史可见性由「是否连接」规则接管：退出后收件箱显示「账号未连接」，重新扫码后恢复。
@@ -6587,6 +6629,8 @@ def whatsapp_personal_logout_session(config: dict, timeout: int = 15) -> dict:
         state = whatsapp_personal_session_state(config)
     if state["status"] == "WORKING":
         raise ChannelSendError("退出未完成（账号仍在连接状态），请稍后重试")
+    if not restart:
+        return {"session": session, "status": state["status"], "status_label": state["status_label"], "me_name": state["me_name"]}
     if state["status"] in ("STOPPED", "FAILED", "UNKNOWN"):
         try:
             _whatsapp_personal_bridge_post(base, api_key, f"/api/sessions/{quote(session, safe='')}/start", {}, timeout=timeout)
@@ -6688,7 +6732,8 @@ def dispatch_outbound(db: Database, tenant_id: str, message_id: str) -> tuple[bo
         (now_iso(), message_id),
     )
     db.conn.commit()
-    account = db.get_channel_account(tenant_id, channel)
+    account_id = conversation['channel_account_id']
+    account = db.get_business_connection(tenant_id, account_id) if account_id else db.get_channel_account(tenant_id, channel)
     if not account or account["status"] != "enabled":
         return _mark_outbound_failed(db, message_id, "渠道未启用")
     identity = db.get_channel_identity_by_conversation(tenant_id, channel, conversation["id"])
@@ -6698,6 +6743,10 @@ def dispatch_outbound(db: Database, tenant_id: str, message_id: str) -> tuple[bo
         config = json.loads(account["config_json"] or "{}")
     except json.JSONDecodeError:
         config = {}
+    if account_id and message['actor_email']:
+        actor = db.conn.execute('SELECT id FROM users WHERE tenant_id=? AND email=? AND active=1', (tenant_id, message['actor_email'])).fetchone()
+        if not actor or not db.can_send_conversation(tenant_id, conversation['id'], actor['id']):
+            return _mark_outbound_failed(db, message_id, '没有此账号的发送授权')
     try:
         external_id = send_channel_text(channel, config, identity["external_user_id"], channel_outbound_text(message))
     except ChannelSendError as error:
@@ -6815,18 +6864,27 @@ def apply_whatsapp_delivery_status(db: Database, message_sid: str, status: str, 
     return True
 
 
-def get_or_create_channel_conversation(db: Database, tenant_id: str, channel: str, external_user_id: str, display_name: str, locale: str = "en") -> str:
+def get_or_create_channel_conversation(db: Database, tenant_id: str, channel: str, external_user_id: str, display_name: str, locale: str = "en", account_id: str = "") -> str:
     """外部用户 ↔ 持续会话：一个外部用户对应一个长期会话；并发下靠唯一约束兜底。"""
-    identity = db.get_channel_identity(tenant_id, channel, external_user_id)
+    account = db.get_business_connection(tenant_id, account_id) if account_id else None
+    if account_id and (not account or account['channel'] != channel):
+        raise ValueError("连接不属于当前企业渠道")
+    identity = db.get_channel_identity(tenant_id, channel, external_user_id, account_id)
     if identity:
         return identity["conversation_id"]
     conversation_id = db.create_conversation(tenant_id, channel, locale if locale in {"en", "zh"} else "en")
     try:
-        db.bind_channel_identity(tenant_id, channel, external_user_id, display_name, conversation_id)
+        db.bind_channel_identity(tenant_id, channel, external_user_id, display_name, conversation_id, account_id)
+        if account_id:
+            account = db.get_business_connection(tenant_id, account_id)
+            if not account or account['channel'] != channel:
+                raise ValueError("连接不属于当前企业渠道")
+            db.conn.execute("UPDATE conversations SET channel_account_id=?,owner_user_id=?,original_owner_user_id=? WHERE tenant_id=? AND id=?", (account_id, account['owner_user_id'], account['owner_user_id'], tenant_id, conversation_id))
+            db.conn.commit()
         return conversation_id
     except sqlite3.IntegrityError:
         db.conn.rollback()
-        existing = db.get_channel_identity(tenant_id, channel, external_user_id)
+        existing = db.get_channel_identity(tenant_id, channel, external_user_id, account_id)
         if not existing:
             raise
         # 本次新建的会话没被绑定（并发败者）：没有消息就清理，避免收件箱出现空会话。
@@ -6886,20 +6944,28 @@ def channel_recommendation_summary(results: list, missing: list) -> str:
     return "\n".join(parts)
 
 
-def process_channel_message(db: Database, ai, tenant_id: str, channel: str, external_user_id: str, display_name: str, text: str, external_message_id: str) -> dict:
+def process_channel_message(db: Database, ai, tenant_id: str, channel: str, external_user_id: str, display_name: str, text: str, external_message_id: str, account_id: str = "") -> dict:
     """渠道买家消息 → 落库 + 服务端分流（全部复用网页聊天的业务函数）。"""
     text = str(text or "").strip()
     if not text:
         return {"action": "empty"}
+    account = db.get_business_connection(tenant_id, account_id) if account_id else db.get_channel_account(tenant_id, channel)
+    if account_id and (not account or account['channel'] != channel):
+        raise ValueError("连接不属于当前企业渠道")
+    if account_id and account and not account['legacy']:
+        external_message_id = account_id + ':' + external_message_id
     existing = db.find_message_by_external(tenant_id, channel, external_message_id)
     if existing:
         return {"action": "duplicate", "conversation_id": existing["conversation_id"], "message_id": existing["id"]}
-    conversation_id = get_or_create_channel_conversation(db, tenant_id, channel, external_user_id, display_name)
+    conversation_id = get_or_create_channel_conversation(db, tenant_id, channel, external_user_id, display_name, account_id=account_id)
     message_id = db.save_message(tenant_id, conversation_id, "buyer", text, channel, channel=channel, external_message_id=external_message_id)
     conversation = db.get_conversation(tenant_id, conversation_id)
     if not conversation:
         return {"action": "error", "error": "conversation_missing"}
     result: dict = {"action": "recorded", "conversation_id": conversation_id, "message_id": message_id}
+    if account and (not account['legacy'] or json.loads(account['config_json']).get('ai_managed')) and not account['ai_enabled']:
+        result['action'] = 'ai_disabled'
+        return result
     # ① 工程师追问待回复：整条消息作为对追问的补充（与网页聊天同一语义）。
     waiting = db.conn.execute(
         "SELECT id FROM human_tasks WHERE tenant_id=? AND conversation_id=? AND status='waiting_buyer' ORDER BY updated_at DESC LIMIT 1",
@@ -7008,7 +7074,7 @@ def process_channel_message(db: Database, ai, tenant_id: str, channel: str, exte
 
 
 
-def handle_langbot_event(db: Database, ai, tenant_id: str, event: dict) -> dict | None:
+def handle_langbot_event(db: Database, ai, tenant_id: str, event: dict, account_id: str = "") -> dict | None:
     """LangBot 事件 → 渠道消息处理（person 消息与 Telegram 同口径走同一分流）。
 
     事件由 LangBot 的 Webhook 推送；uuid 为事件唯一标识（消息去重键）；
@@ -7039,17 +7105,18 @@ def handle_langbot_event(db: Database, ai, tenant_id: str, event: dict) -> dict 
         return {"action": "ignored_non_text"}
     platform_label = normalize_platform_label(str(data.get("adapter_name") or "")) or "LangBot"
     display_name = str(sender.get("name") or "").strip() or f"{platform_label} 用户 {external_user_id}"
-    result = process_channel_message(db, ai, tenant_id, "langbot", external_user_id, display_name, text, external_message_id)
+    result = process_channel_message(db, ai, tenant_id, "langbot", external_user_id, display_name, text, external_message_id, account_id)
     if result.get("action") != "duplicate":
         meta = {"adapter": platform_label}
         bot_uuid = str(data.get("bot_uuid") or "").strip()
         if bot_uuid:
             meta["bot_uuid"] = bot_uuid
-        db.update_channel_identity_meta(tenant_id, "langbot", external_user_id, meta)
+        db.conn.execute("UPDATE channel_identities SET platform_meta=? WHERE tenant_id=? AND conversation_id=?", (json.dumps(meta), tenant_id, result['conversation_id']))
+        db.conn.commit()
     return result
 
 
-def handle_whatsapp_inbound(db: Database, ai, tenant_id: str, params: dict) -> dict:
+def handle_whatsapp_inbound(db: Database, ai, tenant_id: str, params: dict, account_id: str = "") -> dict:
     """Twilio 入站消息（WhatsApp）→ 统一大脑 process_channel_message。
 
     - MessageSid 为消息去重键；From 去掉 `whatsapp:` 前缀后作为外部用户 ID；
@@ -7068,10 +7135,10 @@ def handle_whatsapp_inbound(db: Database, ai, tenant_id: str, params: dict) -> d
     if not text:
         return {"action": "ignored_non_text"}
     display_name = profile or f"WhatsApp 用户 {external_user_id}"
-    return process_channel_message(db, ai, tenant_id, "whatsapp", external_user_id, display_name, text, message_sid)
+    return process_channel_message(db, ai, tenant_id, "whatsapp", external_user_id, display_name, text, message_sid, account_id)
 
 
-def handle_whatsapp_meta_event(db: Database, ai, tenant_id: str, payload: dict) -> dict:
+def handle_whatsapp_meta_event(db: Database, ai, tenant_id: str, payload: dict, account_id: str = "") -> dict:
     """Meta Cloud API webhook 事件：messages（入站）与 statuses（回执）分派。
 
     - 入站：id（wamid）= 去重键；from 归一化补「+」；type=text 以外的首期跳过；
@@ -7108,7 +7175,7 @@ def handle_whatsapp_meta_event(db: Database, ai, tenant_id: str, payload: dict) 
                 external_user_id = "+" + from_raw.lstrip("+")
                 if not display_name:
                     display_name = f"WhatsApp 用户 {external_user_id}"
-                result = process_channel_message(db, ai, tenant_id, "whatsapp", external_user_id, display_name, text, msg_id)
+                result = process_channel_message(db, ai, tenant_id, "whatsapp", external_user_id, display_name, text, msg_id, account_id)
                 if result.get("action") == "duplicate":
                     actions["duplicate"] += 1
                 else:
@@ -7131,7 +7198,7 @@ def handle_whatsapp_meta_event(db: Database, ai, tenant_id: str, payload: dict) 
     return actions
 
 
-def handle_whatsapp_personal_event(db: Database, ai, tenant_id: str, event: dict) -> dict:
+def handle_whatsapp_personal_event(db: Database, ai, tenant_id: str, event: dict, account_id: str = "") -> dict:
     """WAHA 事件 → 渠道消息处理（WhatsApp 个人版桥）。
 
     - 只处理 event=="message" 的文本消息；群聊/状态广播/媒体跳过；
@@ -7167,6 +7234,10 @@ def handle_whatsapp_personal_event(db: Database, ai, tenant_id: str, event: dict
     text = str(payload.get("body") or "").strip()
     from_me = bool(payload.get("fromMe"))
     if from_me:
+        account = db.get_business_connection(tenant_id, account_id) if account_id else None
+        if account and not account['legacy']:
+            # 企业多账号不共用旧单账号的自聊调试身份和回声缓存。
+            return {"action": "ignored_outgoing"}
         chat_jid = to_jid or _whatsapp_personal_chat_from_message_id(message_id)
         if not _whatsapp_personal_is_self_chat(from_jid, chat_jid):
             return {"action": "ignored_outgoing"}
@@ -7178,7 +7249,7 @@ def handle_whatsapp_personal_event(db: Database, ai, tenant_id: str, event: dict
     display_name = str(payload.get("notifyName") or (data.get("notifyName") if isinstance(data, dict) else "") or "").strip()
     if not display_name:
         display_name = f"WhatsApp（个人版）用户 {from_jid.split('@')[0]}"
-    result = process_channel_message(db, ai, tenant_id, "whatsapp_personal", from_jid, display_name, text, message_id)
+    result = process_channel_message(db, ai, tenant_id, "whatsapp_personal", from_jid, display_name, text, message_id, account_id)
     return result
 
 
@@ -7638,7 +7709,7 @@ AUDIT_ACTION_LABELS = {
 }
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
     db: Database
     # AI 调用边界：由 make_server 按显式模式装配（rules 时 ai 为空操作对象，不发外部请求）。
     ai: AIService | None = None
@@ -7704,6 +7775,12 @@ class Handler(BaseHTTPRequestHandler):
         requirement: str | None = "deny"
         if path in ("/admin", "/admin/nav-counts"):
             requirement = None
+        elif path == '/admin/knowledge' or path.startswith('/admin/knowledge/'):
+            requirement = None
+        elif path.startswith('/admin/customer-transfers'):
+            requirement = 'admin'
+        elif path.startswith('/admin/channels/accounts') or path == '/admin/channels':
+            requirement = 'module:channels'
         elif path.startswith("/admin/demo") or path.startswith("/admin/lowara") or path.startswith("/admin/users") or path.startswith("/admin/settings") or path.startswith("/admin/channels") or path.startswith("/admin/audit") or path.startswith("/admin/analytics") or path.startswith("/admin/export") or path.startswith("/admin/material-tasks"):
             requirement = "admin"
         else:
@@ -7733,7 +7810,7 @@ class Handler(BaseHTTPRequestHandler):
             role_label = "管理员" if self.user_role == "admin" else "员工"
             self.send_html(self.console_page("无权限", permission_notice(area, role_label, required, why), ""), 403)
             return False
-        return True
+        return self.business_object_authorized(path, method)
 
     def send_html(self, content: str, status: int = 200) -> None:
         data = content.encode("utf-8")
@@ -7852,7 +7929,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         if not self.user_id:
             return {}
-        summary = self.db.get_admin_summary(self.tenant_id)
+        summary = self.business_summary()
         counts: dict[str, int] = {}
         if self.has_module("products"):
             counts["products"] = summary["products_needs_review"]
@@ -7901,7 +7978,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def console_nav_keys(self) -> set[str]:
         """侧栏可见集：概览人人可见；管理员另见成员管理/渠道接入等；员工按已授权模块。"""
-        keys = {"admin"}
+        keys = {"admin", "knowledge"}
         if self.user_role == "admin":
             keys.add("users")
             keys.add("settings")
@@ -8121,8 +8198,10 @@ class Handler(BaseHTTPRequestHandler):
         if match:
             self.admin_inbox_conversation(match.group(1), match.group(2), query)
             return
+        if self.business_get(path, query):
+            return
         if path == "/admin/channels":
-            self.admin_channels(query)
+            self.business_channels_page(query)
             return
         if path == "/admin/channels/whatsapp-personal/session.json":
             self.admin_whatsapp_personal_session_state()
@@ -8881,6 +8960,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             form = parse_multipart(self)
+            if self.business_post(path, form):
+                return
+            audience_match = re.fullmatch(r'/admin/products/([a-f0-9]+)/fields/([a-z0-9_]+)/audience', path)
+            if audience_match:
+                product_id, field_key = audience_match.groups()
+                audience = str(form.get('audience', ''))
+                if audience not in ('internal', 'external'):
+                    raise ValueError('知识使用范围无效')
+                row = self.db.conn.execute('SELECT * FROM product_fields WHERE tenant_id=? AND product_id=? AND field_key=?', (self.tenant_id, product_id, field_key)).fetchone()
+                if not row:
+                    raise ValueError('知识不存在')
+                self.db.conn.execute('UPDATE product_fields SET audience=? WHERE tenant_id=? AND id=?', (audience, self.tenant_id, row['id']))
+                self.db._audit(self.tenant_id, 'product_field', row['id'], 'knowledge_audience_changed', self.actor, audience)
+                self.db.conn.commit()
+                try_sync_kb_quietly(self.db, self.tenant_id, self.actor)
+                self.redirect('/admin/products/' + product_id + '#fields')
+                return
             if path == "/admin/products":
                 self.db.create_product(self.tenant_id, str(form.get("model", "")), str(form.get("name", "")), str(form.get("use_case", "")), self.actor)
                 self.redirect("/admin/products")
@@ -9133,6 +9229,11 @@ class Handler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/admin/sales/([a-f0-9]+)/replies/([a-f0-9]+)", path)
             if match:
                 rfq_id, reply_id = match.groups()
+                reply = self.db.conn.execute('SELECT * FROM lead_replies WHERE tenant_id=? AND id=?', (self.tenant_id, reply_id)).fetchone()
+                lead = self.db.get_lead(self.tenant_id, reply['lead_id']) if reply else None
+                if not lead or lead['rfq_id'] != rfq_id:
+                    self.send_html(self.console_page('未找到', '<div class="error">回复不属于当前询价。</div>', 'sales'), 404)
+                    return
                 action = str(form.get("action", "save"))
                 try:
                     if action == "sent":
@@ -9662,6 +9763,9 @@ class Handler(BaseHTTPRequestHandler):
                 actions = f"<form method='post' action='/admin/products/{product_id}/fields/{esc(field['field_key'])}/reopen' class='inline'><button class='secondary'>退回待核</button></form>"
             else:
                 actions = f"<form method='post' action='/admin/products/{product_id}/fields/{esc(field['field_key'])}/approve' class='inline'><button class='secondary'>重新核准</button></form>"
+            audience_label = '对外问答' if field['audience'] == 'external' else '仅内部知识'
+            actions += f"<form method='post' action='/admin/products/{product_id}/fields/{esc(field['field_key'])}/audience'><select name='audience'><option value='external'{' selected' if field['audience'] == 'external' else ''}>对外问答</option><option value='internal'{' selected' if field['audience'] == 'internal' else ''}>仅内部知识</option></select><button class='secondary'>保存使用范围</button></form>"
+            review_bits.append(audience_label)
             field_rows.append(
                 f"<tr><td><b>{esc(field['label'])}</b><br><span class='field-state'>{esc(field['field_key'])} · {esc(origin_labels.get(field['origin'], field['origin']))}</span></td>"
                 f"<td>{esc(field['value'])} {esc(field['unit'])}</td>"
@@ -9894,6 +9998,7 @@ class Handler(BaseHTTPRequestHandler):
 {summary_strip}
 {missing_html}
 {category_section}
+<p class='field-state'>AI 资料状态：{esc(knowledge_sync_status(self.db, self.tenant_id))}</p>
 <section class='card' id='fields'><div class='panel-title'><h2>字段核对（逐项）</h2><span class='muted'>待处理 {pending_count} 项</span></div>{pending_html}<p class='muted'>候选字段需逐项核准或驳回；驳回保留原值并记录原因。已核准关键字段被修改后会回到待核对，需重新核准并发布新版本；缺项不会被推测值填充。</p><table><thead><tr><th>字段</th><th>值</th><th>来源与状态</th><th>操作</th></tr></thead><tbody>{field_table}</tbody></table><details class='detail-toggle'><summary>手动补充 / 修改字段值</summary><div><form method='post' action='/admin/products/{product_id}/fields'><div class='form-grid'><div><label>字段</label><select name='field_key'>{field_options}</select></div><div><label>值 *</label><input name='value' required placeholder='例如 20-80'></div><div><label>单位</label><input name='unit' placeholder='m³/h、m、°C'></div><div><label>来源</label><select name='source_document_id'>{source_options}</select></div><div class='full'><label>原文位置 *</label><input name='source_location' required placeholder='第 1 页：规格参数表'></div></div><p><button>保存为候选值</button></p></form></div></details></section>
 <section class='card' style='margin-top:18px'><div class='panel-title'><h2>发布与版本</h2><span class='muted'>{version_line}</span></div><div class='actions' style='display:flex;gap:8px;flex-wrap:wrap'>{action_buttons}</div><p class='muted'>发布将冻结当前已核准事实与已开放公开文件清单；撤回后买方页不可访问，已提交的询价保留原版本快照。</p></section>
 {version_section}
@@ -10103,7 +10208,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_html(layout("Buyer inquiry", body, lang=lang), 200)
 
     def admin_dashboard(self, query: dict[str, list[str]]) -> None:
-        summary = self.db.get_admin_summary(self.tenant_id)
+        summary = self.business_summary()
         role_label = "管理员" if self.user_role == "admin" else "员工"
         demo_notice = ""
         if self.demo_tools and query.get("notice", [""])[0] == "demo":
@@ -10383,6 +10488,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _inbox_conversation_in_section(self, section: dict, conversation: sqlite3.Row) -> bool:
         """会话是否属于该收件箱模块：网站聊天=web+website_api；原生=对应 source；平台=LangBot 轨按 adapter 归属。"""
+        if not self.db.can_view_conversation(self.tenant_id, conversation['id'], self.user_id):
+            return False
         source = conversation["source"] or ""
         kind = section.get("kind")
         if kind == "web":
@@ -10506,9 +10613,10 @@ class Handler(BaseHTTPRequestHandler):
         params = self._twilio_verified_params()
         if params is None:
             return
-        account = self.db.conn.execute(
-            "SELECT * FROM channel_accounts WHERE channel='whatsapp' AND status='enabled' ORDER BY rowid LIMIT 1"
-        ).fetchone()
+        accounts = self.db.conn.execute("SELECT * FROM channel_accounts WHERE channel='whatsapp' AND status='enabled'").fetchall()
+        target = str(params.get('To') or '').removeprefix('whatsapp:')
+        matches = [a for a in accounts if str(json.loads(a['config_json']).get('sender_number') or '') == target and target]
+        account = matches[0] if len(matches) == 1 else (accounts[0] if len(accounts) == 1 and accounts[0]['legacy'] else None)
         if not account:
             self.send_twiml()
             return
@@ -10523,7 +10631,7 @@ class Handler(BaseHTTPRequestHandler):
             ).fetchone()
             before_rowid = snapshot["n"] if snapshot else 0
         try:
-            outcome = handle_whatsapp_inbound(self.db, self.ai, account["tenant_id"], params)
+            outcome = handle_whatsapp_inbound(self.db, self.ai, account["tenant_id"], params, account["id"] if not account["legacy"] else "")
         except Exception:
             # 500 让 Twilio 重试（消息去重兜底）；4xx/5xx 无需 TwiML 体。
             self.send_json({"ok": False, "error": "processing_failed"}, 500)
@@ -10579,14 +10687,17 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             self.send_json({"ok": True, "skipped": "malformed"}, 200)
             return
-        account = self.db.conn.execute(
-            "SELECT * FROM channel_accounts WHERE channel='whatsapp' AND status='enabled' ORDER BY rowid LIMIT 1"
-        ).fetchone()
-        if not account:
-            self.send_json({"ok": True, "skipped": "channel_disabled"}, 200)
-            return
+        accounts = self.db.conn.execute("SELECT * FROM channel_accounts WHERE channel='whatsapp' AND status='enabled'").fetchall()
         try:
-            outcome = handle_whatsapp_meta_event(self.db, self.ai, account["tenant_id"], payload)
+            outcomes = []
+            for entry in payload.get('entry') or []:
+                for change in entry.get('changes') or []:
+                    phone_id = str(((change.get('value') or {}).get('metadata') or {}).get('phone_number_id') or '')
+                    matches = [a for a in accounts if phone_id and str(json.loads(a['config_json']).get('phone_number_id') or '') == phone_id]
+                    account = matches[0] if len(matches) == 1 else (accounts[0] if len(accounts) == 1 and accounts[0]['legacy'] else None)
+                    if account:
+                        outcomes.append(handle_whatsapp_meta_event(self.db, self.ai, account['tenant_id'], {'entry': [{'changes': [change]}]}, account['id'] if not account['legacy'] else ''))
+            outcome = outcomes[0] if len(outcomes) == 1 else {'routes': outcomes}
         except Exception:
             self.send_json({"ok": False, "error": "processing_failed"}, 500)
             return
@@ -10598,8 +10709,11 @@ class Handler(BaseHTTPRequestHandler):
         HMAC 加固：若配置 WHATSAPP_PERSONAL_HMAC_KEY 且请求带 X-Webhook-Hmac，必须验签通过；
         未带签名头时仅凭 URL 令牌（与既有桥同口径，后续可升级为强制签名）。
         """
+        accounts = self.db.conn.execute("SELECT * FROM channel_accounts WHERE channel='whatsapp_personal'").fetchall()
+        matched = [a for a in accounts if not a['legacy'] and hmac.compare_digest(str(json.loads(a['config_json']).get('webhook_token') or ''), token)]
+        routed_account = matched[0] if len(matched) == 1 else None
         expected = os.environ.get("WHATSAPP_PERSONAL_TOKEN", "").strip()
-        if not expected or not hmac.compare_digest(str(token), expected):
+        if not routed_account and (not expected or not hmac.compare_digest(str(token), expected)):
             self.send_json({"error": "invalid_token"}, 403)
             return
         hmac_key = os.environ.get("WHATSAPP_PERSONAL_HMAC_KEY", "").strip()
@@ -10630,18 +10744,22 @@ class Handler(BaseHTTPRequestHandler):
         previous_status = _WHATSAPP_PERSONAL_LAST_STATUS["value"]
         if event_type == "session.status":
             status_value = _whatsapp_personal_event_status(event)
-            if status_value:
+            if status_value and not routed_account:
                 _WHATSAPP_PERSONAL_LAST_STATUS["value"] = status_value
-        account = self.db.conn.execute(
-            "SELECT * FROM channel_accounts WHERE channel='whatsapp_personal' ORDER BY rowid LIMIT 1"
-        ).fetchone()
+        legacy_accounts = [a for a in accounts if a['legacy']]
+        account = routed_account or (legacy_accounts[0] if len(legacy_accounts) == 1 else None)
+        if routed_account:
+            config = json.loads(routed_account['config_json'])
+            if str(event.get('session') or '') != _whatsapp_personal_session(config):
+                self.send_json({'error': 'account_mismatch'}, 403)
+                return
         if not account:
             self.send_json({"ok": True, "skipped": "channel_disabled"}, 200)
             return
         if account["status"] != "enabled":
             # 渠道停用：消息事件一律跳过；但「扫码成功」（SCAN_QR_CODE → WORKING）自动启用渠道——
             # 对齐「扫码即用」体验（用户 2026-10-09 反馈）；手动停用的渠道在无扫码流程时不被打扰。
-            if event_type == "session.status" and status_value == "WORKING" and previous_status == "SCAN_QR_CODE":
+            if account['legacy'] and event_type == "session.status" and status_value == "WORKING" and previous_status == "SCAN_QR_CODE":
                 self.db.set_channel_enabled(account["tenant_id"], "whatsapp_personal", True, "system:scan-auto-enable")
                 _whatsapp_personal_debug({
                     "at": now_iso(), "event": event_type, "from": "", "to": "", "fromMe": False,
@@ -10652,7 +10770,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "skipped": "channel_disabled"}, 200)
             return
         try:
-            outcome = handle_whatsapp_personal_event(self.db, self.ai, account["tenant_id"], event)
+            outcome = handle_whatsapp_personal_event(self.db, self.ai, account["tenant_id"], event, account["id"] if not account["legacy"] else "")
         except Exception:
             self.send_json({"ok": False, "error": "processing_failed"}, 500)
             return
@@ -10699,8 +10817,12 @@ class Handler(BaseHTTPRequestHandler):
         payload = self.read_json()
         if payload is None:
             return
+        config = json.loads(account['config_json'])
+        if not account['legacy'] and str((payload.get('data') or {}).get('bot_uuid') or '') != str(config.get('bot_uuid') or ''):
+            self.send_json({'error': 'account_mismatch'}, 403)
+            return
         try:
-            outcome = handle_langbot_event(self.db, self.ai, account["tenant_id"], payload)
+            outcome = handle_langbot_event(self.db, self.ai, account["tenant_id"], payload, account["id"] if not account["legacy"] else "")
         except Exception:
             self.send_json({"status": "error", "error": "processing_failed"}, 500)
             return
@@ -10846,7 +10968,7 @@ class Handler(BaseHTTPRequestHandler):
         label = section["label"]
         # 个人版：未连接（未登录）时不显示历史聊天记录（用户设定，2026-10-09）
         bridge = None
-        if section["kind"] == "native" and section.get("native_channel") == "whatsapp_personal":
+        if section["kind"] == "native" and section.get("native_channel") == "whatsapp_personal" and not any(not a['legacy'] for a in self.db.list_business_connections(self.tenant_id, self.user_id)):
             bridge = self.whatsapp_personal_inbox_state()
             if not (bridge.get("ok") and bridge.get("status") == "WORKING"):
                 reason = str(bridge.get("error") or "").strip() or f"当前状态：{bridge.get('status_label') or '未连接'}"
@@ -10870,6 +10992,9 @@ class Handler(BaseHTTPRequestHandler):
                 f"AND CASE WHEN json_valid(i.platform_meta) THEN lower(COALESCE(json_extract(i.platform_meta,'$.adapter'),'')) ELSE '' END IN ({placeholders}))"
             )
             params = tuple(aliases)
+        access_clause, access_args = self.db.conversation_scope(self.tenant_id, self.user_id)
+        source_where += ' AND ' + access_clause
+        params = (*params, *access_args)
         rows = self.db.conn.execute(
             f"""SELECT c.*,
                 (SELECT COUNT(*) FROM messages m WHERE m.tenant_id=c.tenant_id AND m.conversation_id=c.id) AS message_count,
@@ -10920,13 +11045,13 @@ class Handler(BaseHTTPRequestHandler):
         elif section["has_data"]:
             empty = "暂时没有会话。"
         else:
-            empty = f"{label} 已接入（LangBot），还没有消息；确认 LangBot 中对应平台的机器人已启用、并把平台收信地址登记为 Webhook。"
+            empty = f"{label} 还没有消息；请在渠道账号中完成连接。"
         list_html = "".join(items) or f"<div class='muted-block'>{esc(empty)}</div>"
         bridge_badge = ""
         if bridge is not None and bridge.get("ok"):
             bridge_badge = f"<div class='field-state'><span class='badge approved'>已连接 · {esc(bridge.get('me_name') or '本机账号')}</span></div>"
         body = f"""
-<div class='toolbar'><div><h1>{esc(label)}</h1>{bridge_badge}<div class='muted'>会话收件箱 · 按来源平台分开；消息经 LangBot 或原生通道进入平台后自动归入对应平台模块。</div></div></div>
+<div class='toolbar'><div><h1>{esc(label)}</h1>{bridge_badge}<div class='muted'>会话收件箱 · 按来源平台分开；消息按来源平台和业务账号归档，只显示你的授权范围。</div></div></div>
 <section class='card'><div class='panel-title'><h2>最近会话</h2><span class='muted'>按最后活动倒序 · 最多 50 条</span></div>
 <div class='simple-list'>{list_html}</div></section>"""
         self.send_html(self.console_page(f"{label} · 会话", body, f"inbox_{slug}"))
@@ -10940,7 +11065,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         label = section["label"]
         # 个人版：未连接时不显示历史聊天记录（用户设定，2026-10-09）
-        if section["kind"] == "native" and section.get("native_channel") == "whatsapp_personal":
+        if section["kind"] == "native" and section.get("native_channel") == "whatsapp_personal" and not any(not a['legacy'] for a in self.db.list_business_connections(self.tenant_id, self.user_id)):
             bridge = self.whatsapp_personal_inbox_state()
             if not (bridge.get("ok") and bridge.get("status") == "WORKING"):
                 reason = str(bridge.get("error") or "").strip() or f"当前状态：{bridge.get('status_label') or '未连接'}"
@@ -10951,6 +11076,7 @@ class Handler(BaseHTTPRequestHandler):
 <p><a class='button' href='/admin/channels'>去「渠道接入」扫码绑定</a></p></section>"""
                 self.send_html(self.console_page(f"{label} · 会话", gate_body, f"inbox_{slug}"))
                 return
+        send_allowed = self.db.can_send_conversation(self.tenant_id, conversation_id, self.user_id)
         is_web = section["kind"] == "web"
         sent_html = (
             "<div class='notice'>回复已发送——买方在网站聊天窗口里可见。</div>"
@@ -10979,7 +11105,7 @@ class Handler(BaseHTTPRequestHandler):
             delivery_status = message["delivery_status"] or ""
             if not is_web and delivery_status:
                 attempts = message["delivery_attempts"] or 0
-                if delivery_status == "failed":
+                if delivery_status == "failed" and send_allowed:
                     delivery_label = f"发送失败：{message['delivery_error'] or '原因未知'}"
                     if attempts > 1:
                         delivery_label += f"（已尝试 {attempts} 次）"
@@ -11011,7 +11137,7 @@ class Handler(BaseHTTPRequestHandler):
         if lead_row:
             chips.append(f"<a class='chip' href='/admin/leads/{esc(lead_row['id'])}'>关联线索</a>")
         rfq_pill_html = ""
-        if section["kind"] == "platform":
+        if section["kind"] == "platform" and send_allowed:
             rfq_pill_html = (
                 f"<form class='inline' method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/rfq-link'>"
                 f"<button class='qpill' title='给买方发送询价填写链接'>{svg_icon('file')}发送询价单</button></form>"
@@ -11040,12 +11166,20 @@ class Handler(BaseHTTPRequestHandler):
             f"<span class='ios-slider' aria-hidden='true'></span></label>"
             f"<span class='ios-text'>AI 自动回复 {paused_note}</span></form>"
         )
+        account = self.db.get_business_connection(self.tenant_id, conversation['channel_account_id']) if conversation['channel_account_id'] else None
+        if not send_allowed:
+            ai_switch = '<span class="muted">历史查看权限</span>'
+        elif account and (not account['legacy'] or json.loads(account['config_json']).get('ai_managed')) and not account['ai_enabled']:
+            ai_switch = '<span class="muted">该业务账号未开启 AI</span>'
         if is_web:
             hint = "回复将立即出现在买方网站聊天窗口。"
         elif section["kind"] == "native":
             hint = f"回复将经 {esc(label)} 发送；发送通道未就绪时消息会标记「发送失败」并支持重试。"
         else:
             hint = f"回复将经 {esc(label)} 直达买方；发送失败会标记并可重试。"
+        composer = f"<form class='chat-composer' method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/reply'><textarea name='body' required maxlength='4000' placeholder='输入回复内容…'></textarea><button>发送</button></form>" if send_allowed else "<div class='muted-block'>你可以查看转交历史；如需通过原业务账号回复，请联系管理员授予该账号使用权限。</div>"
+        if not send_allowed:
+            hint = '原账号的连接和发送权限保持独立。'
         body = f"""
 <div class='toolbar'><div><a class='button secondary' href='/admin/inbox/{slug}'>← 返回{esc(label)}列表</a></div><div class='actions'>{stop_badge}</div></div>
 {notice}
@@ -11057,10 +11191,7 @@ class Handler(BaseHTTPRequestHandler):
 </header>
 {chips_row}
 <div class='chat-log'>{transcript}</div>
-<form class='chat-composer' method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/reply'>
-<textarea name='body' required maxlength='4000' placeholder='输入回复内容…'></textarea>
-<button>发送</button>
-</form>
+{composer}
 <div class='chat-foot'>{rfq_pill_html}<span class='chat-hint'>{hint}</span></div>
 </section>"""
         self.send_html(self.console_page(f"{label} · 会话", body, f"inbox_{slug}"))
@@ -12076,7 +12207,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_html(self.console_page("网站 API 接入", body, "sites"), 200)
 
     def admin_tasks(self, query: dict[str, list[str]]) -> None:
-        tasks = self.db.list_human_tasks(self.tenant_id, query.get("status", [""])[0] or None)
+        tasks = self.visible_business_records(self.db.list_human_tasks(self.tenant_id, query.get("status", [""])[0] or None))
         items = "".join(
             f"<div class='simple-item'><div><strong>{esc(task['question'])}</strong>"
             f"<small>{esc(task['model'] or '未指定型号')} · <span class='badge'>{esc(task['status'])}</span> · {esc(task['created_at'])}</small></div>"
@@ -12126,7 +12257,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_html(self.console_page("人工接管任务", body, "tasks"), 200)
 
     def admin_rfqs(self, query: dict[str, list[str]]) -> None:
-        rfqs = self.db.list_rfqs(self.tenant_id)
+        rfqs = self.visible_business_records(self.db.list_rfqs(self.tenant_id))
         def model_label(row: sqlite3.Row) -> str:
             base = row["model"] or ""
             if row["requested_model"] and row["requested_model"] != base:
@@ -12204,7 +12335,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_html(self.console_page("RFQ 详情", body, "rfqs"), 200)
 
     def admin_sales(self, query: dict[str, list[str]]) -> None:
-        records = self.db.list_sales_records(self.tenant_id)
+        records = self.visible_business_records(self.db.list_sales_records(self.tenant_id))
         today = datetime.now(timezone.utc).date().isoformat()
         soon_cutoff = (datetime.now(timezone.utc).date() + timedelta(days=3)).isoformat()
         stages = self.db.get_lead_stages(self.tenant_id)
@@ -12294,7 +12425,7 @@ class Handler(BaseHTTPRequestHandler):
             f"<a href='/admin/sales?timing=soon'>3 天内到期 {counts['soon']}</a>"
             f"<a href='/admin/sales?owner=unassigned'>未分配 {counts['unassigned']}</a></div>"
         )
-        nurture_leads = self.db.list_nurture_leads(self.tenant_id)
+        nurture_leads = self.visible_business_records(self.db.list_nurture_leads(self.tenant_id))
         nurture_items = []
         for nurture in nurture_leads:
             follow = esc(nurture["next_follow_up"] or "未安排")
@@ -12333,6 +12464,8 @@ class Handler(BaseHTTPRequestHandler):
 <div class='simple-list'>{items_html}</div></section>
 {nurture_section}
 """
+        if self.user_role == 'admin':
+            body = '<p><a class="button secondary" href="/admin/customer-transfers">转交客户</a></p>' + body
         self.send_html(self.console_page("销售工作台", body, "sales"), 200)
 
     def admin_nurture_lead(self, lead_id: str, query: dict[str, list[str]]) -> None:
@@ -12950,6 +13083,7 @@ def make_server(
     port: int = 8000,
     ai_config: AIConfig | None = None,
     demo_tools: bool = False,
+    knowledge_worker: bool = False,
 ) -> ThreadingHTTPServer:
     database = Database(db_path)
     # 模式显式：不传配置时读取环境变量（默认 rules）；deepseek 缺 Key 在这里明确失败。
@@ -12963,7 +13097,15 @@ def make_server(
         ai = ai_service
         demo_tools = demo_enabled
 
-    return ThreadingHTTPServer((host, port), AppHandler)
+    server = ThreadingHTTPServer((host, port), AppHandler)
+    if knowledge_worker:
+        stop = start_knowledge_worker(db_path)
+        close = server.server_close
+        def close_with_worker():
+            stop.set()
+            close()
+        server.server_close = close_with_worker
+    return server
 
 
 def main() -> None:
@@ -12975,7 +13117,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         ai_config = AIConfig.from_env(mode_override=args.ai_mode)
-        server = make_server(args.db, args.host, args.port, ai_config=ai_config)
+        server = make_server(args.db, args.host, args.port, ai_config=ai_config, knowledge_worker=True)
     except AIConfigurationError as error:
         # deepseek 配置不完整时拒绝启动：不允许静默落回规则结果。
         print(f"启动失败：{error}")
@@ -12990,4 +13132,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import sys
+    sys.modules.setdefault("app", sys.modules[__name__])
     main()

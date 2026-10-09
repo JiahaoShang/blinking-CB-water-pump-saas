@@ -328,8 +328,8 @@ class LangBotBridgeTests(unittest.TestCase):
         status, _, page = form_request(self.server, "GET", "/admin/channels", cookie=self.admin)
         self.assertEqual(status, 200)
         for text in ("LangBot", "bot_uuid", "LANGBOT_API_KEY", "host.docker.internal"):
-            self.assertIn(text, page)
-        self.assertIn(self.token, page)
+            self.assertNotIn(text, page)
+        self.assertNotIn(self.token, page)
         # 导航入口：来源平台模块（旧「LangBot」模块已退役）
         status, _, page = form_request(self.server, "GET", "/admin", cookie=self.admin)
         self.assertIn("/admin/inbox/telegram", page)
@@ -352,7 +352,7 @@ class LangBotBridgeTests(unittest.TestCase):
             self.assertNotIn("/admin/inbox/langbot", page)  # 路由节点不再是模块
             status, _, page = form_request(self.server, "GET", "/admin/inbox/discord", cookie=self.admin)
             self.assertEqual(status, 200)
-            self.assertIn("已接入（LangBot），还没有消息", page)
+            self.assertIn("还没有消息；请在渠道账号中完成连接", page)
         finally:
             self.mock.bots = []
             _LANGBOT_PLATFORMS_CACHE["at"] = 0.0

@@ -158,6 +158,9 @@ class ReferenceChatBrowserTests(unittest.TestCase):
         if status != 201:
             raise AssertionError(f"创建会话 C 失败: {status} {created_c}")
         cls.task_conversation = created_c
+        engineer = cls.db.conn.execute("SELECT id FROM users WHERE email=?", ("demo-engineer@example.invalid",)).fetchone()
+        cls.db.conn.execute("INSERT INTO conversation_access VALUES (?,?,?,?,?)", ("demo-tenant", created_c["conversation_id"], engineer["id"], "fixture:admin", "2026-10-09"))
+        cls.db.conn.commit()
 
         cls.result_path = Path(cls.temp_dir.name) / "reference_chat_ux_result.json"
         config_path = Path(cls.temp_dir.name) / "reference_chat_ux_config.json"

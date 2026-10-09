@@ -371,7 +371,8 @@ class DuplicateMergeTests(unittest.TestCase):
         nurture_id = self.db.create_nurture_lead(
             "demo-tenant", "m-sales@example.invalid", "网页合并演示", "演示公司", rfq["contact_email"], "", "visit", ""
         , consent_confirmed=True)
-        # 员工不能合并
+        self.db.assign_conversation_leads("demo-tenant", rfq["id"], "m-sales@example.invalid", "demo-admin@example.invalid")
+        # 员工可查看已分配业务，仍不能合并
         status, _, _ = form_request(
             self.server, "POST", f"/admin/leads/{rfq_lead['id']}/merge", {"secondary_lead_id": nurture_id}, self.sales_cookie
         )

@@ -71,6 +71,9 @@ class ConsoleNavCountTests(unittest.TestCase):
             cls.db.create_human_task("demo-tenant", conversation_id, message_id, f"nav question {index}", "nav test", {})
         rfq_id, _ = cls.db.create_rfq("demo-tenant", conversation_id, "nav-rfq-1", {"contact_email": "buyer@example.com", "contact_phone": "+49 30 555 0222", "quantity": "2", "region": "DE"}, "", None)
         cls.db.conn.execute("UPDATE leads SET next_follow_up='2020-01-01' WHERE rfq_id=?", (rfq_id,))
+        for email in ("demo-sales@example.invalid", "demo-engineer@example.invalid"):
+            member = cls.db.conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+            cls.db.conn.execute("INSERT INTO conversation_access VALUES (?,?,?,?,?)", ("demo-tenant", conversation_id, member["id"], "fixture:admin", "2026-10-09"))
         cls.db.conn.commit()
 
         cls.admin_cookie = login(cls.server, "demo-admin@example.invalid", "demo-admin")

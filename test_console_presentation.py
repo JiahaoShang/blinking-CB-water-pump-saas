@@ -85,6 +85,10 @@ class ConsolePresentationTests(unittest.TestCase):
 
     def test_sales_and_rfq_next_step_presentation(self):
         rfq_id = self.create_rfq()
+        conv = self.db.get_rfq("demo-tenant", rfq_id)["conversation_id"]
+        member = self.db.authenticate_user("demo-sales@example.invalid", "demo-sales")
+        self.db.conn.execute("INSERT INTO conversation_access VALUES (?,?,?,?,?)", ("demo-tenant", conv, member["id"], "fixture:admin", "2026-10-09"))
+        self.db.conn.commit()
         admin = self.login()
         sales = self.login("demo-sales@example.invalid", "demo-sales")
         # 销售列表：条目行 + 打开线索按钮
