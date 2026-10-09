@@ -295,6 +295,7 @@ class WhatsAppPersonalTests(unittest.TestCase):
         self.assertIn("waha-bind", page)
         self.assertIn("waha-qr", page)
         self.assertIn("waha-start", page)
+        self.assertIn("waha-logout", page)
         self.assertIn("/admin/channels/whatsapp-personal/session.json", page)
         self.assertIn("/admin/channels/whatsapp-personal/qr.png", page)
 
@@ -370,13 +371,14 @@ class WhatsAppPersonalTests(unittest.TestCase):
     def test_bind_start_dedup_rapid_clicks(self):
         """连点防抖：2.5 秒内第二次启动请求直接返回 busy（不再打桥、不再刷爆）。"""
         self.mock.set_status("STOPPED")
+        before = self.mock.start_calls
         status, _, raw = _http(self.server, "POST", "/admin/channels/whatsapp-personal/session/start", fields={}, cookie=self.admin_cookie)
         first = json.loads(raw)
         status, _, raw = _http(self.server, "POST", "/admin/channels/whatsapp-personal/session/start", fields={}, cookie=self.admin_cookie)
         second = json.loads(raw)
         self.assertEqual(first["note"], "started")
         self.assertEqual(second["note"], "busy")
-        self.assertEqual(self.mock.start_calls, 1)
+        self.assertEqual(self.mock.start_calls, before + 1)
 
     def test_inbox_hides_history_when_disconnected(self):
         """用户要求：未连接（未登录）时不显示历史聊天记录；连接后恢复显示。"""
@@ -431,6 +433,26 @@ class WhatsAppPersonalTests(unittest.TestCase):
             self.assertEqual(row["actor"], "system:scan-auto-enable")
         finally:
             self.db.set_channel_enabled("demo-tenant", "whatsapp_personal", True, "test-restore")
+
+    def test_bind_logout_button_flow(self):
+        """「退出登录」：解绑手机（WAHA logout）→ 自动进入扫码态；审计留痕；历史按规则隐藏。"""
+        self.mock.set_status("WORKING")
+        self._post(self._event("需求：流量 10 m³/h、介质清水", "3EB0LOGOUT1"))
+        before = self.mock.logout_calls
+        status, headers, raw = _http(self.server, "POST", "/admin/channels/whatsapp-personal/session/logout", fields={}, cookie=self.admin_cookie)
+        self.assertEqual(status, 200)
+        data = json.loads(raw)
+        self.assertTrue(data["ok"])
+        self.assertEqual(self.mock.logout_calls, before + 1)
+        self.assertEqual(data["status"], "SCAN_QR_CODE")
+        row = self.db.conn.execute(
+            "SELECT action, actor FROM audit_log WHERE entity_id='whatsapp_personal' ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(row["action"], "session_logged_out")
+        self.assertEqual(row["actor"], "demo-admin@example.invalid")
+        status, _, raw = _http(self.server, "GET", "/admin/inbox/whatsapp_personal", cookie=self.admin_cookie)
+        self.assertIn("账号未连接", raw.decode("utf-8"))
+        self.mock.set_status("WORKING")
 
     def test_duplicate_dedup(self):
         self._post(self._event("需求：流量 11 m³/h", "3EB0DUP1"))

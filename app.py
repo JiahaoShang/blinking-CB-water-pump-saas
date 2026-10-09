@@ -5190,7 +5190,9 @@ WHATSAPP_PERSONAL_BIND_JS = """
   var qrHint = document.getElementById('waha-qr-hint');
   var actions = document.getElementById('waha-actions');
   var startBtn = document.getElementById('waha-start');
-  if (!statusLine || !qrWrap || !qrImg || !qrHint || !actions || !startBtn) { return; }
+  var logoutWrap = document.getElementById('waha-logout-wrap');
+  var logoutBtn = document.getElementById('waha-logout');
+  if (!statusLine || !qrWrap || !qrImg || !qrHint || !actions || !startBtn || !logoutWrap || !logoutBtn) { return; }
   var pollTimer = null;
   var qrTimer = null;
   var qrObjectUrl = null;
@@ -5243,6 +5245,7 @@ WHATSAPP_PERSONAL_BIND_JS = """
       .then(function (data) {
         if (!data.ok) {
           stopQr();
+          logoutWrap.style.display = 'none';
           setLine('桥服务不可达：' + (data.error || '未知原因') + '。请确认本机 WAHA 已启动，或点下方按钮重试。');
           actions.style.display = '';
           schedule(30000);
@@ -5257,17 +5260,20 @@ WHATSAPP_PERSONAL_BIND_JS = """
             setLine('已连接 · ' + name + '（渠道已启用，可直接收发消息）。');
           }
           actions.style.display = 'none';
+          logoutWrap.style.display = '';
           schedule(15000);
           return;
         }
         if (data.status === 'SCAN_QR_CODE') {
           setLine('等待扫码：请用手机 WhatsApp 扫描下方二维码完成绑定。');
           actions.style.display = 'none';
+          logoutWrap.style.display = 'none';
           startQrLoop();
           schedule(3000);
           return;
         }
         stopQr();
+        logoutWrap.style.display = 'none';
         if (data.status === 'FAILED') {
           setLine('会话启动失败（可自愈）：点「重置会话并取码」自动重启或重建，并生成新二维码。');
           startBtn.textContent = '重置会话并取码';
@@ -5312,6 +5318,47 @@ WHATSAPP_PERSONAL_BIND_JS = """
         startBtn.disabled = false;
         startBtn.textContent = original;
         setLine('启动请求失败（网络错误），请稍后重试。');
+        schedule(6000);
+      });
+  });
+
+  // 退出登录（解绑手机）：二次确认（6 秒内再点一次）→ 解绑 → 自动进入扫码态。
+  var logoutArmed = false;
+  var logoutTimer = null;
+  function resetLogoutButton() {
+    logoutArmed = false;
+    if (logoutTimer) { clearTimeout(logoutTimer); logoutTimer = null; }
+    logoutBtn.disabled = false;
+    logoutBtn.textContent = '退出登录（解绑手机）';
+    logoutBtn.classList.remove('warn');
+  }
+  logoutBtn.addEventListener('click', function () {
+    if (!logoutArmed) {
+      logoutArmed = true;
+      logoutBtn.textContent = '确认退出？6 秒内再点一次';
+      logoutBtn.classList.add('warn');
+      logoutTimer = setTimeout(resetLogoutButton, 6000);
+      return;
+    }
+    if (logoutTimer) { clearTimeout(logoutTimer); logoutTimer = null; }
+    logoutArmed = false;
+    logoutBtn.disabled = true;
+    logoutBtn.textContent = '正在退出…';
+    fetch('/admin/channels/whatsapp-personal/session/logout', {method: 'POST'})
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
+        resetLogoutButton();
+        if (!data.ok) {
+          setLine('退出失败：' + (data.error || '未知原因'));
+          schedule(6000);
+          return;
+        }
+        setLine('已退出登录（账号已解绑）。正在生成新二维码，重新扫码即可再次绑定…');
+        schedule(1500);
+      })
+      .catch(function () {
+        resetLogoutButton();
+        setLine('退出请求失败（网络错误），请稍后重试。');
         schedule(6000);
       });
   });
@@ -6515,6 +6562,45 @@ def whatsapp_personal_start_session(config: dict, timeout: int = 15) -> dict:
     _whatsapp_personal_delete_session(base, api_key, session, timeout=timeout)
     _whatsapp_personal_bridge_post(base, api_key, "/api/sessions", {"name": session, "start": True}, timeout=timeout)
     return _finish("recreated")
+
+
+def whatsapp_personal_logout_session(config: dict, timeout: int = 15) -> dict:
+    """「退出登录」：让账号从桥上退出（解绑手机），随后自动进入扫码态以便重新绑定。
+
+    历史可见性由「是否连接」规则接管：退出后收件箱显示「账号未连接」，重新扫码后恢复。
+    """
+    base, api_key, session = _whatsapp_personal_bridge(config)
+    if not api_key:
+        raise ChannelSendError("缺少环境变量 WHATSAPP_PERSONAL_API_KEY")
+    if not base:
+        raise ChannelSendError("桥接地址未配置")
+    try:
+        _whatsapp_personal_bridge_post(base, api_key, f"/api/sessions/{quote(session, safe='')}/logout", {}, timeout=timeout)
+    except ChannelSendError as error:
+        if getattr(error, "http_status", 0) not in (404, 405):
+            raise
+        _whatsapp_personal_bridge_post(base, api_key, f"/api/sessions/{quote(session, safe='')}/stop", {}, timeout=timeout)
+    deadline = time.time() + 10
+    state = whatsapp_personal_session_state(config)
+    while state["status"] == "WORKING" and time.time() < deadline:
+        time.sleep(1.0)
+        state = whatsapp_personal_session_state(config)
+    if state["status"] == "WORKING":
+        raise ChannelSendError("退出未完成（账号仍在连接状态），请稍后重试")
+    if state["status"] in ("STOPPED", "FAILED", "UNKNOWN"):
+        try:
+            _whatsapp_personal_bridge_post(base, api_key, f"/api/sessions/{quote(session, safe='')}/start", {}, timeout=timeout)
+        except ChannelSendError as error:
+            if getattr(error, "http_status", 0) == 404:
+                _whatsapp_personal_bridge_post(base, api_key, "/api/sessions", {"name": session, "start": True}, timeout=timeout)
+            else:
+                raise
+    deadline = time.time() + 10
+    state = whatsapp_personal_session_state(config)
+    while state["status"] not in ("SCAN_QR_CODE", "STARTING") and time.time() < deadline:
+        time.sleep(1.0)
+        state = whatsapp_personal_session_state(config)
+    return {"session": session, "status": state["status"], "status_label": state["status_label"], "me_name": state["me_name"]}
 
 
 def _send_whatsapp_personal(config: dict, external_user_id: str, text: str) -> str:
@@ -9266,6 +9352,20 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self.send_json({"ok": True, **result})
                 return
+            if path == "/admin/channels/whatsapp-personal/session/logout":
+                # 退出登录（解绑手机）：发起 WAHA logout → 自动进入扫码态；操作写审计。
+                try:
+                    result = whatsapp_personal_logout_session(self._whatsapp_personal_page_config())
+                except ChannelSendError as error:
+                    self.send_json({"ok": False, "error": str(error)}, 502)
+                    return
+                except Exception as error:  # 防御：任何异常都给页面一个可读结果
+                    self.send_json({"ok": False, "error": f"退出异常：{type(error).__name__}: {error}"}, 500)
+                    return
+                self.db._audit(self.tenant_id, "channel", "whatsapp_personal", "session_logged_out", self.actor, "")
+                self.db.conn.commit()
+                self.send_json({"ok": True, **result})
+                return
             if path == "/admin/channels/sync-dify-kb":
                 if self.user_role != "admin":
                     self.send_html(self.console_page("无权操作", permission_notice("同步知识库", "员工", "管理员", "知识库同步会改动对外知识库内容，只对管理员开放。"), "channels"), 403)
@@ -11168,6 +11268,7 @@ class Handler(BaseHTTPRequestHandler):
                     f"<div id='waha-qr-hint' class='muted' style='margin-top:6px'>二维码每 15 秒自动刷新。打开手机 WhatsApp → 设置 → 已连接的设备 → 连接设备，扫此码。</div>"
                     f"</div>"
                     f"<div id='waha-actions' style='margin-top:8px;display:none'><button type='button' class='secondary' id='waha-start'>启动会话并取码</button></div>"
+                    f"<div id='waha-logout-wrap' style='display:none;margin-top:8px'><button type='button' class='secondary' id='waha-logout'>退出登录（解绑手机）</button> <span class='muted'>退出后账号解绑、历史将隐藏；重新扫码即可恢复。</span></div>"
                     f"</div>"
                     f"<div class='muted' style='margin-top:8px'>收信地址 <code>http://{esc(host)}/api/v1/channels/whatsapp-personal/webhook/•••</code>（URL 令牌即凭据，已配置、不回显）。消息自动进「会话收件箱 → WhatsApp（个人版）」，回复经同一账号发出（含拟人节奏与限速保护）。</div></div>"
                 )

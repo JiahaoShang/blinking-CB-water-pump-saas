@@ -35,6 +35,7 @@ class MockWahaServer:
         self.restart_calls = 0
         self.stop_calls = 0
         self.deleted = 0
+        self.logout_calls = 0
         self._sent: list[dict] = []
         self._notifications: list[dict] = []
         self._lock = threading.Lock()
@@ -149,6 +150,15 @@ class MockWahaServer:
                         mock.start_calls += 1
                         mock.status = "SCAN_QR_CODE"
                     self._send(201, {"name": mock.session_name, "status": "STARTING"})
+                    return
+                if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "logout":
+                    if parts[2] != mock.session_name:
+                        self._send(404, {"message": "Session not found", "statusCode": 404})
+                        return
+                    with mock._lock:
+                        mock.logout_calls += 1
+                        mock.status = "STOPPED"
+                    self._send(201, {"name": mock.session_name, "status": "STOPPED"})
                     return
                 if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "restart":
                     if parts[2] != mock.session_name:
