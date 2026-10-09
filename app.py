@@ -5610,6 +5610,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
 </div>
 </div>
 <script>document.getElementById('console-menu').addEventListener('click',function(){{document.getElementById('console-side').classList.toggle('open');}});</script>
+<script>document.addEventListener('click',function(event){{var menu=document.querySelector('.account-menu');if(menu && menu.open && !menu.contains(event.target)){{menu.open=false;}}}});</script>
 <script>{CONSOLE_NAV_JS}</script>
 <script>{CONSOLE_DOCK_JS}</script>
 </body></html>"""
