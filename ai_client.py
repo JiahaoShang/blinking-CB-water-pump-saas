@@ -390,6 +390,48 @@ def normalize_extraction_payload(payload: object) -> dict:
     return extracted
 
 
+KNOWLEDGE_EVIDENCE_SYSTEM_PROMPT = """You route ONE customer question to at most one excerpt of a company's published, authorized knowledge.
+You will receive the question and the list of allowed excerpts. Choose the single excerpt whose text directly and explicitly answers what is asked. You never write, paraphrase or extend the answer: the platform quotes the chosen excerpt verbatim and attaches its true version citation.
+Return ONLY one JSON object: {"evidence": "<key exactly as listed>"} or {"evidence": "none"}.
+Rules:
+- Choose an excerpt only when it clearly and directly answers the question; questions may be in any language, match meaning rather than keywords.
+- Choose "none" when no excerpt states the answer, or when answering would require judgement, promises, prices, stock, delivery or certificates that the excerpts do not state explicitly.
+- Never use knowledge from outside the listed excerpts. Never output other keys. Never add explanations."""
+
+
+def build_knowledge_evidence_user_content(question: str, evidence: list[dict[str, str]]) -> str:
+    lines = []
+    for item in evidence:
+        label = item.get("label") or ""
+        version = item.get("version_label") or ""
+        lines.append(f"- {item['key']} · {label} · {version}\n  {item.get('text', '')}")
+    return (
+        "Customer question:\n" + str(question or "").strip()[:2000] + "\n\n"
+        + "Published authorized knowledge excerpts:\n" + "\n".join(lines)
+    )
+
+
+def validate_knowledge_evidence_selection(payload: object, allowed_keys: set) -> str | None:
+    """校验证据选择输出：命中白名单返回证据键，none/白名单之外返回 None（按资料不足处理）。
+
+    结构缺失或类型不对视为模型输出不可用（调用失败）；可解析但不在候选内的选择
+    按「没有足够依据」处理——绝不生成答案，也不视为故障。
+    """
+    if not isinstance(payload, dict) or "evidence" not in payload:
+        raise AIUnavailableError(STATUS_INVALID_OUTPUT, "模型输出缺少 evidence 字段")
+    value = payload.get("evidence")
+    if value is None:
+        raise AIUnavailableError(STATUS_INVALID_OUTPUT, "模型 evidence 为空")
+    if not isinstance(value, str):
+        raise AIUnavailableError(STATUS_INVALID_OUTPUT, "模型 evidence 不是字符串")
+    text = value.strip()
+    if not text or text.lower() == "none":
+        return None
+    if text in allowed_keys:
+        return text
+    return None
+
+
 def validate_field_selection(payload: object, allowed_keys: set) -> str | None:
     """校验字段定位输出：命中白名单返回字段名，none/白名单之外返回 None（转人工核实）。
 
@@ -583,3 +625,12 @@ class AIService:
         user_content = build_field_selection_user_content(question, allowed_fields)
         payload, meta = self.client.call_json(FIELD_SELECTION_SYSTEM_PROMPT, user_content)
         return validate_field_selection(payload, allowed_keys), meta
+
+    def select_knowledge_evidence(self, question: str, evidence: list[dict[str, str]]) -> tuple[str | None, dict]:
+        """M5b：从已授权知识证据里选择至多一条回答依据；引用原文与版本由服务端生成。"""
+        if self.client is None:
+            raise AIConfigurationError("当前不是 deepseek 模式，不能调用模型（规则模式不生成问答答复）。")
+        allowed_keys = {item["key"] for item in evidence}
+        user_content = build_knowledge_evidence_user_content(question, evidence)
+        payload, meta = self.client.call_json(KNOWLEDGE_EVIDENCE_SYSTEM_PROMPT, user_content)
+        return validate_knowledge_evidence_selection(payload, allowed_keys), meta

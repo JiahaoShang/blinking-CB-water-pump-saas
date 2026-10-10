@@ -1,0 +1,4 @@
+FAIL snapshot_internal_leaks: True
+FAIL revoked_A_survives_as_B: {'id': '00c421e12dab0be2f4a9464d', 'field_key': 'flow_range', 'label': '流量范围', 'value': '20-60', 'unit': 'm³/h', 'source_document_id': 'cd3fdb76040ebb3bf967254d', 'source_location': '第 2 页：规格参数表', 'source_filename': 'B.txt', 'source': 'B.txt', 'audience': 'external'}
+FAIL title_missing: {'body': 'new body'}
+FAIL empty_fields_missing: {'body': ''}

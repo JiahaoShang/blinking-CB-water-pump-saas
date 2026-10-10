@@ -71,6 +71,8 @@ class BusinessChannelUI:
         return summary
 
     def business_get(self, path, query):
+        if self.knowledge_get(path, query):
+            return True
         source_match = re.fullmatch(r'/admin/knowledge/sources/([a-f0-9]+)', path)
         if source_match:
             from app import ROOT, hashlib, quote
@@ -132,6 +134,8 @@ class BusinessChannelUI:
         return True
 
     def business_post(self, path, form):
+        if self.knowledge_post(path, form):
+            return True
         if path == '/admin/channels/accounts':
             platform = str(form.get('platform', ''))
             channel = 'whatsapp_personal' if platform == 'WhatsApp' else 'langbot'

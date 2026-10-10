@@ -92,17 +92,17 @@ class ConsoleNavCountTests(unittest.TestCase):
     def test_admin_badges_render_with_db_counts(self):
         status, _, page = form_request(self.server, "GET", "/admin", cookie=self.admin_cookie)
         self.assertEqual(status, 200)
-        # 四类数字与数据库现状一一对应
-        for key, value in (("products", 1), ("tasks", 2), ("rfqs", 1), ("sales", 1)):
+        # 文字与数字与数据库现状一一对应（清单8：产品管理不做独立主入口，侧栏不再渲染其徽标）
+        for key, value in (("tasks", 2), ("rfqs", 1), ("sales", 1)):
             self.assertIn(f"data-nav-count='{key}' data-count='{value}'", page, key)
             self.assertNotIn(f"data-nav-count='{key}' data-count='{value}' hidden", page, key)
+        self.assertNotIn("data-nav-count='products'", page, "重复的独立产品管理入口已移除")
         # 其余导航项与 0 值：保留占位但隐藏
         for key in ("admin", "users", "sites"):
             self.assertIn(f"data-nav-count='{key}' data-count='0' hidden", page, key)
-        # 告急样式（参照好友参考稿的方法）：人工任务与逾期跟进红字加粗；产品与 RFQ 为普通数字
+        # 告急样式（参照好友参考稿的方法）：人工任务与逾期跟进红字加粗；RFQ 为普通数字
         self.assertIn("class='side-count hot' data-nav-count='tasks'", page)
         self.assertIn("class='side-count hot' data-nav-count='sales'", page)
-        self.assertIn("class='side-count' data-nav-count='products'", page)
         self.assertIn("class='side-count' data-nav-count='rfqs'", page)
 
     def test_role_filter_rendering_and_endpoint(self):
@@ -135,7 +135,8 @@ class ConsoleNavCountTests(unittest.TestCase):
 
     def test_second_tenant_isolation(self):
         _, _, page = form_request(self.server, "GET", "/admin", cookie=self.second_cookie)
-        for key in ("products", "tasks", "rfqs", "sales"):
+        self.assertNotIn("data-nav-count='products'", page, "独立产品管理入口已移除（清单8）")
+        for key in ("tasks", "rfqs", "sales"):
             self.assertIn(f"data-nav-count='{key}' data-count='0' hidden", page, key)
         status, body = json_request(self.server, "/admin/nav-counts", cookie=self.second_cookie)
         self.assertEqual(status, 200)

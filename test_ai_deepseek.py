@@ -192,6 +192,12 @@ class DeepSeekBoundaryTests(unittest.TestCase):
             db.reject_field("demo-tenant", product_id, "material", "演示：拒驳后不上公开页")
         db.finalize_product_review("demo-tenant", product_id)
         db.publish_product("demo-tenant", product_id)
+        # 清单11：原产品需逐项 AI 客服授权（侧车）才进入客户回答；测试夹具保持既有「发布即可用」行为。
+        admin = db.conn.execute(
+            "SELECT id FROM users WHERE tenant_id=? AND role='admin' ORDER BY created_at LIMIT 1",
+            ("demo-tenant",)).fetchone()
+        db.set_knowledge_product_authorization(
+            "demo-tenant", product_id, admin["id"], authorized=True, confirmed=True)
         return product_id, source_id
 
     def ai_rows(self):
@@ -553,6 +559,40 @@ class DeepSeekBoundaryTests(unittest.TestCase):
         self.assertEqual(body["status"], "grounded", "正确字段不得被防护误拦")
         self.assertIn("25-45", body["answer"])
         self.assertNotIn("20-60", body["answer"])
+
+    # ---- 任务4：知识证据选择的新 AIService 载荷（本地 HTTP 厂商契约，不接真实厂商）----
+
+    def test_knowledge_evidence_selection_vendor_contract(self):
+        """select_knowledge_evidence 的请求/响应契约：本地 HTTP 模拟厂商协议，验证载荷与既有字段选择同口径。"""
+        evidence = [{"key": "e1", "label": "文章《发货政策》", "version_label": "v1", "text": "发货：3-5 天到货。"}]
+        mock = self.start_mock([chat_completion(json.dumps({"evidence": "e1"}, ensure_ascii=False))])
+        service = ai_client.AIService(ai_config_for(mock))
+        selected, meta = service.select_knowledge_evidence("发货要几天？", evidence)
+        self.assertEqual(selected, "e1")
+        self.assertEqual(meta["http_status"], 200)
+        request = mock.requests[0]
+        self.assertTrue(request["path"].endswith("/chat/completions"))
+        body = request["body"]
+        self.assertEqual(body["messages"][0]["role"], "system")
+        self.assertEqual(body["messages"][1]["role"], "user")
+        system_prompt = body["messages"][0]["content"]
+        user_content = body["messages"][1]["content"]
+        # 系统契约：只选择一条已授权原文、引用由服务端逐字生成、只返回 JSON evidence 键。
+        self.assertIn("evidence", system_prompt)
+        self.assertIn("verbatim", system_prompt)
+        # 用户载荷：问题 + 服务端分配键 / 标签 / 版本 / 精确原文；答案文本不经过模型。
+        self.assertIn("发货要几天？", user_content)
+        for token in ("e1", "v1", "发货：3-5 天到货。"):
+            self.assertIn(token, user_content)
+        # 响应契约：白名单外的键按资料不足（None）；结构缺失按 invalid_output 视为调用失败。
+        mock2 = self.start_mock([chat_completion(json.dumps({"evidence": "e999"}))])
+        selected2, _ = ai_client.AIService(ai_config_for(mock2)).select_knowledge_evidence("q", evidence)
+        self.assertIsNone(selected2)
+        mock3 = self.start_mock([chat_completion(json.dumps({"answer": "x"}))])
+        with self.assertRaises(ai_client.AIUnavailableError):
+            ai_client.AIService(ai_config_for(mock3)).select_knowledge_evidence("q", evidence)
+        mock.stop()
+        mock2.stop()
 
     def test_question_conflict_with_multiple_asked_fields_is_held_for_review(self):
         # 提问同时明确问 flow 与 head，模型却选 temperature：目标字段不唯一，转待核实，

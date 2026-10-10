@@ -37,6 +37,8 @@ from urllib import request as urllib_request
 import ai_client
 from business_channels import BusinessChannels
 from business_channel_ui import BusinessChannelUI
+from enterprise_knowledge import EnterpriseKnowledge
+from enterprise_knowledge_ui import KnowledgeUI
 from knowledge_delivery import knowledge_sync_status, refresh_indexing_status, start_knowledge_worker
 from ai_client import AIConfig, AIConfigurationError, AIService, AIUnavailableError
 
@@ -51,6 +53,7 @@ MATCH_REQUIRED_FIELDS = ("flow", "head", "media")
 # AI 调用日志里的任务名（与 ai_client 内部任务无关，用于管理概览展示与排错）。
 AI_TASK_EXTRACTION = "requirement_extraction"
 AI_TASK_ANSWER = "answer_field_selection"
+AI_TASK_KNOWLEDGE_QA = "knowledge_evidence_selection"
 # 商业承诺、认证与交期类问题在任何模式下都不进入模型问答，直接转为待核实记录。
 COMMERCIAL_QUESTION_TOKENS = (
     "price", "cost", "quote", "价格", "报价", "库存", "stock", "delivery",
@@ -296,7 +299,7 @@ def parse_float(value: str | None) -> float | None:
         return None
 
 
-class Database(BusinessChannels):
+class Database(BusinessChannels, EnterpriseKnowledge):
     def __init__(self, path: str | os.PathLike[str], *, initialize: bool = True):
         self.path = str(path)
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -942,6 +945,7 @@ class Database(BusinessChannels):
         self.conn.commit()
 
         self.init_business_channels()
+        self.init_enterprise_knowledge()
         if 'audience' not in {r['name'] for r in self.conn.execute('PRAGMA table_info(product_fields)')}:
             self.conn.execute("ALTER TABLE product_fields ADD COLUMN audience TEXT NOT NULL DEFAULT 'external'")
         for name, definition in (('indexing_status', "TEXT NOT NULL DEFAULT 'pending'"), ('batch', "TEXT NOT NULL DEFAULT ''")):
@@ -4483,12 +4487,16 @@ def answer_question_with_mode(
     version = db.get_published_version(tenant_id, product_id) if product_id else None
     if not product or not version:
         return "needs_human", NO_PUBLISHED_PRODUCT_ANSWER, product_id, None, [], "没有可引用的已发布产品版本"
-    snapshot = json.loads(version["snapshot_json"])
-    fields = {field["field_key"]: field for field in snapshot.get("fields", [])}
+    # 清单11：模型调用之前先过共享闸门（逐产品 AI 授权 + 可选到期 + 有效字段；未授权/到期不调模型）。
+    gate_ok, gate_reason = db.knowledge_product_ai_gate(tenant_id, product_id)
+    if not gate_ok:
+        return "needs_human", NO_APPROVED_BASIS_ANSWER, product_id, version["id"], [], "产品未通过 AI 客服使用闸门：" + gate_reason
+    # 清单10：可选字段与答案值只来自「已发布快照 ∩ 当前未被撤销」的字段（未发布编辑不进入）。
+    fields = {field["field_key"]: field for field in db.knowledge_product_fields(tenant_id, product_id)}
     allowed = [
         {"key": key, "label_zh": FIELD_LABELS.get(key, key), "label_en": FIELD_LABELS_EN.get(key, key)}
         for key in ANSWER_FIELD_KEYS
-        if fields.get(key) and str(fields[key].get("value", "")).strip() and not source_is_restricted(db, tenant_id, fields[key])
+        if fields.get(key) and str(fields[key].get("value", "")).strip()
     ]
     try:
         selected, meta = ai.select_answer_field(question, allowed)
@@ -4499,10 +4507,128 @@ def answer_question_with_mode(
     selected = guard_answer_field_selection(question, selected, {item["key"] for item in allowed})
     if not selected or not fields.get(selected) or not str(fields[selected].get("value", "")).strip():
         return "needs_human", NO_APPROVED_BASIS_ANSWER, product_id, version["id"], [], "资料缺少对应字段或问题需要工程判断"
-    if source_is_restricted(db, tenant_id, fields[selected]):
-        return "needs_human", NO_APPROVED_BASIS_ANSWER, product_id, version["id"], [], RESTRICTED_SOURCE_ANSWER_REASON
-    answer, citation = build_record_answer(db, tenant_id, selected, fields[selected], version)
-    return "grounded", answer, product_id, version["id"], [citation], ""
+    # 清单11：模型响应之后再次复核——生成期间停用/撤权/到期/换版/字段撤销都按资料不足处理。
+    gate_ok, gate_reason = db.knowledge_product_ai_gate(tenant_id, product_id)
+    current_version = db.get_published_version(tenant_id, product_id)
+    current_fields = {field["field_key"]: field for field in db.knowledge_product_fields(tenant_id, product_id)}
+    if (not gate_ok or not current_version or current_version["id"] != version["id"]
+            or not current_fields.get(selected) or not str(current_fields[selected].get("value", "")).strip()):
+        reason = gate_reason if not gate_ok else "字段或发布版本在生成期间发生变化"
+        return "needs_human", NO_APPROVED_BASIS_ANSWER, product_id, version["id"], [], "生成期间产品授权、版本或字段发生变化（" + reason + "），按资料不足处理"
+    answer, citation = build_record_answer(db, tenant_id, selected, current_fields[selected], current_version)
+    return "grounded", answer, product_id, current_version["id"], [citation], ""
+
+
+KNOWLEDGE_QA_NO_EVIDENCE_ANSWER = "现有已授权资料中没有足够依据回答这个问题，建议转人工处理。"
+KNOWLEDGE_QA_EVIDENCE_LIMIT = 24  # 送模型候选上限（只截断送选清单，不改变合格性判断）
+
+
+def _knowledge_qa_model_evidence(evidence: list[dict]) -> list[dict]:
+    """把候选证据整理为送模型的选择清单：服务端分配键，原文截断只影响送选文本。"""
+    items = []
+    for index, unit in enumerate(evidence[:KNOWLEDGE_QA_EVIDENCE_LIMIT], start=1):
+        if unit["source"] == "knowledge":
+            label = f"{unit['form_label']}《{unit['title']}》"
+        else:
+            label = f"产品字段 {unit['model']} · {unit['label']}"
+        items.append({
+            "key": f"e{index}",
+            "label": label,
+            "version_label": f"v{unit['version_number']}",
+            "text": str(unit.get("text") or "")[:800],
+            "evidence": unit,
+        })
+    return items
+
+
+def build_knowledge_evidence_answer(evidence: dict) -> tuple[str, dict]:
+    """服务端从所选证据生成回答文本与引用：精确原文 + 真实版本（模型输出不进入答案）。"""
+    quote = str(evidence["text"])
+    if evidence["source"] == "knowledge":
+        citation = {
+            "kind": "knowledge",
+            "title": evidence["title"],
+            "form_label": evidence["form_label"],
+            "version": f"v{evidence['version_number']}",
+            "version_id": evidence["version_id"],
+            "item_id": evidence["item_id"],
+            "quote": quote,
+            "filename": evidence["title"] or "企业知识",
+            "location": f"知识条目 · v{evidence['version_number']}（{evidence['form_label']}）",
+            "published_at": evidence.get("published_at") or "",
+        }
+    else:
+        citation = {
+            "kind": "product_field",
+            "title": f"{evidence['model']} · {evidence['name']}",
+            "version": f"v{evidence['version_number']}",
+            "version_id": f"{evidence['product_id']}:{evidence['field_key']}",
+            "product_id": evidence["product_id"],
+            "field_key": evidence["field_key"],
+            "label": evidence["label"],
+            "quote": quote,
+            "filename": evidence.get("fact_source") or "产品核准资料",
+            "location": f"字段「{evidence['label']}」 · 产品 v{evidence['version_number']}",
+            "product_version": str(evidence["version_number"]),
+        }
+    return quote, citation
+
+
+def answer_knowledge_question(db: Database, ai, tenant_id: str, conversation_id: str | None, question: str) -> dict:
+    """客户视角知识问答（共同过滤器 + 模型前后双重复核）。
+
+    流程：本地候选（企业 / 版本 / 权限 / 到期 / 处理状态 / 逐字段核准与出处）→ 模型受约束
+    选择证据 → 模型响应后再次复核（防并发停用 / 撤权 / 到期 / 换版 / 字段变更）→ 服务端生成
+    精确原文引用与真实版本引用。规则模式明确“模型未连接”，不生成模拟答复；资料不足或复核
+    失效返回“建议转人工”（只提示，不自动创建人工任务）。
+    """
+    outcome = {
+        "status": "no_evidence",
+        "answer": KNOWLEDGE_QA_NO_EVIDENCE_ANSWER,
+        "citations": [],
+        "reason": "",
+        "error_kind": "",
+        "error_action": "",
+        "candidate_count": 0,
+        "selected": None,
+    }
+    text = str(question or "").strip()
+    if not text:
+        outcome.update(status="error", answer="", reason="问题不能为空", error_kind="empty_question")
+        return outcome
+    if ai is None or ai.mode != ai_client.MODE_DEEPSEEK:
+        outcome.update(status="model_not_connected", answer="", reason=(
+            "模型未连接：当前部署为本地规则模式（AI_MODE=rules）；请在企业设置连接模型（AI_MODE=deepseek）。"
+            "页面不会生成模拟答复；接入真实模型前，客户视角问答保持未验收。"))
+        return outcome
+    evidence = db.list_customer_qa_evidence(tenant_id)
+    outcome["candidate_count"] = len(evidence)
+    if not evidence:
+        outcome.update(reason="没有可检索的授权资料（需已发布 + 对外 + 已授权 + 未过期 + 当前版本准备完成；产品字段需对外且已核准）")
+        return outcome
+    sent = _knowledge_qa_model_evidence(evidence)
+    try:
+        selected_key, meta = ai.select_knowledge_evidence(text, sent)
+    except AIUnavailableError as error:
+        log_ai_call(db, tenant_id, conversation_id, AI_TASK_KNOWLEDGE_QA, ai, error=error)
+        outcome.update(status="error", answer="", reason="模型调用失败；未生成答复，可重试",
+                       error_kind=error.kind, error_action=error.action)
+        return outcome
+    log_ai_call(db, tenant_id, conversation_id, AI_TASK_KNOWLEDGE_QA, ai, meta=meta)
+    if selected_key is None:
+        outcome.update(reason="模型判定现有授权资料不足以回答该问题")
+        return outcome
+    chosen = next((item["evidence"] for item in sent if item["key"] == selected_key), None)
+    if chosen is None:
+        outcome.update(reason="模型选择不在允许证据范围内，已按资料不足处理")
+        return outcome
+    still_valid, invalid_reason = db.knowledge_evidence_valid_after_model(tenant_id, chosen)
+    if not still_valid:
+        outcome.update(reason="选定证据在生成期间已失效：" + invalid_reason)
+        return outcome
+    answer, citation = build_knowledge_evidence_answer(chosen)
+    outcome.update(status="grounded", answer=answer, citations=[citation], reason="", selected=chosen)
+    return outcome
 
 
 def answer_question_prefer_dify(
@@ -4514,15 +4640,26 @@ def answer_question_prefer_dify(
     product_id: str | None,
     user_label: str,
 ) -> tuple[str, str, str | None, str | None, list[dict[str, str]], str, str]:
-    """统一问答入口：检索授权尚未接通的共享远程应用停用，使用本地核准知识。
+    """统一问答入口：网页与已开启渠道共用同一过滤器与问答阶段。
 
-    返回 (status, answer_text, product_id, version_id, citations, reason, source)；source ∈ {dify, local}。
+    第一段保留既有工程字段问答（规则/模型两种模式的原有语义与防护）；未答出且模型已接通、
+    存在文章/FAQ 类候选时，进入任务4 的客户视角知识问答（本地候选 → 约束选择 → 生成后复核）。
+    返回 (status, answer_text, product_id, version_id, citations, reason, source)；source ∈ {dify, local, knowledge}。
     """
     # 现有 Dify 应用未在检索前约束企业和文档授权；引用校验无法证明生成上下文安全。
     # 在正式集成支持检索前授权之前，仅使用本地获准知识回答，后台索引同步仍运行。
     status, answer_text, answer_product_id, version_id, citations, reason = answer_question_with_mode(
         db, ai, tenant_id, conversation_id, question, product_id
     )
+    if status == "grounded" or ai is None or ai.mode != ai_client.MODE_DEEPSEEK:
+        return status, answer_text, answer_product_id, version_id, citations, reason, "local"
+    # 没有文章/FAQ 类候选时保持第一段结果：不做多余的模型调用（既有字段问答行为不变）。
+    if not db.list_ai_answerable_knowledge(tenant_id):
+        return status, answer_text, answer_product_id, version_id, citations, reason, "local"
+    outcome = answer_knowledge_question(db, ai, tenant_id, conversation_id, question)
+    if outcome["status"] == "grounded":
+        # 知识版本不写入 answers.product_version_id（该列是产品版本外键）；引用自带精确版本。
+        return "grounded", outcome["answer"], None, None, outcome["citations"], "", "knowledge"
     return status, answer_text, answer_product_id, version_id, citations, reason, "local"
 
 
@@ -4969,6 +5106,20 @@ h1{font-size:21px}
 .console .ios-switch input:focus-visible + .ios-slider{outline:2px solid var(--accent-border);outline-offset:2px}
 .console .ios-text{font-size:12.5px;color:var(--text-2);white-space:nowrap}
 .console .ios-state{color:var(--warn,#c2410c);font-weight:600}
+
+/* ── 企业知识折叠导航（任务3）── */
+.console .nav-main-row{display:flex;align-items:center;gap:2px}
+.console .nav-main-row>.side-link{flex:1;min-width:0}
+.console .side-toggle{flex:none;display:grid;place-items:center;width:30px;height:32px;border-radius:var(--r-md);color:var(--nav-text-2);background:none;border:0}
+.console .side-toggle:hover{background:var(--nav-hover);color:var(--nav-text-active)}
+.console .side-toggle .ic{transition:transform .2s ease}
+.console .side-toggle[aria-expanded="true"] .ic{transform:rotate(180deg)}
+.console .nav-subs{display:grid;grid-template-rows:0fr;transition:grid-template-rows .2s ease}
+.console .nav-subs.open{grid-template-rows:1fr}
+.console .nav-subs-inner{overflow:hidden;min-height:0;display:flex;flex-direction:column;gap:1px}
+.console .side-link.sub{padding:7px 10px 7px 34px;font-size:12.5px}
+.console .side-link.sub .ic{width:15px;height:15px;opacity:.7}
+@media (prefers-reduced-motion:reduce){.console .side-toggle .ic,.console .nav-subs{transition:none}}
 """
 
 
@@ -5012,6 +5163,44 @@ CONSOLE_ICONS = """<svg width="0" height="0" style="position:absolute" aria-hidd
 <symbol id="i-plat-generic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3.6 9.2h16.8"/><path d="M3.6 14.8h16.8"/><path d="M12 3a14 14 0 0 1 0 18"/><path d="M12 3a14 14 0 0 0 0 18"/></symbol>
 </defs></svg>"""
 
+
+CONSOLE_KNOWLEDGE_NAV_JS = """
+// 企业知识折叠导航（任务3 / 清单3 / 清单13）：主按钮进入全部列表并展开；独立箭头只展开/收起；
+// 直接进入子视图（服务端标记 data-sub-active）无论会话里存过什么，都展开——服务端活动子视图优先；
+// 其余情况按 sessionStorage 记忆（显式展开优先于默认收起）；动画由 CSS 提供，reduced-motion 下禁用。
+(function(){
+  var toggle=document.querySelector('.side-toggle[data-nav-toggle]');
+  var subs=document.getElementById('nav-knowledge-subs');
+  if(!toggle||!subs){return;}
+  var key='kb-nav-expanded';
+  var stored=null;
+  try{stored=sessionStorage.getItem(key);}catch(error){}
+  function apply(open){
+    subs.classList.toggle('open',open);
+    if(open){subs.removeAttribute('inert');subs.removeAttribute('aria-hidden');}
+    else{subs.setAttribute('inert','');subs.setAttribute('aria-hidden','true');}
+    toggle.setAttribute('aria-expanded',open?'true':'false');
+    toggle.setAttribute('aria-label',open?'收起知识分类':'展开知识分类');
+  }
+  var serverOpen=subs.getAttribute('data-sub-active')==='1';
+  // 清单13：服务端活动子视图优先于「会话里存过的收起」——直接进入子视图永远展开；
+  // 只有在没有活动子视图时，会话记忆才会覆盖默认收起。
+  apply(serverOpen||stored==='1');
+  function remember(){try{sessionStorage.setItem(key,'1');}catch(error){}}
+  toggle.addEventListener('click',function(){
+    var open=!subs.classList.contains('open');
+    try{sessionStorage.setItem(key,open?'1':'0');}catch(error){}
+    apply(open);
+  });
+  // 主按钮与子项：进入知识区展开并保持；页面跳转仍走链接默认行为，不绕过未保存保护。
+  var group=document.querySelector('.nav-main-row a[data-kb-nav-main]');
+  if(group){group.addEventListener('click',function(){remember();apply(true);});}
+  var subLinks=subs.querySelectorAll('a.side-link.sub');
+  for(var i=0;i<subLinks.length;i+=1){
+    subLinks[i].addEventListener('click',function(){remember();});
+  }
+})();
+"""
 
 CONSOLE_THEME_JS = """
 (function(){
@@ -5543,8 +5732,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("tasks", "/admin/tasks", "tool", "人工任务"),
         )),
         ("会话收件箱", tuple(inbox_items or ())),
-        ("产品经营", (("knowledge", "/admin/knowledge", "book", "企业知识"),
-            ("products", "/admin/products", "box", "产品管理"),)),
+        ("产品经营", (("knowledge", "/admin/knowledge", "book", "全部知识"),)),
         ("创意中心", (("creative", "/admin/creative", "palette", "产品展示页"),)),
         ("经营分析", (("analytics", "/admin/analytics", "chart", "分析报表"),)),
         ("团队与接入", (
@@ -5577,12 +5765,35 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             visible_items = tuple(item for item in items if nav_keys is None or item[0] in nav_keys)
         if not visible_items:
             continue
-        links = "".join(
-            f"<a class='side-link{' active' if key == active else ''}' href='{url}'>{svg_icon(icon)}{label}{side_count_html(key)}</a>"
-            for key, url, icon, label in visible_items
-        )
+        link_parts = []
+        for key, url, icon, label in visible_items:
+            is_knowledge = key == "knowledge"
+            # 清单3：活动态正确——主链接只在「全部知识」时高亮，子视图只高亮对应子项。
+            main_active = key == active
+            if is_knowledge:
+                chev = "<svg class='ic' viewBox='0 0 24 24' aria-hidden='true'><path d='m6 9 6 6 6-6'/></svg>"
+                # 清单3：直接进入子视图默认展开；主按钮进入并展开；箭头独立只切换；活动态只在对应项。
+                sub_active = any(sub_key == active for sub_key, _sub_url, _sub_icon, _sub_label in KNOWLEDGE_NAV_SUBS)
+                subs = "".join(
+                    f"<a class='side-link sub{' active' if sub_key == active else ''}' href='{sub_url}'>{svg_icon(sub_icon)}{sub_label}</a>"
+                    for sub_key, sub_url, sub_icon, sub_label in KNOWLEDGE_NAV_SUBS
+                )
+                subs_collapsed_attr = "" if sub_active else " inert aria-hidden='true'"
+                link_parts.append(
+                    f"<div class='nav-main-row'><a class='side-link{' active' if main_active else ''}' href='{url}' data-kb-nav-main>{svg_icon(icon)}{label}</a>"
+                    f"<button class='side-toggle' type='button' data-nav-toggle aria-controls='nav-knowledge-subs' aria-expanded='{'true' if sub_active else 'false'}' aria-label='{'收起知识分类' if sub_active else '展开知识分类'}'>{chev}</button></div>"
+                    f"<div class='nav-subs{' open' if sub_active else ''}' id='nav-knowledge-subs' data-sub-active='{'1' if sub_active else '0'}'{subs_collapsed_attr}><div class='nav-subs-inner'>{subs}</div></div>"
+                )
+            else:
+                link_parts.append(
+                    f"<a class='side-link{' active' if key == active else ''}' href='{url}'>{svg_icon(icon)}{label}{side_count_html(key)}</a>"
+                )
+        links = "".join(link_parts)
         sections.append(f"<div class='side-heading'>{heading}</div>{links}")
-    crumb = f"{group_of.get(active, '会话收件箱' if str(active).startswith('inbox_') else '卖家系统')} / <b>{esc(title)}</b>"
+    crumb_group = group_of.get(active)
+    if crumb_group is None and str(active).startswith("knowledge"):
+        crumb_group = "产品经营"
+    crumb = f"{crumb_group or ('会话收件箱' if str(active).startswith('inbox_') else '卖家系统')} / <b>{esc(title)}</b>"
     tenant_name = tenant or "当前企业"
     return f"""<!doctype html>
 <html lang='{'en' if lang == 'en' else 'zh-CN'}'>
@@ -5612,6 +5823,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
 <script>document.getElementById('console-menu').addEventListener('click',function(){{document.getElementById('console-side').classList.toggle('open');}});</script>
 <script>document.addEventListener('click',function(event){{var menu=document.querySelector('.account-menu');if(menu && menu.open && !menu.contains(event.target)){{menu.open=false;}}}});</script>
 <script>{CONSOLE_NAV_JS}</script>
+<script>{CONSOLE_KNOWLEDGE_NAV_JS}</script>
 <script>{CONSOLE_DOCK_JS}</script>
 </body></html>"""
 
@@ -5653,6 +5865,13 @@ DEMO_TOOL_PATHS = {"/admin/products/seed", "/admin/products/seed-lowara", "/admi
 GRANTABLE_MODULES = (("products", "产品管理"), ("tasks", "人工任务"), ("rfqs", "RFQ 询价"), ("sales", "销售工作台"), ("sites", "网站 API 接入"), ("creative", "创意中心"), ("inbox", "会话收件箱"), ("channels", "渠道账号管理"))
 GRANTABLE_MODULE_KEYS = tuple(key for key, _label in GRANTABLE_MODULES)
 MODULE_LABELS = dict(GRANTABLE_MODULES)
+# 企业知识统一入口的折叠子项（第一批任务3：全部知识 / 产品与服务 / 文章与 FAQ / 文件资料）。
+KNOWLEDGE_NAV_SUBS = (
+    ("knowledge_products", "/admin/knowledge?view=product_service", "box", "产品与服务"),
+    ("knowledge_articles", "/admin/knowledge?view=article_faq", "book", "文章与 FAQ"),
+    ("knowledge_files", "/admin/knowledge?view=files", "file", "文件资料"),
+    ("knowledge_qa", "/admin/knowledge/qa", "chat", "问答测试"),
+)
 # 旧角色名兼容（旧库迁移与既有测试）：等价于"员工 + 对应模块授权"，能力与迁移前一致。
 LEGACY_ROLE_MODULES = {"sales": ("rfqs", "sales"), "engineer": ("tasks", "rfqs", "sales")}
 
@@ -7035,14 +7254,10 @@ def process_channel_message(db: Database, ai, tenant_id: str, channel: str, exte
             first = next((item for item in results if item.get("status") in {"candidate", "needs_confirmation"}), None)
             if first:
                 product_id = first.get("product_id")
-        # 第二波：LangBot / WhatsApp 渠道的资料问答优先走 Dify 引擎（平台仍是唯一主脑：落库、转人工、出站都在平台）。
-        if channel in ("langbot", "whatsapp", "whatsapp_personal"):
-            status, answer_text, answer_product_id, version_id, citations, _reason, qa_source = answer_question_prefer_dify(
-                db, ai, tenant_id, conversation_id, text, product_id, f"{channel}:{external_user_id}"
-            )
-        else:
-            status, answer_text, answer_product_id, version_id, citations, _reason = answer_question_with_mode(db, ai, tenant_id, conversation_id, text, product_id)
-            qa_source = "local"
+        # 网页与所有已开启渠道共用同一入口（含任务4 的共用知识过滤与问答阶段；平台仍是唯一主脑：落库、转人工、出站都在平台）。
+        status, answer_text, answer_product_id, version_id, citations, _reason, qa_source = answer_question_prefer_dify(
+            db, ai, tenant_id, conversation_id, text, product_id, f"{channel}:{external_user_id}"
+        )
         db.save_answer(tenant_id, conversation_id, message_id, answer_product_id, version_id, status, answer_text, citations)
         if status == "grounded":
             channel_send_stored(db, tenant_id, conversation, answer_text, "grounded-answer")
@@ -7712,7 +7927,7 @@ AUDIT_ACTION_LABELS = {
 }
 
 
-class Handler(BusinessChannelUI, BaseHTTPRequestHandler):
+class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
     db: Database
     # AI 调用边界：由 make_server 按显式模式装配（rules 时 ai 为空操作对象，不发外部请求）。
     ai: AIService | None = None

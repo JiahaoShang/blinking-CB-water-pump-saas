@@ -98,10 +98,12 @@ class ModulePermissionTests(unittest.TestCase):
             self.db.set_user_modules("demo-tenant", outsider_id, ["products"], "demo-admin@example.invalid")
 
     def test_each_module_gates_its_own_pages(self):
-        # 产品同事（仅 products）：产品可访问、侧栏有产品入口；其余四个模块页 403
+        # 产品同事（仅 products）：产品页可访问（清单8 后产品管理不再有独立侧栏入口，从知识视图上下文进入）；
+        # 其余四个模块页 403
         status, _, page = form_request(self.server, "GET", "/admin", cookie=self.product_cookie)
         self.assertEqual(status, 200)
-        self.assertIn("data-nav-count='products'", page)
+        self.assertNotIn("data-nav-count='products'", page)
+        self.assertIn("全部知识", page, "统一知识入口对所有成员可见")
         self.assertNotIn("data-nav-count='tasks'", page)
         self.assertNotIn("data-nav-count='sales'", page)
         self.assertEqual(form_request(self.server, "GET", "/admin/products", cookie=self.product_cookie)[0], 200)
@@ -115,7 +117,7 @@ class ModulePermissionTests(unittest.TestCase):
         self.assertEqual(status, 303)
         status, _, page = form_request(self.server, "GET", "/admin/products", cookie=self.employee_cookie)
         self.assertEqual(status, 200)
-        self.assertIn("data-nav-count='products'", page)
+        self.assertIn("新建产品型号", page)
         self.assertEqual(form_request(self.server, "GET", "/admin/tasks", cookie=self.employee_cookie)[0], 403)
         # 收回（保存空勾选）→ 403 恢复
         status, _, _ = form_request(self.server, "POST", f"/admin/users/{self.employee_id}/modules", {}, self.admin_cookie)
