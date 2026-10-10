@@ -1,0 +1,41 @@
+PASS - 对话框按已发布模板版本比较（v1 → v2）
+PASS - 对话框列出新增字段（服务保障期）
+PASS - 对话框列出移除字段（服务方式）
+PASS - 确认后工作副本处于第 2 步（期望 2，实际 2）
+PASS - 确认后页面直接显示第 2 步核对（无需重新选择文件）
+PASS - 确认后不再出现第 1 步「开始核对」按钮
+PASS - 确认后路由停在核对向导（非新建文件流程）（期望 "企业知识 / <b>核对内容</b>"，实际 "企业知识 / <b>核对内容</b>"）
+PASS - 升级保留原来源文件（期望 "上门安装服务方案.pdf"，实际 "上门安装服务方案.pdf"）
+PASS - 升级保留原始段落（期望 3，实际 3）
+PASS - 沿用字段保留已填写值（服务时效=4）（期望 "4"，实际 "4"）
+PASS - 未变化字段保留「已核对」勾选（期望 true，实际 true）
+PASS - 沿用字段保留已填写值（服务区域=市区）（期望 "市区"，实际 "市区"）
+PASS - 新增字段留空待填（服务保障期）（期望 ""，实际 ""）
+PASS - 移除字段不再出现在字段区（服务方式）（期望 undefined，实际 undefined）
+PASS - 移除字段的旧值进入历史（期望 "上门安装（市区与近郊）"，实际 "上门安装（市区与近郊）"）
+PASS - 确认后生成升级草稿
+PASS - 草稿类型标记为模板升级（期望 "upgrade"，实际 "upgrade"）
+PASS - 草稿已按新版模板 v2（期望 2，实际 2）
+PASS - 发布版本号不变（仍是 v1）（期望 1，实际 1）
+PASS - 已发布内容仍挂 v1 模板（期望 1，实际 1）
+PASS - 已发布字段未被升级改动（期望 "[{\"key\":\"f_service_time\",\"label\":\"服务时效\",\"type\":\"number\",\"unit\":\"小时\",\"options\":[],\"value\":\"4\",\"checked\":true,\"aiAllowed\":true,\"sourceKind\":\"原文\",\"page\":1,\"modified\":false},{\"key\":\"f_service_area\",\"label\":\"服务区域\",\"type\":\"options\",\"options\":[\"市区\",\"近郊\",\"全国\"],\"value\":\"市区\",\"checked\":true,\"aiAllowed\":true,\"sourceKind\":\"原文\",\"page\":1,\"modified\":false},{\"key\":\"f_service_mode\",\"label\":\"服务方式\",\"type\":\"text\",\"options\":[],\"unit\":\"\",\"value\":\"上门安装（市区与近郊）\",\"checked\":true,\"aiAllowed\":false,\"sourceKind\":\"原文\",\"page\":1,\"modified\":false}]"，实际 "[{\"key\":\"f_service_time\",\"label\":\"服务时效\",\"type\":\"number\",\"unit\":\"小时\",\"options\":[],\"value\":\"4\",\"checked\":true,\"aiAllowed\":true,\"sourceKind\":\"原文\",\"page\":1,\"modified\":false},{\"key\":\"f_service_area\",\"label\":\"服务区域\",\"type\":\"options\",\"options\":[\"市区\",\"近郊\",\"全国\"],\"value\":\"市区\",\"checked\":true,\"aiAllowed\":true,\"sourceKind\":\"原文\",\"page\":1,\"modified\":false},{\"key\":\"f_service_mode\",\"label\":\"服务方式\",\"type\":\"text\",\"options\":[],\"unit\":\"\",\"value\":\"上门安装（市区与近郊）\",\"checked\":true,\"aiAllowed\":false,\"sourceKind\":\"原文\",\"page\":1,\"modified\":false}]"）
+PASS - 版本历史未新增（尚未保存/发布）（期望 1，实际 1）
+PASS - 有草稿时对话框按草稿的模板版本比较（v2 → v3）
+PASS - 对话框说明将基于当前草稿升级
+PASS - 基于草稿升级后直接进入第 2 步（期望 2，实际 2）
+PASS - 基于草稿升级后页面显示第 2 步
+PASS - 保留草稿正文段数（不是已发布版本的 3 段）（期望 2，实际 2）
+PASS - 保留草稿中修改过的正文文字
+PASS - 保留草稿字段值（服务时效=6，而非已发布的 4）（期望 "6"，实际 "6"）
+PASS - 未变化字段保留草稿中的「已核对」勾选（期望 true，实际 true）
+PASS - 上一轮新增字段保留草稿值（服务保障期=12）（期望 "12"，实际 "12"）
+PASS - 本轮新增字段留空待填（支持渠道）（期望 ""，实际 ""）
+PASS - 本轮移除字段不在字段区（服务区域）（期望 undefined，实际 undefined）
+PASS - 本轮移除字段取草稿值进入历史（服务区域=近郊）（期望 "近郊"，实际 "近郊"）
+PASS - 既有历史（服务方式）再次升级后仍保留（期望 "上门安装（市区与近郊）"，实际 "上门安装（市区与近郊）"）
+PASS - 草稿升级到 v3（期望 3，实际 3）
+PASS - 发布版本号仍不变（期望 1，实际 1）
+PASS - 已发布内容仍挂 v1 模板（期望 1，实际 1）
+PASS - 已发布字段原样保留（期望 "上门安装（市区与近郊）"，实际 "上门安装（市区与近郊）"）
+
+升级流程回归：全部通过
