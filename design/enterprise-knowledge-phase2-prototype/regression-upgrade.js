@@ -2,7 +2,7 @@
 /*
  * 升级流程回归（DOM 沙盒，无依赖；运行：node regression-upgrade.js）
  * 只覆盖三件容易回归、且曾在真实浏览器里出问题的事：
- *  1) 采用新版模板确认后，向导直接停在第 2 步「核对来源与字段」（不是回到第 1 步要求重新选文件）；
+ *  1) 采用新版模板确认后，向导直接停在第 2 步「检查内容」（不是回到第 1 步要求重新选文件）；
  *  2) 升级只生成/更新草稿：当前发布版本号与已发布内容保持不变；
  *  3) 已有草稿时基于草稿升级：草稿正文与字段值保留、被移除字段的旧值进入历史。
  * 这里用最小 DOM 桩在 Node 里加载 app.js 并触发对话框确认，只验证状态与渲染结果；
@@ -85,8 +85,8 @@ function eq(actual, expected, label) {
 
   const w = sandbox.work();
   eq(w.step, 2, '确认后工作副本处于第 2 步');
-  ok(reg.get('#app').innerHTML.indexOf('第 2 步：核对来源与字段') >= 0, '确认后页面直接显示第 2 步核对（无需重新选择文件）');
-  ok(reg.get('#app').innerHTML.indexOf('id="step1-next"') < 0, '确认后不再出现第 1 步「开始核对」按钮');
+  ok(reg.get('#app').innerHTML.indexOf('第 2 步：检查内容') >= 0, '确认后页面直接显示第 2 步检查（无需重新选择文件）');
+  ok(reg.get('#app').innerHTML.indexOf('id="step1-next"') < 0, '确认后不再出现第 1 步「开始检查」按钮');
   eq(sandbox.crumbHTML(), '企业知识 / <b>核对内容</b>', '确认后路由停在核对向导（非新建文件流程）');
 
   eq(w.source && w.source.file, '上门安装服务方案.pdf', '升级保留原来源文件');
@@ -149,7 +149,7 @@ function eq(actual, expected, label) {
 
   const w = sandbox.work();
   eq(w.step, 2, '基于草稿升级后直接进入第 2 步');
-  ok(reg.get('#app').innerHTML.indexOf('第 2 步：核对来源与字段') >= 0, '基于草稿升级后页面显示第 2 步');
+  ok(reg.get('#app').innerHTML.indexOf('第 2 步：检查内容') >= 0, '基于草稿升级后页面显示第 2 步');
   eq(w.paragraphs.length, 2, '保留草稿正文段数（不是已发布版本的 3 段）');
   ok(w.paragraphs.some((p) => p.text.indexOf('6 小时内') >= 0), '保留草稿中修改过的正文文字');
   const g = (k) => w.fields.find((x) => x.key === k);

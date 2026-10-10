@@ -1,0 +1,145 @@
+企业知识管理 · 第二批设计评审原型 —— 第二轮 UX 改版检查日志
+日期：2026-10-11（北京时间）
+范围：design/enterprise-knowledge-phase2-prototype 内 HTML / CSS / JS / 回归 / README；
+      未改业务代码、数据库、配置、docs 与第一批原型；未提交、未部署、未启动服务器。
+
+==================== 1) 语法检查 ====================
+node --check app.js: OK
+node --check regression-upgrade.js: OK
+node --check regression-ux-pass2.js: OK
+
+==================== 2) 升级流程回归（保留并运行） ====================
+PASS - 对话框按已发布模板版本比较（v1 → v2）
+PASS - 对话框列出新增字段（服务保障期）
+PASS - 对话框列出移除字段（服务方式）
+PASS - 确认后工作副本处于第 2 步（期望 2，实际 2）
+PASS - 确认后页面直接显示第 2 步检查（无需重新选择文件）
+PASS - 确认后不再出现第 1 步「开始检查」按钮
+PASS - 确认后路由停在核对向导（非新建文件流程）（期望 "企业知识 / <b>核对内容</b>"，实际 "企业知识 / <b>核对内容</b>"）
+PASS - 升级保留原来源文件（期望 "上门安装服务方案.pdf"，实际 "上门安装服务方案.pdf"）
+PASS - 升级保留原始段落（期望 3，实际 3）
+PASS - 沿用字段保留已填写值（服务时效=4）（期望 "4"，实际 "4"）
+PASS - 未变化字段保留「已核对」勾选（期望 true，实际 true）
+PASS - 沿用字段保留已填写值（服务区域=市区）（期望 "市区"，实际 "市区"）
+PASS - 新增字段留空待填（服务保障期）（期望 ""，实际 ""）
+PASS - 移除字段不再出现在字段区（服务方式）（期望 undefined，实际 undefined）
+PASS - 移除字段的旧值进入历史（期望 "上门安装（市区与近郊）"，实际 "上门安装（市区与近郊）"）
+PASS - 确认后生成升级草稿
+PASS - 草稿类型标记为模板升级（期望 "upgrade"，实际 "upgrade"）
+PASS - 草稿已按新版模板 v2（期望 2，实际 2）
+PASS - 发布版本号不变（仍是 v1）（期望 1，实际 1）
+PASS - 已发布内容仍挂 v1 模板（期望 1，实际 1）
+PASS - 已发布字段未被升级改动（期望 "[{\"key\":\"f_service_time\",\"label\":\"服务时效\",\"type\":\"number\",\"unit\":\"小时\",\"options\":[],\"value\":\"4\",\"checked\":true,\"aiAllowed\":true,\"sourceKind\":\"原文\",\"page\":1,\"modified\":false},{\"key\":\"f_service_area\",\"label\":\"服务区域\",\"type\":\"options\",\"options\":[\"市区\",\"近郊\",\"全国\"],\"value\":\"市区\",\"checked\":true,\"aiAllowed\":true,\"sourceKind\":\"原文\",\"page\":1,\"modified\":false},{\"key\":\"f_service_mode\",\"label\":\"服务方式\",\"type\":\"text\",\"options\":[],\"unit\":\"\",\"value\":\"上门安装（市区与近郊）\",\"checked\":true,\"aiAllowed\":false,\"sourceKind\":\"原文\",\"page\":1,\"modified\":false}]"，实际 "[{\"key\":\"f_service_time\",\"label\":\"服务时效\",\"type\":\"number\",\"unit\":\"小时\",\"options\":[],\"value\":\"4\",\"checked\":true,\"aiAllowed\":true,\"sourceKind\":\"原文\",\"page\":1,\"modified\":false},{\"key\":\"f_service_area\",\"label\":\"服务区域\",\"type\":\"options\",\"options\":[\"市区\",\"近郊\",\"全国\"],\"value\":\"市区\",\"checked\":true,\"aiAllowed\":true,\"sourceKind\":\"原文\",\"page\":1,\"modified\":false},{\"key\":\"f_service_mode\",\"label\":\"服务方式\",\"type\":\"text\",\"options\":[],\"unit\":\"\",\"value\":\"上门安装（市区与近郊）\",\"checked\":true,\"aiAllowed\":false,\"sourceKind\":\"原文\",\"page\":1,\"modified\":false}]"）
+PASS - 版本历史未新增（尚未保存/发布）（期望 1，实际 1）
+PASS - 有草稿时对话框按草稿的模板版本比较（v2 → v3）
+PASS - 对话框说明将基于当前草稿升级
+PASS - 基于草稿升级后直接进入第 2 步（期望 2，实际 2）
+PASS - 基于草稿升级后页面显示第 2 步
+PASS - 保留草稿正文段数（不是已发布版本的 3 段）（期望 2，实际 2）
+PASS - 保留草稿中修改过的正文文字
+PASS - 保留草稿字段值（服务时效=6，而非已发布的 4）（期望 "6"，实际 "6"）
+PASS - 未变化字段保留草稿中的「已核对」勾选（期望 true，实际 true）
+PASS - 上一轮新增字段保留草稿值（服务保障期=12）（期望 "12"，实际 "12"）
+PASS - 本轮新增字段留空待填（支持渠道）（期望 ""，实际 ""）
+PASS - 本轮移除字段不在字段区（服务区域）（期望 undefined，实际 undefined）
+PASS - 本轮移除字段取草稿值进入历史（服务区域=近郊）（期望 "近郊"，实际 "近郊"）
+PASS - 既有历史（服务方式）再次升级后仍保留（期望 "上门安装（市区与近郊）"，实际 "上门安装（市区与近郊）"）
+PASS - 草稿升级到 v3（期望 3，实际 3）
+PASS - 发布版本号仍不变（期望 1，实际 1）
+PASS - 已发布内容仍挂 v1 模板（期望 1，实际 1）
+PASS - 已发布字段原样保留（期望 "上门安装（市区与近郊）"，实际 "上门安装（市区与近郊）"）
+
+升级流程回归：全部通过
+
+==================== 3) 第二轮改版回归（新增） ====================
+PASS - 导航到文件资料列表（期望 "list"，实际 "list"）
+PASS - 当前列表为文件资料（期望 "file"，实际 "file"）
+PASS - 打开知识详情（期望 "detail"，实际 "detail"）
+PASS - 详情顶部显示「返回文件资料」
+PASS - 返回是普通导航按钮（不依赖浏览器历史）
+PASS - 点返回回到实际进入的列表（文件资料）（期望 "file"，实际 "file"）
+PASS - 返回后搜索关键词保留（期望 "客户"，实际 "客户"）
+PASS - 返回后状态筛选保留（期望 "published"，实际 "published"）
+PASS - 返回后的列表保留搜索框与关键词
+PASS - 返回后仍在文件资料视图（有「上传文件」入口）
+PASS - 从全部知识进入时显示「返回全部知识」
+PASS - 返回列表（期望 "list"，实际 "list"）
+PASS - 返回视图为全部知识（期望 "all"，实际 "all"）
+PASS - 只读视角详情也有返回入口
+PASS - 只读视角没有编辑按钮
+PASS - 只读视角返回全部知识（期望 "all"，实际 "all"）
+PASS - 第 1 步默认通用文档（未选模板）（期望 null，实际 null）
+PASS - 模板不阻挡继续（默认即通用文档）（期望 true，实际 true）
+PASS - 未选择文件时不能继续（期望 false，实际 false）
+PASS - 模板入口位于「补充信息（选填）」
+PASS - 「补充信息」默认折叠
+PASS - 识别「演示场景」默认折叠
+PASS - 禁用原因写明「请先选择文件」
+PASS - 选好文件后（未选模板）即可继续（期望 true，实际 true）
+PASS - 进入第 2 步「检查内容」
+PASS - 第 2 步显示单一进度「还需检查 N 段」
+PASS - 第 2 步有原文对照入口
+PASS - 原文对照默认折叠
+PASS - 第 1 步没有用途控件（期望 0，实际 0）
+PASS - 第 1 步没有到期控件（期望 0，实际 0）
+PASS - 第 2 步没有用途控件（不重复展示）（期望 0，实际 0）
+PASS - 第 2 步没有 AI 授权开关（期望 0，实际 0）
+PASS - 第 2 步没有到期时间控件（期望 0，实际 0）
+PASS - 新知识默认内部使用（期望 "internal"，实际 "internal"）
+PASS - 新知识默认 AI 关闭（期望 false，实际 false）
+PASS - 进入第 3 步发布设置（期望 3，实际 3）
+PASS - 第 3 步有一组用途单选（内部 / 对外）（期望 2，实际 2）
+PASS - 第 3 步只有一处 AI 授权开关（期望 1，实际 1）
+PASS - 第 3 步只有一处到期时间输入（期望 1，实际 1）
+PASS - 未通过项集中列出
+PASS - 发布「演示场景」默认折叠
+PASS - 已通过项不铺满清单
+PASS - 只列出未通过项（当前仅「正文未核对」1 项）（期望 1，实际 1）
+PASS - 点未通过项返回第 2 步对应区域（期望 2，实际 2）
+PASS - 点「来源」自动展开原文对照（期望 true，实际 true）
+PASS - 定位到来源所在页（第 2 页）（期望 2，实际 2）
+PASS - 有未保存修改时不直接离开（期望 "review"，实际 "review"）
+PASS - 弹出未保存确认（保存草稿 / 放弃 / 继续编辑）
+
+第二轮改版回归：全部通过
+
+==================== 4) git diff --check ====================
+git diff --check: OK（无空白/冲突标记问题）
+
+======================================================================
+5) 无头 Chrome 元素级宽度测量（补充证据；不是完整浏览器走查）
+方法：把三个原型文件复制到临时目录，附一个仅在临时副本里运行的测量脚本（iframe 320/390 视口，
+      Chrome --headless=new --dump-dom）；脚本本身不在原型文件里。
+视图（24 个 × 320 / 390 / 1440；另抽查 step3_edit / publish_flow / draft_flow）：list / list_note / filelist / tpllist / builder / builder_open /
+      builder_new / detail / detail_more / detail_reader / detail_versions / replace_step1 /
+      step1 / step1_open / step2 / step2_open / step3 / step3_open / source_click / gate_jump /
+      manual / manual_step2 / drawer_confirm / upgrade_entry / step3_edit / publish_flow / draft_flow
+
+结果摘要：
+  - 页面级横向溢出：0 个视图出现（full-scan.txt 中 72 次运行全部 docScrollW == 视口宽度）；
+    模板编辑 320px 的旧 16px 页宽溢出未复现。
+  - 交互类检查（在真实浏览器里点出来的结果；320/390/1440 三档一致）：
+    "[source_click] origOpen=true highlighted=d5 visiblePage=2 pgLabel=第 2 / 2 页"
+    "[gate_jump] gateLabel=收录的段落已全部核对 step-after=step2 progress=还需检查 5 段"
+    "[manual] step1btnDisabled=false extraSum=未使用模板（通用文档）"
+    "[manual_step2] emptyProgress=还没有正文段落 afterAdd=还需检查 1 段"
+    "[drawer_confirm] drawerOpen=true afterPickExtraSum=当前：服务方案模板 v2 tmplRegionHasService=true"
+    "[upgrade_entry] upgradeBtn=采用新版模板（v2）… dialogOpen=true dialogTitle=采用新版模板：服务方案模板 v2"
+    "[replace_step1] replacing=true extraSum=当前：企业制度模板 v1 extraClosed=true"
+    "[step3_edit] stepAfterEdit=step2 expirySum=2027-06-30 23:59（北京时间） usageExternalChecked=true aiChecked=true"
+    "[publish_flow] publishDisabled=false confirmOpen=true confirmTitle=对外发布确认 afterPublishPill=已发布（AI 客服可用） backLabel=返回文件资料"
+    "[draft_flow] route=detail pill=草稿 draftBanner=false"
+
+  说明1：升级入口在详情字段页的表格位于既有 .table-scroll 容器内横向滚动（原设计，页面本身不溢出；
+  扫描输出中 320/390 的 upgrade_entry 出现容器内单元格标记，docScrollW 仍等于视口宽度）。
+  说明2：本测量只验证元素几何与点击结果，不覆盖键盘、对话框焦点与逐流程视觉走查；
+  完整浏览器走查由 Codex 独立执行。
+
+==================== 6) 改动清单（git diff --stat，仅原型目录） ====================
+ .../README.md                                      |  55 ++-
+ .../enterprise-knowledge-phase2-prototype/app.js   | 385 +++++++++++++--------
+ .../index.html                                     |  25 +-
+ .../regression-upgrade.js                          |   8 +-
+ .../style.css                                      | 134 +++++--
+ 5 files changed, 411 insertions(+), 196 deletions(-)
+新增：regression-ux-pass2.js、evidence/second-pass-checks.log（未跟踪，未提交）

@@ -10,11 +10,18 @@
 </head>
 <body>
 
-<!-- 审查标注条：明确演示边界与范围状态，避免被当成已实现功能 -->
+<!-- 设计预览条（第二轮）：常驻只保留最小演示边界；其余说明折叠到「预览说明」 -->
 <div class="review-banner" role="note">
-  <strong>第二批设计评审稿</strong>
-  <span>识别 / 上传 / 保存 / 发布均为演示：刷新即重置、未连接后端、不读取文件内容。</span>
-  <span class="banner-scope">设计范围已确认 · 交互与规则待评审 · 业务代码未开始</span>
+  <strong>设计预览 · 数据为演示，刷新重置</strong>
+  <details class="preview-note" id="preview-note">
+    <summary>预览说明</summary>
+    <div class="rn-body">
+      <p>第二批设计评审稿：识别、上传、保存、发布均为演示，未连接后端、不读取文件内容、不调用模型。</p>
+      <p>设计范围已确认 · 交互与规则待评审 · 业务代码未开始。</p>
+      <p>权限视角只演示界面差异（只读成员看不到编辑与模板入口）；真实权限由后端强制。</p>
+      <p>「演示场景」控件用于直接切换识别 / 处理结果，不属于产品界面，也不用倒计时模拟处理。</p>
+    </div>
+  </details>
 </div>
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
@@ -39,6 +46,8 @@
 <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
 <symbol id="i-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6"/></symbol>
 <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><path d="M12 12h.01"/><path d="M19 12h.01"/><path d="M5 12h.01"/></symbol>
 </defs></svg>
 
 <div class="console">
@@ -53,9 +62,8 @@
     </div>
     <nav class="side-nav" id="side-nav" aria-label="控制台导航"></nav>
     <div class="side-foot">
-      第二批设计评审原型 · 演示数据<br>
-      刷新页面即重置，不会保存任何内容<br>
-      权限演示：管理员及获产品管理授权成员；普通成员只读
+      演示原型：刷新即重置，不会保存内容<br>
+      权限视角仅演示界面差异，真实权限由后端强制
     </div>
   </aside>
   <div class="side-scrim" id="side-scrim" hidden></div>
@@ -67,14 +75,13 @@
       </button>
       <div class="crumb" id="crumb"></div>
       <div class="grow"></div>
-      <label class="role-switch" title="仅用于演示界面差异：只读成员看不到编辑、上传与模板管理入口">
+      <label class="role-switch" title="演示用：切换只读视角，查看界面差异">
         <span>权限视角（演示）</span>
         <select id="role-select">
           <option value="admin">管理员</option>
           <option value="reader">仅阅读成员</option>
         </select>
       </label>
-      <span class="review-chip">第二批评审稿</span>
     </header>
     <main id="app" aria-live="polite"></main>
   </div>

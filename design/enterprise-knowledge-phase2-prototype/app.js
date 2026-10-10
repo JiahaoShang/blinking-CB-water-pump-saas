@@ -199,6 +199,7 @@ const IMPORT_SCENARIOS = {
 /* ---------- 状态 ---------- */
 const state = {
   route: { name: 'list', view: 'all', id: null, tab: 'content' },
+  listLast: 'all',     // 最近一次展示的列表视图：详情返回按钮据此回到「实际进入的列表」
   role: 'admin',
   navExpanded: false,
   filters: { q: '', type: '', status: '' },
@@ -302,6 +303,7 @@ function crumbHTML() {
 function render() {
   qs('#side-nav').innerHTML = sideNavHTML();
   const r = state.route;
+  if (r.name === 'list') state.listLast = r.view || 'all';
   let html = '';
   if (r.name === 'list') html = listHTML();
   else if (r.name === 'detail') html = detailExists(r.id) ? detailHTML(r.id) : missingHTML();
@@ -434,8 +436,8 @@ function newWork(mode, opts) {
     entryId: opts.entryId || null,
     step: 1,
     pending: opts.pending || null,
-    templateId: ('templateId' in opts) ? opts.templateId : undefined,
-    templateDecided: ('templateDecided' in opts) ? opts.templateDecided : false,
+    templateId: ('templateId' in opts) ? opts.templateId : null,
+    templateDecided: ('templateDecided' in opts) ? opts.templateDecided : true,
     templateVersion: opts.templateVersion || 0,
     scenario: 'ok',
     fromRecord: opts.fromRecord || null,
@@ -554,7 +556,7 @@ function focusStepHeading() {
 /* ---------- 核对向导：渲染 ---------- */
 function reviewHTML() {
   const w = work();
-  const names = ['选择文件与模板', '核对来源与字段', '保存与发布'];
+  const names = ['添加资料', '检查内容', '发布设置'];
   const steps = names.map((nm, i) => {
     const n = i + 1;
     return '<div class="step' + (w.step === n ? ' on' : '') + '"' + (w.step === n ? ' aria-current="step"' : '') + '><span class="n">' + n + '</span>' + nm + '</div>';
@@ -562,7 +564,7 @@ function reviewHTML() {
   const modeNote = w.mode === 'replace'
     ? '<p class="info-note"><svg class="ic"><use href="#i-history"/></svg><span>更新文件：为新文件登记独立来源，核对后保存为 <b>新草稿</b>；当前发布版本继续可用，发布成功后才会切换。</span></p>'
     : w.mode === 'edit' ? '<p class="info-note"><svg class="ic"><use href="#i-history"/></svg><span>编辑草稿：保存或发布后才会更新线上版本；期间线上内容保持不变。</span></p>'
-      : w.mode === 'manual' ? '<p class="info-note"><svg class="ic"><use href="#i-file"/></svg><span>手动创建：同样先选择知识模板；正文在核对页逐段添加。</span></p>' : '';
+      : w.mode === 'manual' ? '<p class="info-note"><svg class="ic"><use href="#i-file"/></svg><span>手动创建：正文在检查页逐段添加；知识模板为选填。</span></p>' : '';
   return '<div class="steps" aria-label="步骤">' + steps + '</div>' + modeNote + '<div id="step-region">' + stepBodyHTML() + '</div>';
 }
 function stepBodyHTML() {
@@ -576,19 +578,20 @@ function renderStepRegion() { const el = qs('#step-region'); if (el) el.innerHTM
 /* ---- 步骤 1 ---- */
 function step1HTML() {
   const w = work();
-  let html = '';
+  let html = '<h1>第 1 步：添加资料</h1>';
   if (w.mode === 'manual') {
-    html += '<div class="card"><h1>手动创建：基本信息</h1>' +
-      '<div class="form-grid"><div class="field" id="fld1-title"><label for="s1-title">标题</label><input id="s1-title" data-act="s1-title" value="' + esc(w.title) + '" placeholder="例如：上门安装服务说明"></div>' +
+    html += '<p class="step-sub">填写标题与分类，正文在下一步逐段添加；知识模板与业务字段为选填。</p>' +
+      '<div class="card"><div class="form-grid">' +
+      '<div class="field" id="fld1-title"><label for="s1-title">标题</label><input id="s1-title" data-act="s1-title" value="' + esc(w.title) + '" placeholder="例如：上门安装服务说明"></div>' +
       '<div><label for="s1-category">分类</label><select id="s1-category" data-act="s1-category">' + CATEGORY_LIST.map((c) => '<option' + (w.category === c ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select></div></div>' +
-      '<p class="hint-line">标题也可以稍后在核对页填写；保存草稿允许未完成。</p></div>';
+      '<p class="hint-line">标题也可以稍后在检查页填写；保存草稿允许未完成。</p></div>';
   } else {
     const replacing = w.mode === 'replace';
-    html += '<div class="card"><h1>' + (replacing ? '更新文件：选择新文件' : '上传文件 · 第 1 步：选择文件') + '</h1>' +
-      '<div class="drop">' +
+    html += '<p class="step-sub">' + (replacing ? '选择要核对的新文件；在你确认发布前，当前发布版本不会变化。' : '选择要入库的文件；识别结果在下一步逐段检查。') + '</p>' +
+      '<div class="card"><div class="drop">' +
       '<svg class="ic big"><use href="#i-upload"/></svg>' +
       '<strong>选择本地文件</strong>' +
-      '<p>演示说明：选择本地文件只会记录<b>文件名</b>，不会读取内容、不会上传。评审建议限制：单文件 ≤10MB、≤200 页；超出时登记原件并人工整理。一次处理一个文件。</p>' +
+      '<p>PDF、Word（.docx） · 一次添加一个文件</p><details class="opt-details"><summary>文件要求与预览说明</summary><p>建议单文件 ≤10MB、≤200 页，限制待评审。本预览只登记文件名，不读取或上传文件内容。</p></details>' +
       '<input type="file" id="file-input" class="sr-input" aria-label="选择本地文件（演示：不读取内容、不上传）">' +
       '<button class="button secondary" type="button" data-act="pick-file"><svg class="ic"><use href="#i-file"/></svg>选择本地文件…</button>' +
       '<div class="sample-row"><button class="button secondary" type="button" data-act="sample-pdf">演示样例：PDF</button><button class="button secondary" type="button" data-act="sample-docx">演示样例：DOCX</button></div>' +
@@ -598,13 +601,14 @@ function step1HTML() {
       '</div>';
     html += scenarioBoxHTML(w);
   }
-  html += '<div class="card"><h2>知识模板</h2><div id="tmpl-region">' + tmplRegionHTML() + '</div>' +
+  html += '<details class="opt-box" id="extra-box"><summary><svg class="ic"><use href="#i-layout"/></svg><span>补充信息（选填）</span><small id="extra-sum">' + esc(extraSumHTML()) + '</small></summary>' +
+    '<div class="opt-body"><div id="tmpl-region">' + tmplRegionHTML() + '</div>' +
     '<div class="actions" style="margin-top:12px">' +
     (w.mode === 'replace' ? '' : '<button class="button secondary" type="button" data-act="pick-template">选择知识模板…</button>') +
     (state.role === 'admin' ? '<button class="button ghost" type="button" data-act="manage-templates">管理知识模板</button>' : '') +
     '</div>' +
-    '<p class="hint-line">模板决定这条知识在核对页要填写的业务字段；选择「通用文档」就只整理标题与正文，不强迫所有文档填业务字段。模板不是第四种知识分类，也不赋予任何权限。</p></div>';
-  const nextLabel = w.mode === 'manual' ? '开始编写 →' : '开始核对 →';
+    '<p class="hint-line">不选模板也能继续：按通用文档整理标题与正文。模板只决定要补哪些业务字段，不赋予任何权限。</p></div></details>';
+  const nextLabel = w.mode === 'manual' ? '开始编写 →' : '开始检查 →';
   html += '<div class="review-footer"><div class="actions" style="flex:1 1 auto;justify-content:flex-start"><button class="button secondary" data-act="wizard-cancel">取消</button></div>' +
     '<div class="actions"><button class="button" id="step1-next" type="button" data-act="start-check"' + (step1Ready() ? '' : ' disabled') + '>' + nextLabel + '</button></div></div>';
   html += '<div id="step1-next-reason">' + step1ReasonHTML() + '</div>';
@@ -612,30 +616,30 @@ function step1HTML() {
 }
 function step1Ready() {
   const w = work();
-  if (!w.templateDecided) return false;
   if (w.mode === 'manual') return true;
-  return !!w.pending;
+  return !!w.pending;   // 未选择文件不能继续；模板不再阻挡
 }
 function step1ReasonHTML() {
   const w = work();
-  const reasons = [];
-  if (w.mode !== 'manual' && !w.pending) reasons.push('请先选择文件（或点「演示样例」）');
-  if (!w.templateDecided) reasons.push('请先选择知识模板，或选择「通用文档」');
-  if (!reasons.length) return '';
-  return '<div class="btn-reason muted-reason"><svg class="ic"><use href="#i-alert"/></svg><span>还未开始：' + reasons.join('；') + '。</span></div>';
+  if (w.mode !== 'manual' && !w.pending) {
+    return '<div class="btn-reason muted-reason"><svg class="ic"><use href="#i-alert"/></svg><span>还未开始：请先选择文件（或点「演示样例」）。</span></div>';
+  }
+  return '';
 }
 function step1StatusHTML() {
   const w = work();
-  if (!w.pending) return '<p class="hint-line" style="margin-top:12px">尚未选择文件。可以直接点「演示样例」，查看识别与核对的完整流程。</p>';
+  if (!w.pending) return '<p class="hint-line" style="margin-top:12px">尚未选择文件。也可以直接点「演示样例」，查看识别与检查的完整流程。</p>';
   const p = w.pending;
-  let small = '演示场景决定识别结果；点「开始核对」查看结果。';
+  let small = '点「开始检查」查看识别结果（演示场景决定结果）。';
   if (p.native) small = '演示：仅记录文件名，未读取任何内容、未上传；真实系统会在这里展示识别出的正文。';
   return '<div class="file-chip"><svg class="ic"><use href="#i-file"/></svg><span><b>' + esc(p.file) + '</b><small>' + (p.kind ? esc(p.kind) + ' · ' : '') + small + '</small></span></div>';
 }
 function scenarioBoxHTML(w) {
   const opts = Object.keys(IMPORT_SCENARIOS).map((k) =>
     '<label class="scenario-opt"><input type="radio" name="scenario-import" value="' + k + '" data-act="scenario-import"' + (w.scenario === k ? ' checked' : '') + '><span>' + esc(IMPORT_SCENARIOS[k].label) + '<small>' + esc(IMPORT_SCENARIOS[k].note || (IMPORT_SCENARIOS[k].reason || '').slice(0, 46) + '…') + '</small></span></label>').join('');
-  return '<div class="scenario-box"><div class="sc-head"><span class="scenario-tag">演示场景 · 评审控件</span><span class="sc-note">不属于产品界面；用于直接切换演示结果（原型不读取真文件、不用倒计时模拟处理）。</span></div><div class="scenario-opts">' + opts + '</div></div>';
+  return '<details class="scenario-box" id="scenario-import-box"><summary><span class="scenario-tag">演示场景</span><small>评审控件：直接切换识别结果；不属于产品界面</small></summary>' +
+    '<div class="scenario-opts">' + opts + '</div>' +
+    '<p class="sc-note">原型不读取真文件、不用倒计时模拟处理；识别失败的原因与人工整理入口在下一步显示。</p></details>';
 }
 function tmplRegionHTML() {
   const w = work();
@@ -644,29 +648,42 @@ function tmplRegionHTML() {
     const tpl = e && e.templateId ? templateById(e.templateId) : null;
     return '<div class="tmpl-current"><b>沿用本知识模板：' + (tpl ? esc(tpl.name) + ' v' + e.templateVersion : '通用文档') + '</b><small>更新文件默认沿用已发布版本的模板；如需换模板，请在「知识模板」中为新建内容选择。</small></div>';
   }
-  if (!w.templateDecided) return '<div class="tmpl-current"><b>尚未选择</b><small>请选择模板；或选择「通用文档（只整理标题与正文）」。</small></div>';
-  if (!w.templateId) return '<div class="tmpl-current"><b>通用文档（只整理标题与正文）</b><small>不附加业务字段；之后仍可在核对页改选模板。</small></div>';
-  const tpl = templateById(w.templateId);
-  const v = versionOf(tpl, w.templateVersion) || latestVersion(tpl);
-  return '<div class="tmpl-current"><b>' + esc(tpl.name) + ' v' + v.v + '</b><small>适用形态：' + esc(SHAPE_LABEL[tpl.shape]) + ' · 字段：' + esc(v.fields.map((f) => f.label + '（' + TYPE_LABEL[f.type] + (f.required ? '，必填' : '') + '）').join('、')) + '</small></div>';
+  if (w.templateId) {
+    const tpl = templateById(w.templateId);
+    const v = versionOf(tpl, w.templateVersion) || latestVersion(tpl);
+    return '<div class="tmpl-current"><b>' + esc(tpl.name) + ' v' + v.v + '</b><small>适用形态：' + esc(SHAPE_LABEL[tpl.shape]) + ' · 字段：' + esc(v.fields.map((f) => f.label + '（' + TYPE_LABEL[f.type] + (f.required ? '，必填' : '') + '）').join('、')) + '</small></div>';
+  }
+  return '<div class="tmpl-current"><b>通用文档（只整理标题与正文）</b><small>默认选择：不附加业务字段，也能直接继续。需要时再点「选择知识模板…」补充业务信息。</small></div>';
 }
-
+function extraSumHTML() {
+  const w = work();
+  const tpl = (w && w.templateId) ? templateById(w.templateId) : null;
+  if (!tpl) return '未使用模板（通用文档）';
+  return '当前：' + tpl.name + ' v' + (w.templateVersion || latestVersion(tpl).v);
+}
 /* ---- 步骤 2：核对 ---- */
 function step2HTML() {
   const w = work();
-  return '<h1>第 2 步：核对来源与字段</h1>' +
+  return '<h1>第 2 步：检查内容</h1>' +
+    '<p class="step-sub">先逐段检查正文并勾选「已核对」；需要时查看原文或补充业务信息。</p>' +
     (w.mode === 'replace' ? compareCardHTML(w) : '') +
-    '<div class="review-grid">' +
+    '<div class="card content-card">' +
+    '<div class="form-grid">' +
+    '<div class="field"><label for="w-title">标题 <span class="req-star">*</span></label><input id="w-title" data-act="w-title" value="' + esc(w.title) + '" placeholder="例如：客户服务政策"></div>' +
+    '<div><label for="w-category">分类</label><select id="w-category" data-act="w-category">' + CATEGORY_LIST.map((c) => '<option' + (w.category === c ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select></div>' +
+    '</div>' +
+    '<p class="para-progress" id="para-count-line">' + esc(paraCountText(w)) + '</p>' +
+    '<p class="para-meta" id="para-meta-line">' + esc(paraMetaText(w)) + '</p>' +
+    '<div id="internal-banner">' + internalBannerHTML(w) + '</div>' +
     origPanelHTML(w) +
-    '<div class="right-col"><div id="internal-banner">' + internalBannerHTML(w) + '</div>' + paraSectionHTML(w) + '</div>' +
+    paraListHTML(w) +
     '</div>' +
     fieldsSectionHTML(w) +
     '<div class="review-footer"><div class="actions" style="flex:1 1 auto;justify-content:flex-start">' +
     '<button class="button secondary" data-act="step-back">← 上一步</button>' +
     '<button class="button secondary" data-act="wizard-cancel">取消</button></div>' +
-    '<div class="actions"><span class="hint-line" style="margin:0 10px 0 0">发布前需要：包含段落已全部核对、必填字段已填写；保存草稿不要求完成。</span>' +
-    '<button class="button secondary" data-act="save-draft">保存草稿</button>' +
-    '<button class="button" data-act="to-step3">下一步：保存与发布 →</button></div></div>';
+    '<div class="actions"><button class="button secondary" data-act="save-draft">保存草稿</button>' +
+    '<button class="button" data-act="to-step3">下一步：发布设置 →</button></div></div>';
 }
 function compareCardHTML(w) {
   if (!w.compare) {
@@ -685,22 +702,24 @@ function compareCardHTML(w) {
 }
 function origPanelHTML(w) {
   const isPdf = w.locKind !== 'para';
-  const badge = '非真实 ' + (isPdf ? 'PDF' : 'Word') + ' 渲染 · 对照演示';
+  const unit = isPara(w) ? '段' : '页';
   let body = '';
   if (w.fallback) {
     body = '<div class="warn-note" style="margin:0"><svg class="ic"><use href="#i-alert"/></svg><span><b>无法自动识别。</b>' + esc(w.fallback.reason) + '</span></div>';
   } else if (!w.pages.length) {
-    body = '<p class="orig-fallback">还没有正文内容。点右侧「添加段落」手动补充，或回到上一步换一个演示样例。</p>';
+    body = '<p class="orig-fallback">还没有正文内容。点下方「手动补充段落」手动补充，或回到上一步换一个演示样例。</p>';
   } else {
     body = '<div id="orig-region">' + origPagesHTML(w) + '</div>';
   }
-  const unit = isPara(w) ? '段' : '页';
   const ctrl = (w.pages.length > 1) ? '<div class="page-ctrl">' +
     '<button class="button secondary" type="button" data-act="page-prev"' + (w.curPage <= 1 ? ' disabled' : '') + '>← 上一' + unit + '</button>' +
     '<span class="pg-label">第 ' + w.curPage + ' / ' + w.pages.length + ' ' + unit + '</span>' +
     '<button class="button secondary" type="button" data-act="page-next"' + (w.curPage >= w.pages.length ? ' disabled' : '') + '>下一' + unit + ' →</button></div>' : '';
-  return '<div class="card orig-panel"><div class="orig-head"><h2>原文示例</h2><span class="orig-badge">' + esc(badge) + '</span></div>' +
-    '<p class="hint-line">用于对照来源位置的演示文本；点击右侧段落的「来源」会跳到对应页并高亮对应内容。</p>' + ctrl + body + '</div>';
+  const sumSmall = w.fallback ? '无法自动识别：原因见下方' : (w.pages.length ? '共 ' + w.pages.length + ' ' + unit + ' · 非真实 ' + (isPdf ? 'PDF' : 'Word') + ' 渲染' : '暂无识别结果');
+  return '<details class="orig-panel" id="orig-details"' + (w.fallback ? ' open' : '') + '><summary><svg class="ic"><use href="#i-file"/></svg><span>查看原文对照</span><small>' + esc(sumSmall) + '</small></summary>' +
+    '<div class="orig-body">' +
+    '<p class="hint-line" style="margin-top:0">用于对照来源位置的演示文本；点段落上的「来源」会自动展开并定位到对应' + unit + '。</p>' +
+    ctrl + body + '</div></details>';
 }
 function origPagesHTML(w) {
   return w.pages.map((pg) => {
@@ -714,11 +733,8 @@ function origPagesHTML(w) {
 }
 function isPara(w) { return w.locKind === 'para'; }
 function refreshOrig() { const r = qs('#orig-region'); if (r) r.innerHTML = origPagesHTML(work()); }
-function paraSectionHTML(w) {
+function paraListHTML(w) {
   const paras = w.paragraphs;
-  const inc = paras.filter((p) => p.included);
-  const unchecked = inc.filter((p) => !p.checked);
-  const emptyInc = inc.filter((p) => !p.text.trim());
   const manual = w.mode === 'manual' || !!w.fallback;
   let list = '';
   if (!paras.length) {
@@ -726,21 +742,28 @@ function paraSectionHTML(w) {
   } else {
     list = paras.map((p, i) => paraCardHTML(p, i, w)).join('');
   }
-  return '<div class="card"><div class="section-head"><h2>整理正文（逐段核对）</h2><span class="sec-note">识别结果只做文字提取，不校验内容是否正确；请以原文为准人工核对。</span></div>' +
-    '<p class="list-count" id="para-count-line">' + paraCountText(w) + '</p>' +
-    list +
+  return list +
     '<div class="actions" style="margin-top:4px"><button class="button secondary para-add" type="button" data-act="add-para"><svg class="ic"><use href="#i-plus"/></svg>' + (manual ? '添加段落' : '手动补充段落') + '</button></div>' +
-    '<p class="hint-line">未包含的段落仍保留在来源记录中（私有），不会进入正文，也不会用于 AI 客服回答。标注「人工修改」的段落与原始文件不完全一致；对外引用以本条已发布内容为准，不宣称与原件逐字相同。</p>' +
-    '</div>';
+    '<p class="hint-line">未收录的段落保留在私有来源中，不进入正文与 AI 回答；标注「人工修改」表示与原件不完全一致。</p>';
 }
 function paraCountText(w) {
   const paras = w.paragraphs;
   const inc = paras.filter((p) => p.included);
   const un = inc.filter((p) => !p.checked).length;
-  let t = '共 ' + paras.length + ' 段；已包含 ' + inc.length + ' 段' + (un ? '，其中 ' + un + ' 段尚未勾选「确认已核对」' : '，均已核对');
-  if (paras.some((p) => p.needsReview)) t += '；有段落在识别时标记「待核对」（如表格断行），请人工确认';
-  if (isPara(w)) t += '；DOCX 按「段」定位来源，不虚构页码';
-  return t + '。';
+  if (!paras.length) return '还没有正文段落';
+  if (!inc.length) return '还未收录任何段落';
+  return un ? ('还需检查 ' + un + ' 段') : '正文已全部核对';
+}
+function paraMetaText(w) {
+  const paras = w.paragraphs;
+  const inc = paras.filter((p) => p.included);
+  const excl = paras.length - inc.length;
+  const nr = paras.filter((p) => p.needsReview).length;
+  let t = '共 ' + paras.length + ' 段 · 已收录 ' + inc.length + ' 段';
+  if (excl) t += ' · 未收录 ' + excl + ' 段';
+  if (nr) t += ' · 有 ' + nr + ' 段识别时标记「待核对」';
+  if (isPara(w)) t += ' · 按段落定位来源';
+  return t;
 }
 function paraCardHTML(p, i, w) {
   const tags = [];
@@ -753,9 +776,9 @@ function paraCardHTML(p, i, w) {
     '<span style="margin-left:auto"><button class="icon-btn" type="button" data-act="para-del" data-id="' + p.id + '" aria-label="删除第 ' + (i + 1) + ' 段"><svg class="ic"><use href="#i-trash"/></svg></button></span></div>' +
     '<textarea data-act="para-text" data-id="' + p.id + '" aria-label="第 ' + (i + 1) + ' 段正文">' + esc(p.text) + '</textarea>' +
     '<div class="para-foot">' +
-    '<label class="check-inline"><input type="checkbox" data-act="para-included" data-id="' + p.id + '"' + (p.included ? ' checked' : '') + '><span>包含该段</span></label>' +
-    '<label class="check-inline"><input type="checkbox" data-act="para-checked" data-id="' + p.id + '"' + (p.checked ? ' checked' : '') + '><span>确认已核对</span></label>' +
-    '<button class="linkbtn" type="button" data-act="use-as-field" data-id="' + p.id + '">用作字段值…</button>' +
+    '<label class="check-inline" title="未收录的段落保留在私有来源中，不进入正文与 AI 回答"><input type="checkbox" data-act="para-included" data-id="' + p.id + '"' + (p.included ? ' checked' : '') + '><span>收录</span></label>' +
+    '<label class="check-inline para-checked" title="确认这段内容已人工核对"><input type="checkbox" data-act="para-checked" data-id="' + p.id + '"' + (p.checked ? ' checked' : '') + '><span>已核对</span></label>' +
+    (w.fields.length ? '<button class="linkbtn" type="button" data-act="use-as-field" data-id="' + p.id + '">用作字段值…</button>' : '') +
     '</div></div>';
 }
 function internalBannerHTML(w) {
@@ -769,33 +792,38 @@ function refreshParaMeta() {
   const w = work();
   const cl = qs('#para-count-line');
   if (cl) cl.textContent = paraCountText(w);
+  const ml = qs('#para-meta-line');
+  if (ml) ml.textContent = paraMetaText(w);
   const ib = qs('#internal-banner');
   if (ib) ib.innerHTML = internalBannerHTML(w);
 }
-
 /* ---- 字段区 ---- */
 function fieldsSectionHTML(w) {
   const tpl = w.templateId ? templateById(w.templateId) : null;
   const v = tpl ? (versionOf(tpl, w.templateVersion) || latestVersion(tpl)) : null;
-  let html = '<div class="card"><h2 id="fields-h">基本字段（所有知识共用）</h2>' +
-    '<div class="form-grid">' +
-    '<div class="field"><label for="w-title">标题 <span class="req-star">*</span></label><input id="w-title" data-act="w-title" value="' + esc(w.title) + '" placeholder="例如：客户服务政策"></div>' +
-    '<div><label for="w-category">分类</label><select id="w-category" data-act="w-category">' + CATEGORY_LIST.map((c) => '<option' + (w.category === c ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select></div>' +
-    '</div>' +
-    '<fieldset style="border:0;padding:0;margin:4px 0 0"><legend class="sr-input">使用范围</legend>' +
-    '<label class="check-inline"><input type="radio" name="w-usage" value="internal" data-act="w-usage"' + (w.usage === 'internal' ? ' checked' : '') + '><span>内部使用（默认）</span></label>' +
-    '<label class="check-inline"><input type="radio" name="w-usage" value="external" data-act="w-usage"' + (w.usage === 'external' ? ' checked' : '') + '><span>对外提供给客户</span></label></fieldset>' +
-    '<p class="hint-line">整条知识只有一套使用范围；段落和字段不单独设置权限。</p>' +
-    '<div class="switch-row" style="margin:12px 0 0"><span>允许 AI 客服使用（默认关闭）</span>' +
-    '<label class="ios-switch"><input type="checkbox" data-act="w-ai"' + (w.aiOn ? ' checked' : '') + ' aria-label="允许 AI 客服使用"><span class="ios-slider"></span></label></div>' +
-    '<p class="hint-line">开启且对外时，发布需要一次明确确认；内部使用或未授权时不额外确认。</p>' +
-    '<label for="w-expiry">到期时间（可选）</label><input type="datetime-local" id="w-expiry" data-act="w-expiry" value="' + esc(expiryInputValue(w.expiry)) + '">' +
-    '<p class="hint-line">按北京时间填写；留空 = 长期有效；到期后不再用于 AI 客服回答。与模板字段里的日期不是同一件事。</p>' +
-    '</div>';
-  html += '<div class="card"><h2>模板字段' + (tpl ? '（来自 ' + esc(tpl.name) + ' v' + (v ? v.v : 1) + '）' : '') + '</h2>' +
-    '<p class="hint-line">若要从原文对应：先在左侧段落点「用作字段值…」手动填入。字段默认都按内部候选处理：需勾选「已核对」并允许客户问答后，才可能用于 AI 客服回答。必填只表示资料完整度，与 AI 授权无关；数字 0、选择「否」都算已填写。</p>' +
-    '<div id="fields-region">' + fieldsRegionHTML(w) + '</div></div>';
-  return html;
+  const open = fieldsAutoOpen(w) ? ' open' : '';
+  let inner;
+  if (!w.templateId) {
+    inner = '<p class="hint-line">本条知识使用「通用文档」，没有业务字段。需要补充业务信息（如服务时效、适用范围）时，先选择知识模板。</p>' +
+      '<div class="actions" style="margin-top:8px">' + (state.role === 'admin' ? '<button class="button secondary" type="button" data-act="pick-template">选择知识模板…</button>' : '') + '</div>';
+  } else {
+    inner = '<div id="fields-region">' + fieldsRegionHTML(w) + '</div>' +
+      '<p class="hint-line">字段默认不用于客户问答：需勾选「已核对」并允许客户问答。必填只约束发布，数字 0 和「否」都算已填写；原文对应可回到段落点「用作字段值…」。</p>';
+  }
+  return '<details class="fields-box" id="fields-details"' + open + '><summary><svg class="ic"><use href="#i-sliders"/></svg><span>补充业务信息</span><small id="fields-sum">' + esc(fieldsSummaryText(w)) + '</small></summary>' +
+    '<div class="fields-body">' +
+    (tpl ? '<p class="hint-line" style="margin-top:0">字段来自模板 <b>' + esc(tpl.name) + ' v' + (v ? v.v : 1) + '</b>。</p>' : '') +
+    inner + '</div></details>';
+}
+function fieldsSummaryText(w) {
+  const req = (w.fields || []).filter((f) => f.required && !f.historic);
+  const missing = req.filter((f) => !String(f.value).trim()).length;
+  return missing ? ('（还有 ' + missing + ' 项必填）') : '（选填）';
+}
+function fieldsAutoOpen(w) {
+  const req = (w.fields || []).filter((f) => f.required && !f.historic);
+  const missing = req.some((f) => !String(f.value).trim());
+  return missing || (!!w.templateId && w.fieldsOpen !== false);   // 有缺项或选择了模板时展开
 }
 function fieldsRegionHTML(w) {
   if (!w.templateId) return '<p class="hint-line">本条知识使用「通用文档」：没有业务字段，只有标题与正文。</p>';
@@ -832,19 +860,23 @@ function fieldCardHTML(f) {
     '<label class="check-inline"><input type="checkbox" data-act="field-ai" data-key="' + f.key + '"' + (f.aiAllowed ? ' checked' : '') + '><span>允许用于客户问答</span></label>' +
     '</div></div>';
 }
-function refreshFieldsRegion() { const r = qs('#fields-region'); if (r) r.innerHTML = fieldsRegionHTML(work()); }
+function syncFieldsSummary() {
+  const s = qs('#fields-sum');
+  if (s) s.textContent = fieldsSummaryText(work());
+}
+function refreshFieldsRegion() { const r = qs('#fields-region'); if (r) r.innerHTML = fieldsRegionHTML(work()); syncFieldsSummary(); }
 
-/* ---- 步骤 3：保存与发布 ---- */
+/* ---- 步骤 3：发布设置 ---- */
 function publishGates(w) {
   const inc = w.paragraphs.filter((p) => p.included);
   const req = w.fields.filter((f) => f.required && !f.historic);
   return [
-    { ok: !!w.title.trim(), text: '标题已填写' },
-    { ok: inc.length >= 1, text: '至少包含 1 段正文' },
-    { ok: inc.length >= 1 && inc.every((p) => p.text.trim() !== ''), text: '包含的段落内容不为空' },
-    { ok: inc.length >= 1 && inc.every((p) => p.checked), text: '所有包含段落已勾选「确认已核对」' },
-    { ok: !(w.usage === 'external' && inc.some((p) => p.internal)), text: '对外知识中没有包含「仅内部」段落' },
-    { ok: req.every((f) => String(f.value).trim() !== ''), text: '模板必填字段已填写' + (req.length ? '（' + req.filter((f) => !String(f.value).trim()).map((f) => f.label).join('、') + '）' : '') }
+    { ok: !!w.title.trim(), text: '还未填写标题，去填写', go: 'title' },
+    { ok: inc.length >= 1, text: '还没有收录正文，去添加', go: 'paras' },
+    { ok: inc.length >= 1 && inc.every((p) => p.text.trim() !== ''), text: '收录的正文有空段落，去补充或移除', go: 'paras' },
+    { ok: inc.length >= 1 && inc.every((p) => p.checked), text: '还有 ' + inc.filter((p) => !p.checked).length + ' 段未核对，去检查', go: 'paras' },
+    { ok: !(w.usage === 'external' && inc.some((p) => p.internal)), text: '仍收录了仅内部段落，请排除或改为内部用途', go: 'paras' },
+    { ok: req.every((f) => String(f.value).trim() !== ''), text: '还有 ' + req.filter((f) => !String(f.value).trim()).length + ' 项必填信息未填写，去补充' + (req.length ? '（' + req.filter((f) => !String(f.value).trim()).map((f) => f.label).join('、') + '）' : ''), go: 'fields' }
   ];
 }
 function step3HTML() {
@@ -852,35 +884,57 @@ function step3HTML() {
   const gates = publishGates(w);
   const bad = gates.filter((g) => !g.ok);
   const inc = w.paragraphs.filter((p) => p.included);
-  const aiFields = w.fields.filter((f) => !f.historic && f.checked && f.aiAllowed);
+  const okCnt = inc.filter((p) => p.checked).length;
   const tpl = w.templateId ? templateById(w.templateId) : null;
+  const fieldList = w.fields.filter((f) => !f.historic);
+  const filled = fieldList.filter((f) => String(f.value).trim() !== '').length;
+  const aiFields = fieldList.filter((f) => f.checked && f.aiAllowed);
   const kv = [
     ['标题', w.title || '（未填写）'],
-    ['来源文件', w.source && w.source.file ? w.source.file + '（' + w.source.kind + '）' : '手动创建'],
-    ['模板', tpl ? tpl.name + ' v' + w.templateVersion : '通用文档'],
-    ['分类', w.category],
-    ['使用范围', w.usage === 'external' ? '对外提供给客户' : '内部使用'],
-    ['AI 客服授权', w.aiOn ? '已授权' : '未授权（默认）'],
-    ['到期时间', fmtExpiry(w.expiry)],
-    ['正文', '包含 ' + inc.length + ' 段 / 共 ' + w.paragraphs.length + ' 段'],
-    ['字段', w.templateId ? (w.fields.filter((f) => !f.historic && String(f.value).trim() !== '').length + ' / ' + w.fields.filter((f) => !f.historic).length + ' 个已填写；其中 ' + aiFields.length + ' 个允许用于客户问答') : '无模板字段']
+    ['来源', w.source && w.source.file ? (w.source.file + '（' + w.source.kind + '）') : '手动创建'],
+    ['模板', tpl ? (tpl.name + ' v' + w.templateVersion) : '通用文档'],
+    ['正文', '收录 ' + inc.length + ' 段 · 已核对 ' + okCnt + ' 段'],
+    ['字段', fieldList.length ? (filled + ' / ' + fieldList.length + ' 个已填写；' + aiFields.length + ' 个允许用于客户问答') : '无模板字段']
   ];
-  return '<h1>第 3 步：保存与发布</h1>' +
-    '<div class="card"><h2>将要保存的内容</h2><dl class="summary-list">' + kv.map((r) => '<div class="kv"><dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd></div>').join('') + '</dl></div>' +
-    '<div class="card"><h2>发布检查</h2><div class="gates">' + gates.map((g) => '<div class="gate ' + (g.ok ? 'gate-ok' : 'gate-bad') + '"><svg class="ic"><use href="#i-' + (g.ok ? 'check' : 'alert') + '"/></svg><span>' + esc(g.text) + '</span></div>').join('') + '</div>' +
-    '<p class="hint-line">发布成功只表示内容版本已发布；AI 客服是否能用还取决于使用范围、AI 授权、处理结果与到期时间。对外且已授权时，发布会先弹出一次确认。</p></div>' +
-    '<div class="scenario-box"><div class="sc-head"><span class="scenario-tag">演示场景 · 评审控件</span><span class="sc-note">用于演示「发布后处理失败」的表现；真实处理结果由后端异步任务决定，原型不用计时器模拟。</span></div>' +
+  const check = bad.length
+    ? '<div class="card"><h2>发布前还需要完成</h2><div class="gates">' +
+      bad.map((g) => '<button class="gate gate-bad gate-btn" type="button" data-act="gate-go" data-go="' + g.go + '"><svg class="ic"><use href="#i-alert"/></svg><span>' + esc(g.text) + '</span></button>').join('') +
+      '</div><p class="hint-line">点未通过项可返回对应位置；也可以先保存草稿，稍后继续。</p></div>'
+    : '<div class="card"><div class="notice"><svg class="ic"><use href="#i-check"/></svg><span>发布检查已通过：标题、正文核对与必填字段都已完成。</span></div></div>';
+  return '<h1>第 3 步：发布设置</h1>' +
+    '<p class="step-sub">确认用途与 AI 授权，然后发布；也可以先保存草稿。</p>' +
+    '<div class="card"><h2>摘要</h2><dl class="summary-list">' + kv.map((r) => '<div class="kv"><dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd></div>').join('') + '</dl></div>' +
+    '<div class="card"><h2>用途与 AI 授权</h2>' +
+    '<fieldset class="settings-group"><legend>用途</legend>' +
+    '<label class="check-inline"><input type="radio" name="w-usage" value="internal" data-act="w-usage"' + (w.usage === 'internal' ? ' checked' : '') + '><span>内部使用（默认）</span></label>' +
+    '<label class="check-inline"><input type="radio" name="w-usage" value="external" data-act="w-usage"' + (w.usage === 'external' ? ' checked' : '') + '><span>对外提供给客户</span></label>' +
+    '<p class="hint-line">整条知识只有一套使用范围，段落与字段不单独设置权限。</p></fieldset>' +
+    '<div class="settings-group"><h3>AI 客服授权</h3>' +
+    '<div class="switch-row"><span>允许 AI 客服使用（默认关闭）</span>' +
+    '<label class="ios-switch"><input type="checkbox" data-act="w-ai"' + (w.aiOn ? ' checked' : '') + ' aria-label="允许 AI 客服使用"><span class="ios-slider"></span></label></div>' +
+    '<p class="hint-line">对外且已授权时，发布前会弹一次确认；内部或未授权发布不额外确认。</p></div>' +
+    '<div class="settings-group"><h3>到期时间（可选）</h3>' +
+    '<details class="opt-details" id="expiry-box"><summary>到期时间：<b id="expiry-sum">' + esc(w.expiry ? fmtExpiry(w.expiry) : '长期有效') + '</b></summary>' +
+    '<label for="w-expiry" class="sr-input">到期时间（北京时间，可留空）</label><input type="datetime-local" id="w-expiry" data-act="w-expiry" value="' + esc(expiryInputValue(w.expiry)) + '">' +
+    '<p class="hint-line">按北京时间填写；留空 = 长期有效；到期后不再用于 AI 客服回答（成员阅读与历史不受影响）。与模板字段里的日期不是同一件事。</p></details></div>' +
+    '</div>' +
+    check +
+    '<details class="scenario-box" id="scenario-publish-box"><summary><span class="scenario-tag">演示场景</span><small>评审控件：模拟发布后的处理结果；不属于产品界面</small></summary>' +
     '<div class="scenario-opts">' +
     '<label class="scenario-opt"><input type="radio" name="scenario-publish" value="ok" data-act="scenario-publish"' + (state.scenarioPublish !== 'fail' ? ' checked' : '') + '><span>发布后处理正常<small>发布后显示「已发布（AI 客服可用）」（未授权则为不可用）</small></span></label>' +
     '<label class="scenario-opt"><input type="radio" name="scenario-publish" value="fail" data-act="scenario-publish"' + (state.scenarioPublish === 'fail' ? ' checked' : '') + '><span>发布后处理失败<small>显示蓝灰「已发布（AI 客服不可用）」与处理失败原因，可重试；任务状态不新增知识状态</small></span></label>' +
-    '</div></div>' +
-    '<div class="review-footer"><div class="actions" style="flex:1 1 auto;justify-content:flex-start"><button class="button secondary" data-act="to-step2">← 返回核对</button><button class="button secondary" data-act="wizard-cancel">取消</button></div>' +
+    '</div></details>' +
+    '<div class="review-footer"><div class="actions" style="flex:1 1 auto;justify-content:flex-start"><button class="button secondary" data-act="to-step2">← 返回检查</button><button class="button secondary" data-act="wizard-cancel">取消</button></div>' +
     '<div class="actions"><button class="button secondary" data-act="save-draft">保存草稿</button><button class="button" id="publish-btn" data-act="publish"' + (bad.length ? ' disabled' : '') + '>发布</button></div></div>' +
     (bad.length ? '<div class="btn-reason"><svg class="ic"><use href="#i-alert"/></svg><span>还不能发布：' + esc(bad.map((g) => g.text).join('；')) + '。可以先保存草稿，未完成的部分稍后继续。</span></div>' : '');
 }
-
 /* ---------- 详情页 ---------- */
 function locLabelFor(kind, n) { if (n == null) return '未标注'; return kind === 'para' ? ('第 ' + n + ' 段') : ('第 ' + n + ' 页'); }
+function listBackHTML() {
+  const view = state.listLast || 'all';
+  const label = '返回' + (LIST_TITLES[view] || '全部知识');
+  return '<div class="detail-top"><button class="back-link" type="button" data-act="d-back"><svg class="ic"><use href="#i-back"/></svg>' + esc(label) + '</button></div>';
+}
 function detailHTML(id) {
   const e = byId(id);
   const av = availability(e);
@@ -891,13 +945,20 @@ function detailHTML(id) {
   let actions = '';
   if (mgr) {
     if (e.lifecycle === 'draft') actions += '<button class="button" data-act="d-edit" data-id="' + e.id + '">继续编辑</button>';
-    if (e.lifecycle === 'published') actions += '<button class="button secondary" data-act="d-edit" data-id="' + e.id + '">编辑</button><button class="button secondary" data-act="d-replace" data-id="' + e.id + '"><svg class="ic"><use href="#i-upload"/></svg>替换文件…</button><button class="button danger" data-act="d-disable" data-id="' + e.id + '">停用</button>';
+    if (e.lifecycle === 'published') {
+      actions += '<button class="button" data-act="d-edit" data-id="' + e.id + '">编辑</button>' +
+        '<details class="more-wrap"><summary class="button secondary"><svg class="ic"><use href="#i-more"/></svg>更多操作</summary><div class="more-menu">' +
+        '<button type="button" data-act="d-replace" data-id="' + e.id + '"><svg class="ic"><use href="#i-upload"/></svg><span>替换文件…<small>新文件生成待发布草稿；当前版本在发布前不变</small></span></button>' +
+        '<button type="button" class="danger-item" data-act="d-disable" data-id="' + e.id + '"><svg class="ic"><use href="#i-trash"/></svg><span>停用<small>不再对外展示、不用于 AI 客服；可重新启用</small></span></button>' +
+        '</div></details>';
+    }
     if (e.lifecycle === 'disabled') actions += '<button class="button secondary" data-act="d-enable" data-id="' + e.id + '">重新启用</button>';
   }
-  let html = '<div class="detail-head"><div class="detail-title"><h1>' + esc(e.title) + '</h1><span class="pill ' + av.pill + '">' + esc(av.label) + '</span>' + (e.draft ? '<span class="tag review">待发布草稿</span>' : '') + '</div>' +
+  let html = listBackHTML() +
+    '<div class="detail-head"><div class="detail-title"><h1>' + esc(e.title) + '</h1><span class="pill ' + av.pill + '">' + esc(av.label) + '</span>' + (e.draft ? '<span class="tag review">待发布草稿</span>' : '') + '</div>' +
     (actions ? '<div class="actions">' + actions + '</div>' : '') + '</div>' +
-    '<div class="detail-meta"><span>' + esc(e.category) + '</span><span>使用范围：' + (e.usage === 'external' ? '对外' : '内部') + '</span><span>AI 客服授权：' + (e.aiOn ? '已授权' : '未授权') + '</span>' + (e.expiry ? '<span>到期时间 ' + esc(fmtExpiry(e.expiry)) + '</span>' : '') + (tpl ? '<span>模板：' + esc(tpl.name) + ' v' + e.templateVersion + '</span>' : '') + '<span>更新 ' + esc(e.updated) + '</span></div>';
-  if (state.role !== 'admin') html += '<p class="readonly-note"><svg class="ic"><use href="#i-book"/></svg><span>只读视角（演示）：可以阅读全部知识（含仅内部资料与字段），但没有编辑、发布、替换文件或模板管理入口。</span></p>';
+    '<div class="detail-meta"><span>更新 ' + esc(e.updated) + '</span></div>';
+  if (state.role !== 'admin') html += '<p class="readonly-note"><svg class="ic"><use href="#i-book"/></svg><span>只读视角（演示）：可阅读全部知识（含仅内部资料与字段）；没有编辑、发布与模板管理入口。</span></p>';
   if (av.reason && e.lifecycle === 'published') html += '<div class="fail-note"><span><b>AI 客服不可用原因：</b>' + esc(av.reason) + '</span>' + (mgr && e.aiIssue ? '<button class="button secondary" data-act="d-retry" data-id="' + e.id + '">重试</button>' : '') + '</div>';
   if (e.draft && mgr) {
     html += '<div class="draft-banner banner"><span><b>' + esc(e.draft.label) + '</b> · ' + esc(e.draft.summary) + '（' + esc(e.draft.createdAt) + '）。当前发布版本保持不变，发布成功后才会切换。</span>' +
@@ -989,7 +1050,7 @@ function templatesHTML() {
   const cards = DB.templates.map((t) => {
     const v = latestVersion(t);
     return '<div class="tmpl-card"><h3>' + esc(t.name) + '</h3>' +
-      '<div class="tc-meta">适用形态：' + esc(SHAPE_LABEL[t.shape]) + ' · 当前版本 v' + v.v + '（' + esc(v.date) + '）<br>使用中的知识：' + templateUseCount(t.id) + ' 条 · 共 ' + t.versions.length + ' 个版本</div>' +
+      '<div class="tc-meta">适合：' + esc(SHAPE_LABEL[t.shape]) + '类知识 · 当前版本 v' + v.v + '（' + esc(v.date) + '）<br>正在使用：' + templateUseCount(t.id) + ' 条知识 · 已保存 ' + t.versions.length + ' 个版本</div>' +
       '<div class="chiprow">' + templateChips(t) + '</div>' +
       '<div class="tc-foot"><button class="button secondary" data-act="t-edit" data-id="' + t.id + '">编辑模板</button><span class="muted small">' + esc(v.note) + '</span></div></div>';
   }).join('');
@@ -1001,25 +1062,30 @@ function builderHTML() {
   const b = state.builder;
   const useCount = b.id ? templateUseCount(b.id) : 0;
   const rows = b.fields.map((f, i) => bfRowHTML(f, i)).join('');
-  return '<div class="toolbar"><div><h1>' + esc(b.isNew ? '新建模板' : ('编辑模板：' + b.name)) + '</h1><p class="lead">' + (b.isNew ? '定义字段后保存为 v1。' : '修改会保存为<b>新版本</b>；已有知识继续使用原版本，不会自动搬家，也不会改变已发布快照与历史引用。') + '</p></div><div class="actions"><button class="button secondary" data-act="b-cancel">取消</button>' + (state.role === 'admin' ? '<button class="button" data-act="b-save">' + (b.isNew ? '保存模板（v1）' : '保存为新版本（v' + (b.baseVersion + 1) + '）') + '</button>' : '') + '</div></div>' +
+  return '<div class="detail-top"><button class="back-link" type="button" data-act="b-back"><svg class="ic"><use href="#i-back"/></svg>返回模板列表</button></div>' +
+    '<div class="toolbar"><div><h1>' + esc(b.isNew ? '新建模板' : ('编辑模板：' + b.name)) + '</h1>' +
+    '<p class="step-sub">先起名称，再添加需要填写的信息（业务字段）。</p>' +
+    '<p class="lead">' + (b.isNew ? '字段定义完成后保存为 v1。' : '保存会生成<b>新版本</b>；已有知识继续使用原版本，不自动搬家，也不改变已发布内容与历史。') + '</p></div>' +
+    '<div class="actions">' + (state.role === 'admin' ? '<button class="button" data-act="b-save">' + (b.isNew ? '保存模板（v1）' : '保存为新版本（v' + (b.baseVersion + 1) + '）') + '</button>' : '') + '</div></div>' +
     '<div id="bf-err"></div>' +
     '<div class="builder-grid"><div>' +
     '<div class="card"><h2>模板信息</h2><div class="form-grid">' +
     '<div><label for="bf-name">模板名称</label><input id="bf-name" data-act="bf-name" value="' + esc(b.name) + '" placeholder="例如：服务方案模板"></div>' +
-    '<div><label for="bf-shape">适用知识形态</label><select id="bf-shape" data-act="bf-shape">' +
+    '<div><label for="bf-shape">适合的知识类型</label><select id="bf-shape" data-act="bf-shape">' +
     '<option value="product_service"' + (b.shape === 'product_service' ? ' selected' : '') + '>商品 / 服务资料（产品、服务方案类字段）</option>' +
     '<option value="article"' + (b.shape === 'article' ? ' selected' : '') + '>文章 / 制度说明（FAQ、制度类字段）</option></select>' +
-    '<p class="hint-line">适用形态只是提示这条模板更适合哪类知识，不限制选择，也不改变已有内容。</p></div>' +
+    '<p class="hint-line">只是提示这条模板更适合哪类知识，不限制选择。</p></div>' +
     '</div>' +
-    '<label>固定字段（系统保留，不可删除）</label><div class="fixed-fields"><span class="chip">标题</span><span class="chip">分类</span><span class="chip">使用范围（内部 / 对外）</span><span class="chip">到期时间</span><span class="chip">来源与版本</span><span class="chip">AI 授权</span></div>' +
+    '<details class="tech-note"><summary>查看固定信息与填写规则</summary><div class="tn-body">' +
+    '<div class="fixed-fields"><span class="chip">标题</span><span class="chip">分类</span><span class="chip">使用范围（内部 / 对外）</span><span class="chip">到期时间</span><span class="chip">来源与版本</span><span class="chip">AI 授权</span></div>' +
+    '<p class="hint-line">以上固定字段由系统保留、不可删除；模板只定义额外的业务字段。规则：名称不能为空、同一模板内不能重名；选项类型至少 2 个选项；数字类型单位可留空。已填写的数据保留；改类型需要重新填写，历史保留。</p></div></details>' +
     '</div>' +
-    '<div class="card"><div class="section-head"><h2>业务字段</h2><span class="sec-note">支持：文字、数字+单位、选项、日期、是 / 否。不提供公式、重复组或字段间关联。</span></div>' +
+    '<div class="card"><div class="section-head"><h2>业务字段</h2><span class="sec-note">支持文字、数字+单位、选项、日期、是 / 否；不提供公式、重复组或字段间关联。</span></div>' +
     '<div>' + (rows || '<p class="hint-line">还没有字段。点下面「添加字段」开始。</p>') + '</div>' +
     '<div class="actions" style="margin-top:10px"><button class="button secondary" data-act="bf-add"><svg class="ic"><use href="#i-plus"/></svg>添加字段</button></div>' +
-    '<p class="hint-line">规则：名称不能为空、同一模板内不能重名；选项类型至少 2 个选项；数字类型单位可留空。已填写的数据保留；改类型需要重新填写，历史保留。</p>' +
     '</div></div>' +
-    '<div class="preview-panel" aria-label="录入表预览"><h3>预览（核对页中的样子）</h3><div id="bf-preview">' + bfPreviewHTML(b) + '</div>' +
-    '<p class="hint-line">' + (b.id ? '已使用本模板的知识：' + useCount + ' 条' + (useCount ? '（继续使用原版本，不会自动升级）' : '') : '新模板保存后即可在使用中选择。') + '</p></div>' +
+    '<details class="preview-panel" id="bf-preview-box"><summary>预览（检查页中的样子）</summary><div id="bf-preview">' + bfPreviewHTML(b) + '</div>' +
+    '<p class="hint-line">' + (b.id ? '正在使用本模板的知识：' + useCount + ' 条' + (useCount ? '（继续使用原版本，不会自动升级）' : '') : '新模板保存后即可在添加资料时选择。') + '</p></details>' +
     '</div>';
 }
 function bfRowHTML(f, i) {
@@ -1027,17 +1093,21 @@ function bfRowHTML(f, i) {
   const origLabel = f.orig ? f.orig.label : null;
   let extra = '';
   if (f.type === 'number') extra = '<div class="bf-extra"><span class="type-note">单位：</span><input data-act="bf-unit" data-key="' + f.key + '" value="' + esc(f.unit || '') + '" placeholder="可留空，例如 小时 / kg" aria-label="单位"><span class="type-note">数字字段不做公式或自动换算。</span></div>';
-  if (f.type === 'options') extra = '<div class="bf-extra"><span class="type-note">选项（用「、」分隔，至少 2 个）：</span><input data-act="bf-options" data-key="' + f.key + '" value="' + esc((f.options || []).join('、')) + '"><span class="type-note">不接受空选项；不会自动猜选项。</span></div>';
+  if (f.type === 'options') extra = '<div class="bf-extra"><span class="type-note">选项（用「、」分隔，至少 2 个）：</span><input data-act="bf-options" data-key="' + f.key + '" value="' + esc((f.options || []).join('、')) + '" aria-label="选项"><span class="type-note">不接受空选项。</span></div>';
   const typeChanged = f.orig && f.orig.type !== f.type;
+  const meta = [];
+  if (isNewField) meta.push('<span>新字段</span>');
+  else if (origLabel !== f.label) meta.push('<span>已改名：原「' + esc(origLabel) + '」，已填写的数据保留</span>');
+  if (typeChanged) meta.push('<span class="hint-line bad" style="margin:0">类型已更改：保存后需重新填写；旧值保留在历史与来源中</span>');
   return '<div class="bf-row" data-key="' + f.key + '">' +
     '<input data-act="bf-label" data-key="' + f.key + '" value="' + esc(f.label) + '" placeholder="字段名称，例如：服务时效" aria-label="字段名称">' +
     '<select data-act="bf-type" data-key="' + f.key + '" aria-label="字段类型">' + Object.keys(TYPE_LABEL).map((t) => '<option value="' + t + '"' + (f.type === t ? ' selected' : '') + '>' + esc(TYPE_LABEL[t]) + '</option>').join('') + '</select>' +
     '<label class="bf-check"><input type="checkbox" data-act="bf-required" data-key="' + f.key + '"' + (f.required ? ' checked' : '') + '>必填</label>' +
     '<input data-act="bf-help" data-key="' + f.key + '" value="' + esc(f.help || '') + '" placeholder="填写提示（可留空）" aria-label="填写提示">' +
     '<div class="bf-actions"><button class="icon-btn up-btn" type="button" data-act="bf-up" data-key="' + f.key + '" aria-label="上移字段"' + (i === 0 ? ' disabled' : '') + '><svg class="ic"><use href="#i-up"/></svg></button>' +
-    '<button class="icon-btn down-btn" type="button" data-act="bf-down" data-key="' + f.key + '" aria-label="下移字段"><svg class="ic"><use href="#i-down"/></svg></button></div>' +
-    '<button class="icon-btn" type="button" data-act="bf-del" data-key="' + f.key + '" aria-label="删除字段" style="grid-column:5"><svg class="ic"><use href="#i-trash"/></svg></button>' +
-    '<div class="bf-meta">' + (isNewField ? '<span>新字段</span>' : (origLabel !== f.label ? '<span>已改名：原「' + esc(origLabel) + '」，已填写的数据保留</span>' : '')) + (typeChanged ? '<span class="hint-line bad" style="margin:0">类型已更改：保存后需要重新填写该字段；历史与来源中的旧值保留</span>' : '') + '</div>' +
+    '<button class="icon-btn down-btn" type="button" data-act="bf-down" data-key="' + f.key + '" aria-label="下移字段"><svg class="ic"><use href="#i-down"/></svg></button>' +
+    '<button class="icon-btn" type="button" data-act="bf-del" data-key="' + f.key + '" aria-label="删除字段"><svg class="ic"><use href="#i-trash"/></svg></button></div>' +
+    (meta.length ? '<div class="bf-meta">' + meta.join('') + '</div>' : '') +
     extra + '</div>';
 }
 function bfPreviewHTML(b) {
@@ -1183,11 +1253,11 @@ function openDrawer() {
   const w = work();
   state.drawerPick = w.templateDecided ? (w.templateId || '__none') : '__none';
   const d = qs('#drawer');
-  d.innerHTML = '<form class="drawer-in" method="dialog" onsubmit="return false"><div class="drawer-head"><h2 id="drawer-title">选择知识模板</h2><button class="icon-btn" type="button" data-act="drawer-cancel" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>' +
+  d.innerHTML = '<form class="drawer-in" method="dialog" onsubmit="return false"><div class="drawer-head"><h2 id="drawer-title">选择知识模板（选填）</h2><button class="icon-btn" type="button" data-act="drawer-cancel" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button></div>' +
     '<div class="drawer-body">' +
-    '<p class="hint-line" style="margin:0 0 12px">模板决定核对页需要填写的业务字段。示例只是起点，不是行业硬规则；保存前都可以改。</p>' +
+    '<p class="hint-line" style="margin:0 0 12px">模板决定检查页需要填写的业务字段；不选则按「通用文档」继续。示例只是起点，不是行业硬规则，之后也可以再改。</p>' +
     DB.templates.map((t) => drawerOptionHTML(t, state.drawerPick === t.id)).join('') +
-    '<label class="tmpl-option' + (state.drawerPick === '__none' ? ' on' : '') + '"><input type="radio" name="tmpl-pick" value="__none" data-act="drawer-tmpl"' + (state.drawerPick === '__none' ? ' checked' : '') + '><span class="to-main"><b>通用文档（只整理标题与正文）</b><small>不附加业务字段；之后仍可在核对页改选模板。</small></span></label>' +
+    '<label class="tmpl-option' + (state.drawerPick === '__none' ? ' on' : '') + '"><input type="radio" name="tmpl-pick" value="__none" data-act="drawer-tmpl"' + (state.drawerPick === '__none' ? ' checked' : '') + '><span class="to-main"><b>通用文档（只整理标题与正文）</b><small>不附加业务字段；之后仍可在检查页改选模板。</small></span></label>' +
     '</div>' +
     '<div class="drawer-foot"><button class="button secondary" type="button" data-act="drawer-cancel">取消</button>' + (state.role === 'admin' ? '<button class="button secondary" type="button" data-act="manage-templates">管理知识模板</button>' : '') + '<button class="button" type="button" data-act="drawer-confirm">确认选择</button></div></form>';
   d.showModal();
@@ -1233,7 +1303,7 @@ function openUnsavedBuilderDialog() {
   });
 }
 
-/* ---------- 保存与发布 ---------- */
+/* ---------- 保存与发布（草稿 / 发布 / 确认） ---------- */
 function contentFromWork(w) {
   return { title: w.title, category: w.category, usage: w.usage, aiOn: w.aiOn, expiry: w.expiry, templateId: w.templateId || null, templateVersion: w.templateVersion || 0, source: clone(w.source), fields: clone(w.fields.filter((f) => !f.historic)), historicFields: clone(w.historicFields || []), paragraphs: clone(w.paragraphs) };
 }
@@ -1334,7 +1404,7 @@ function doPublish() {
 function openMapDialog(p) {
   const w = work();
   const usable = w.fields.filter((f) => !f.historic);
-  if (!w.templateId || !usable.length) { toast('这条知识没有模板字段：先在「知识模板」中选择模板，再回核对页。', true); return; }
+  if (!w.templateId || !usable.length) { toast('这条知识还没有业务字段：先在「补充业务信息」里选择知识模板，再回来把段落填入字段。', true); return; }
   state.mapPara = p;
   const body = '<p>手动映射：由你选择来源段落并填写字段值；系统不会自动推断数值，也不会替你把段落当成参数。</p>' +
     '<fieldset style="border:0;padding:0;margin:0"><legend class="sr-input">选择目标字段</legend>' +
@@ -1449,7 +1519,7 @@ function openDisableDialog(e) {
 function startImport() { state.work = newWork('import', {}); state.workDirty = false; state.route = { name: 'review', view: 'file', id: null, tab: 'content' }; render(); focusStepHeading(); }
 function startManual(shape, view) {
   const home = shape || 'article';
-  const w = newWork('manual', { home: home, templateDecided: false });
+  const w = newWork('manual', { home: home });
   w.category = home === 'product_service' ? '服务说明' : '常见问题';
   state.work = w; state.workDirty = false;
   state.route = { name: 'review', view: view || (home === 'product_service' ? 'product_service' : 'article'), id: null, tab: 'content' };
@@ -1483,8 +1553,12 @@ function refreshStep1Next() {
   const btn = qs('#step1-next'); if (btn) btn.disabled = !step1Ready();
   const r = qs('#step1-next-reason'); if (r) r.innerHTML = step1ReasonHTML();
 }
-function refreshTmplRegion() { const el = qs('#tmpl-region'); if (el) el.innerHTML = tmplRegionHTML(); }
+function refreshTmplRegion() {
+  const el = qs('#tmpl-region'); if (el) el.innerHTML = tmplRegionHTML();
+  const s = qs('#extra-sum'); if (s) s.textContent = extraSumHTML();
+}
 function updateFieldCardMicro(f) {
+  syncFieldsSummary();
   const card = qs('.field-card[data-key="' + f.key + '"]');
   if (!card) return;
   const src = qs('[data-role="fsrc"]', card);
@@ -1506,21 +1580,27 @@ function setFieldValue(f, el) {
 function focusAnchor(pid) {
   const w = work(); if (!w) return;
   const p = w.paragraphs.find((x) => x.id === pid); if (!p) return;
+  const det = qs('#orig-details'); if (det) det.open = true;   // 点「来源」自动展开对照面板
   const n = locOf(p);
   if (n != null && w.pages.length) w.curPage = Math.min(Math.max(1, n), w.pages.length);
   refreshOrig();
   qsa('.orig-block').forEach((b) => b.classList.remove('hl'));
+  syncPageCtrl();
   const b = qs('.orig-block[data-anchor="' + pid + '"]');
   if (b) { b.classList.add('hl'); b.scrollIntoView({ block: 'nearest' }); }
+}
+function syncPageCtrl() {
+  const w = work(); if (!w || !w.pages.length) return;
+  const prev = qs('[data-act="page-prev"]'); const next = qs('[data-act="page-next"]'); const lab = qs('.pg-label');
+  if (prev) prev.disabled = w.curPage <= 1;
+  if (next) next.disabled = w.curPage >= w.pages.length;
+  if (lab) lab.textContent = '第 ' + w.curPage + ' / ' + w.pages.length + ' ' + (isPara(w) ? '段' : '页');
 }
 function pageNav(d) {
   const w = work(); if (!w || !w.pages.length) return;
   w.curPage = Math.min(Math.max(1, w.curPage + d), w.pages.length);
   refreshOrig();
-  const prev = qs('[data-act="page-prev"]'); const next = qs('[data-act="page-next"]'); const lab = qs('.pg-label');
-  if (prev) prev.disabled = w.curPage <= 1;
-  if (next) next.disabled = w.curPage >= w.pages.length;
-  if (lab) lab.textContent = '第 ' + w.curPage + ' / ' + w.pages.length + ' ' + (isPara(w) ? '段' : '页');
+  syncPageCtrl();
 }
 function wizardCancel() {
   const w = work(); if (!w) return;
@@ -1530,7 +1610,7 @@ function wizardCancel() {
     if ((mode === 'replace' || mode === 'edit') && entryId && byId(entryId)) {
       state.route = { name: 'detail', view: byId(entryId).home, id: entryId, tab: 'content' };
     } else {
-      state.route = { name: 'list', view: 'file', id: null, tab: 'content' };
+      state.route = { name: 'list', view: state.listLast || 'file', id: null, tab: 'content' };
     }
     render();
   };
@@ -1538,12 +1618,18 @@ function wizardCancel() {
 }
 function retryEntry(e) {
   if (state.scenarioPublish === 'fail') {
-    toast('当前演示场景为「发布后处理失败」：重试仍会显示失败原因。把核对页第 3 步的演示场景切到「处理正常」后，再点重试即可看到恢复（演示，不用计时器）。', true);
+    toast('当前演示场景为「发布后处理失败」：重试仍会显示失败原因。把发布设置里的演示场景切到「处理正常」后，再点重试即可看到恢复（演示，不用计时器）。', true);
     return;
   }
   e.aiIssue = '';
   render();
   toast('重试完成（演示）：AI 客服已可用。');
+}
+
+function updateExpirySum() {
+  const w = work();
+  const s = qs('#expiry-sum');
+  if (s && w) s.textContent = w.expiry ? fmtExpiry(w.expiry) : '长期有效';
 }
 
 /* ---------- 事件 ---------- */
@@ -1583,7 +1669,7 @@ function onClick(e) {
       state.workDirty = false;
       state.route = { name: 'review', view: 'file', id: null, tab: 'content' };
       render(); focusStepHeading();
-      toast('已把该文件带到上传流程：选择模板后点「开始核对」，可继续人工整理。');
+      toast('已把该文件带入添加资料流程（扫描件演示场景）：点「开始检查」后按提示人工整理。');
       return;
     }
     case 'rec-remove': {
@@ -1622,7 +1708,8 @@ function onClick(e) {
       w.fields = buildFieldInstances(w.templateId, w.templateVersion);
       closeDrawer();
       if (had) toast('已更换模板：字段按新模板重新生成（演示不迁移已填写内容）。', true);
-      refreshTmplRegion(); refreshStep1Next();
+      if (state.route.name === 'review' && w.step === 2) { w.fieldsOpen = true; renderStepRegion(); }
+      else { refreshTmplRegion(); refreshStep1Next(); }
       return;
     }
     case 'start-check': beginCheck(); return;
@@ -1668,10 +1755,30 @@ function onClick(e) {
       toast('已把整条知识改为内部使用；如需对客户提供，请另外新建对外知识（演示）。');
       return;
     }
+    case 'd-back': state.route = { name: 'list', view: state.listLast || 'all', id: null, tab: 'content' }; render(); window.scrollTo({ top: 0 }); return;
+    case 'gate-go': {
+      if (!w) return;
+      const go = el.getAttribute('data-go');
+      w.step = 2;
+      if (go === 'fields') w.fieldsOpen = true;
+      render(); focusStepHeading();
+      if (go === 'title') { const t = qs('#w-title'); if (t) { t.scrollIntoView({ block: 'center' }); t.focus(); } }
+      else if (go === 'fields') {
+        const d = qs('#fields-details'); if (d) d.open = true;
+        const inputs = qsa('#fields-region [data-act="field-value"]');
+        const empty = inputs.find((inp) => !String(inp.value).trim()) || inputs[0];
+        if (empty) { empty.scrollIntoView({ block: 'center' }); empty.focus(); }
+      } else {
+        const cards = qsa('.para-card');
+        const target = cards.find((c) => { const cb = qs('[data-act="para-checked"]', c); return cb && !cb.checked; }) || cards[0];
+        if (target) { target.scrollIntoView({ block: 'center' }); const cb = qs('[data-act="para-checked"]', target); if (cb) cb.focus(); }
+      }
+      return;
+    }
     case 'd-tab': state.route = { name: 'detail', view: state.route.view, id: el.getAttribute('data-id'), tab: el.getAttribute('data-tab') }; render(); return;
     case 'd-edit': startEdit(el.getAttribute('data-id')); return;
-    case 'd-replace': startReplace(el.getAttribute('data-id')); return;
-    case 'd-disable': { const e0 = byId(el.getAttribute('data-id')); if (e0) openDisableDialog(e0); return; }
+    case 'd-replace': { const det = el.closest('details'); if (det) det.open = false; startReplace(el.getAttribute('data-id')); return; }
+    case 'd-disable': { const det = el.closest('details'); if (det) det.open = false; const e0 = byId(el.getAttribute('data-id')); if (e0) openDisableDialog(e0); return; }
     case 'd-enable': { const e0 = byId(el.getAttribute('data-id')); if (e0) { e0.lifecycle = 'published'; render(); toast('已重新启用（演示）：AI 客服状态取决于授权与处理结果。'); } return; }
     case 'd-retry': { const e0 = byId(el.getAttribute('data-id')); if (e0) retryEntry(e0); return; }
     case 'd-upgrade': { const e0 = byId(el.getAttribute('data-id')); if (e0) openUpgradeDialog(e0); return; }
@@ -1679,7 +1786,7 @@ function onClick(e) {
     case 'd-restore': { const e0 = byId(el.getAttribute('data-id')); if (e0) openRestoreDialog(e0, Number(el.getAttribute('data-ver'))); return; }
     case 't-edit': openBuilder({ id: el.getAttribute('data-id') }); return;
     case 'tpl-new': openBuilder({}); return;
-    case 'b-cancel': {
+    case 'b-cancel': case 'b-back': {
       if (state.builderDirty) { state.pendingNav = () => { state.builder = null; state.builderDirty = false; state.route = { name: 'templates', view: 'all', id: null, tab: 'content' }; render(); }; openUnsavedBuilderDialog(); }
       else { state.builder = null; state.route = { name: 'templates', view: 'all', id: null, tab: 'content' }; render(); }
       return;
@@ -1812,9 +1919,13 @@ function onChange(e) {
     case 'field-value': { if (!w) return; const f = w.fields.find((x) => x.key === el.getAttribute('data-key')); if (f) setFieldValue(f, el); return; }
     case 'scenario-import': if (w) w.scenario = el.value; return;
     case 'scenario-publish': state.scenarioPublish = el.value; return;
-    case 'w-usage': if (w) { w.usage = el.value; markWorkDirty(); if (w.step === 2) refreshParaMeta(); else renderStepRegion(); } return;
+    case 'w-usage': if (w) {
+      w.usage = el.value; markWorkDirty();
+      if (w.step === 2) refreshParaMeta();
+      else { renderStepRegion(); const nr = qs('input[name="w-usage"][value="' + el.value + '"]'); if (nr) nr.focus(); }
+    } return;
     case 'w-ai': if (w) { w.aiOn = el.checked; markWorkDirty(); } return;
-    case 'w-expiry': if (w) { w.expiry = el.value; markWorkDirty(); } return;
+    case 'w-expiry': if (w) { w.expiry = el.value; markWorkDirty(); updateExpirySum(); } return;
     case 'w-category': if (w) { w.category = el.value; markWorkDirty(); } return;
     case 's1-category': if (w) { w.category = el.value; markWorkDirty(); } return;
     case 'bf-type': { const b = state.builder; if (!b) return; const f = b.fields.find((x) => x.key === el.getAttribute('data-key')); if (f) { f.type = el.value; state.builderDirty = true; render(); } return; }
