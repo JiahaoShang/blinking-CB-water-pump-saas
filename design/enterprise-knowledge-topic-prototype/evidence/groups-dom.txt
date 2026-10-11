@@ -1,0 +1,132 @@
+- note:
+  - strong: 设计预览 · 演示数据，刷新重置
+  - generic "预览说明"
+- complementary:
+  - generic: G
+  - strong: Growave 卖家控制台
+  - generic: 设计评审稿 · v0.3 · 主题与资料
+  - generic: 青
+  - generic: 青禾企业（演示租户 · 跨行业示例）
+  - navigation "控制台导航":
+    - generic: 知识
+    - button "全部主题":
+      - text: 全部主题
+    - button "全部资料":
+      - text: 全部资料
+    - button "添加资料":
+      - text: 添加资料
+    - button "问答测试":
+      - text: 问答测试
+    - generic: 主题导航
+    - button "产品与交付 1":
+      - generic: 产品与交付
+      - generic: "1"
+    - button "智能会议设备A":
+      - generic: 智能会议设备A
+    - button "团队与文化 2":
+      - generic: 团队与文化
+      - generic: "2"
+    - button "入职培训":
+      - generic: 入职培训
+    - button "企业文化":
+      - generic: 企业文化
+    - button "客户服务 1":
+      - generic: 客户服务
+      - generic: "1"
+    - button "售后标准":
+      - generic: 售后标准
+    - button "报价与合同流程 草稿":
+      - generic: 报价与合同流程
+      - generic: 草稿
+    - button "新建主题":
+      - text: 新建主题
+  - generic: 演示原型：刷新即重置，不会保存内容
+- banner:
+  - generic: 企业知识 · 全部主题
+  - generic "演示用：切换只读视角，查看界面差异":
+    - generic: 权限视角（演示）
+    - combobox "权限视角（演示）":
+      - option "管理员" [selected]
+      - option "仅阅读成员"
+- main:
+  - heading "全部主题" [level=1]
+  - paragraph: 按主题查看企业知识。先看正文与要点，需要时再查看关联的原始资料。
+  - button "新建分组":
+    - text: 新建分组
+  - button "完成分组管理"
+  - button "新建主题":
+    - text: 新建主题
+  - button "添加资料":
+    - text: 添加资料
+  - searchbox "搜索主题"
+  - generic: 分组只用于导航；可新建分组、改名或删除；删除分组不会删除主题。
+  - heading "产品与交付" [level=2]:
+    - text: 产品与交付
+  - generic: 1 个主题
+  - button "改名"
+  - button "删除分组"
+  - button "智能会议设备A 相关资料 5（其中仅登记 3） 更新于 2026-10-08":
+    - strong: 智能会议设备A
+    - generic: 相关资料 5（其中仅登记 3）
+    - generic: 更新于 2026-10-08
+  - generic: 已发布（AI 客服可用）
+  - combobox "移动主题到分组":
+    - option "未分组"
+    - option "产品与交付" [selected]
+    - option "团队与文化"
+    - option "客户服务"
+  - heading "团队与文化" [level=2]:
+    - text: 团队与文化
+  - generic: 2 个主题
+  - button "改名"
+  - button "删除分组"
+  - button "入职培训 相关资料 2 更新于 2026-10-02":
+    - strong: 入职培训
+    - generic: 相关资料 2
+    - generic: 更新于 2026-10-02
+  - generic: 已发布（AI 客服不可用）
+  - combobox "移动主题到分组":
+    - option "未分组"
+    - option "产品与交付"
+    - option "团队与文化" [selected]
+    - option "客户服务"
+  - button "企业文化 相关资料 1 更新于 2026-07-20":
+    - strong: 企业文化
+    - generic: 相关资料 1
+    - generic: 更新于 2026-07-20
+  - generic: 已发布（AI 客服不可用）
+  - combobox "移动主题到分组":
+    - option "未分组"
+    - option "产品与交付"
+    - option "团队与文化" [selected]
+    - option "客户服务"
+  - heading "客户服务" [level=2]:
+    - text: 客户服务
+  - generic: 1 个主题
+  - button "改名"
+  - button "删除分组"
+  - button "售后标准 相关资料 3（其中仅登记 1） 更新于 2026-10-05":
+    - strong: 售后标准
+    - generic: 相关资料 3（其中仅登记 1）
+    - generic: 更新于 2026-10-05
+  - generic: 已发布（AI 客服可用）
+  - combobox "移动主题到分组":
+    - option "未分组"
+    - option "产品与交付"
+    - option "团队与文化"
+    - option "客户服务" [selected]
+  - heading "未分组" [level=2]
+  - generic: 1 个主题
+  - button "报价与合同流程 相关资料 0 更新于 2026-10-10 未分组":
+    - strong: 报价与合同流程
+    - generic: 相关资料 0
+    - generic: 更新于 2026-10-10
+    - generic: 未分组
+  - generic: 草稿
+  - combobox "移动主题到分组":
+    - option "未分组" [selected]
+    - option "产品与交付"
+    - option "团队与文化"
+    - option "客户服务"
+  - generic: 共 5 个主题
+- generic: 分组已改名。

@@ -1,0 +1,130 @@
+- note:
+  - strong: 设计预览 · 演示数据，刷新重置
+  - generic "预览说明"
+- complementary:
+  - generic: G
+  - strong: Growave 卖家控制台
+  - generic: 设计评审稿 · v0.3 · 主题与资料
+  - generic: 青
+  - generic: 青禾企业（演示租户 · 跨行业示例）
+  - navigation "控制台导航":
+    - generic: 知识
+    - button "全部主题":
+      - text: 全部主题
+    - button "全部资料":
+      - text: 全部资料
+    - button "添加资料":
+      - text: 添加资料
+    - button "问答测试":
+      - text: 问答测试
+    - generic: 主题导航
+    - button "产品与交付 2":
+      - generic: 产品与交付
+      - generic: "2"
+    - button "智能会议设备A":
+      - generic: 智能会议设备A
+    - button "售后标准":
+      - generic: 售后标准
+    - button "团队与文化 2":
+      - generic: 团队与文化
+      - generic: "2"
+    - button "入职培训":
+      - generic: 入职培训
+    - button "企业文化":
+      - generic: 企业文化
+    - button "报价与合同流程 草稿":
+      - generic: 报价与合同流程
+      - generic: 草稿
+    - button "设备A包装参考 草稿":
+      - generic: 设备A包装参考
+      - generic: 草稿
+    - button "新建主题":
+      - text: 新建主题
+  - generic: 演示原型：刷新即重置，不会保存内容
+- banner:
+  - generic: 企业知识 · 资料 · 会议设备A-安装指南.docx
+  - generic "演示用：切换只读视角，查看界面差异":
+    - generic: 权限视角（演示）
+    - combobox "权限视角（演示）":
+      - option "管理员" [selected]
+      - option "仅阅读成员"
+- main:
+  - button "返回全部资料":
+    - text: 返回全部资料
+  - generic: DOCX
+  - heading "会议设备A-安装指南.docx" [level=1]
+  - generic: 已发布（AI 客服不可用）
+  - button "更新资料"
+  - generic "更多操作":
+    - text: 更多操作
+  - heading "状态与关系" [level=2]:
+    - text: 状态与关系
+  - term: 发布状态
+  - definition:
+    - generic: 已发布（AI 客服不可用）
+    - generic: 未授权用于 AI 客服（可在发布设置中开启）。
+  - term: 识别状态
+  - definition:
+    - generic: 已识别 · 已核对
+  - term: 用途
+  - definition:
+    - text: 仅内部使用
+    - generic: 用途只决定能否用于对外 AI 回答。
+  - term: AI 到期
+  - definition:
+    - text: 长期有效
+    - generic: 留空 = 长期有效；到期后停止用于 AI 回答。
+  - term: 关联主题
+  - definition:
+    - button "智能会议设备A"
+    - button "取消关联 智能会议设备A":
+    - button "入职培训"
+    - button "取消关联 入职培训":
+    - generic: 关联到主题：
+    - combobox "关联到主题：":
+      - option "选择主题…" [selected]
+      - option "售后标准"
+      - option "企业文化"
+      - option "报价与合同流程"
+      - option "设备A包装参考"
+    - button "关联"
+  - heading "正文" [level=2]
+  - generic: 识别整理的正文：引用时以这里的版本为准。
+  - generic: 段落 1
+  - generic: 已核对
+  - paragraph: 安装前：确认墙面或桌面承重，核对配件清单。
+  - generic: 段落 2
+  - generic: 已核对
+  - paragraph: 壁挂安装：使用随机挂架；混凝土墙用膨胀螺栓，轻质墙需先加装衬板。
+  - generic: 段落 3
+  - generic: 人工修改
+  - generic: 已核对
+  - paragraph: 首次通电：指示灯常亮后按遥控器任意键，等待系统自检完成。
+  - generic: 段落 4
+  - generic: 已核对
+  - paragraph: 培训要点：新同事需在指导下完成 2 次实际安装后独立操作。
+  - generic: 段落 5
+  - generic: 已核对
+  - paragraph: 安装验收：拍照记录走线并登记序列号。
+  - generic "可选字段 0 个":
+    - text: 可选字段
+    - generic: 0 个
+  - option "文字" [selected]
+  - option "数字 + 单位"
+  - generic "发布设置（用途 / AI / 到期） 修改后点「应用」":
+    - text: 发布设置（用途 / AI / 到期）
+    - generic: 修改后点「应用」
+  - generic "原件登记 企业私有":
+    - text: 原件登记
+    - generic: 企业私有
+  - generic "版本记录 2 个版本" [active]:
+    - text: 版本记录
+    - generic: 2 个版本
+  - list:
+    - generic: v1
+    - generic: 首次导入；段落 3 为成员人工修改
+    - generic: 2026-09-20
+    - generic: v2
+    - generic: 更新文件：会议设备A-安装指南-2026修订.docx（保留人工修改段落）
+    - generic: 2026-10-12
+  - paragraph: 旧发布版本不会被草稿覆盖；更新只影响新版本。

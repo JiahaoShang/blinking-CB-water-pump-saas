@@ -1,0 +1,338 @@
+'use strict';
+/* 运行时冒烟检查（Hermes 编写，Codex 保存便于复跑）：最小 DOM stub 加载真实 app.js，
+   覆盖第三轮修复（对话框派发 / 核对数量实时更新 / 紧凑折叠）与既往回归项。 */
+const fs = require('fs');
+const vm = require('vm');
+const APP = require('path').join(__dirname, '..', 'app.js');
+
+let fails = 0;
+const ok = (c, l) => { if (c) console.log('PASS ' + l); else { fails++; console.log('FAIL ' + l); } };
+const focusLog = [];
+
+function makeEl(tag) {
+  return {
+    tagName: (tag || 'div').toUpperCase(),
+    innerHTML: '', textContent: '', value: '', hidden: false, open: false, checked: false,
+    attrs: {},
+    classList: { _s: {}, add(c) { this._s[c] = 1; }, remove(c) { delete this._s[c]; }, toggle(c, f) { const on = f === undefined ? !this._s[c] : !!f; if (on) this._s[c] = 1; else delete this._s[c]; return on; }, contains(c) { return !!this._s[c]; } },
+    addEventListener() {},
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    removeAttribute(k) { delete this.attrs[k]; },
+    getAttribute(k) { return (k in this.attrs) ? this.attrs[k] : null; },
+    focus() { focusLog.push(this._dbg || this.tagName); },
+    appendChild() {}, remove() {}, insertAdjacentHTML() {},
+    querySelector() { return null; }, querySelectorAll() { return []; },
+    closest() { return null; }, scrollIntoView() {},
+    showModal() { this.open = true; }, close() { this.open = false; }
+  };
+}
+function loadApp() {
+  const reg = new Map();
+  const handlers = {};
+  const sandbox = {
+    document: {
+      body: makeEl('body'), activeElement: null,
+      createElement: (t) => makeEl(t),
+      querySelector(sel) { if (!reg.has(sel)) { const e = makeEl('div'); e._dbg = sel; reg.set(sel, e); } return reg.get(sel); },
+      querySelectorAll() { return []; },
+      addEventListener(type, fn) { (handlers[type] = handlers[type] || []).push(fn); }
+    },
+    window: { scrollTo() {} },
+    console,
+    requestAnimationFrame: () => 0,
+    setTimeout: () => 0
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(APP, 'utf8'), sandbox, { filename: 'app.js' });
+  return { sandbox, reg, handlers };
+}
+const inCtx = (sb, expr) => vm.runInContext(expr, sb);
+/* stub 特性：只有被 app 以 qs 查询过的选择器才存在于注册表；q() 先查询再取回同一元素 */
+function q(sb, reg, sel) { inCtx(sb, 'qs(' + JSON.stringify(sel) + ')'); return reg.get(sel); }
+
+function elStub(attrs, tag) {
+  const el = {
+    tagName: tag || 'BUTTON',
+    getAttribute(k) { return (k in attrs) ? String(attrs[k]) : null; },
+    closest(sel) { return sel === '[data-act]' ? el : null; }
+  };
+  return el;
+}
+function clickAct(handlers, act, attrs) {
+  const el = elStub(Object.assign({ 'data-act': act }, attrs || {}));
+  (handlers.click || []).forEach((fn) => fn({ target: el }));
+}
+function dlgClick(handlers, idx) {
+  const btn = { tagName: 'BUTTON', getAttribute: (k) => (k === 'data-dlg' ? String(idx) : null) };
+  const el = { tagName: 'BUTTON', closest(sel) { return sel === '[data-dlg]' ? btn : null; } };
+  (handlers.click || []).forEach((fn) => fn({ target: el }));
+}
+function changeAct(handlers, act, attrs, extra) {
+  const el = elStub(Object.assign({ 'data-act': act }, attrs || {}), 'INPUT');
+  Object.assign(el, extra || {});
+  (handlers.change || []).forEach((fn) => fn({ target: el }));
+}
+function inputAct(handlers, act, attrs, value) {
+  const el = elStub(Object.assign({ 'data-act': act }, attrs || {}), 'TEXTAREA');
+  el.value = value;
+  (handlers.input || []).forEach((fn) => fn({ target: el }));
+}
+function keydown(handlers, key) {
+  (handlers.keydown || []).forEach((fn) => fn({ key: key }));
+}
+
+/* ══ 1. 基础与既往回归（返回栈 / 双标签 / 折叠区 / 搜索 X） ══ */
+{
+  const { sandbox, reg, handlers } = loadApp();
+  ok(inCtx(sandbox, 'state.route.name') === 'topics', '默认进入全部主题');
+  ok(reg.get('#app').innerHTML.indexOf('按主题查看企业知识') >= 0, '主题页任务式引导语');
+  ok(reg.get('#app').innerHTML.indexOf('两个维度') < 0, '主题页无理论说明');
+
+  const ta = inCtx(sandbox, 'topicAvailability(topicById("t_meeting"))');
+  ok(ta.pill === 'ok' && ta.label === '已发布（AI 客服可用）', 't_meeting 绿色可用');
+  const ta2 = inCtx(sandbox, 'topicAvailability(topicById("t_onboarding"))');
+  ok(ta2.pill === 'pub' && ta2.reason.indexOf('未授权') >= 0, 't_onboarding 蓝灰不可用 + 原因');
+  ok(inCtx(sandbox, 'topicsRegionHTML()').indexOf('已发布（AI 客服不可用）') >= 0, '主题列表双标签');
+
+  inCtx(sandbox, 'state.filters.format = "pdf"; openTopic("t_meeting", null);');
+  ok(reg.get('#app').innerHTML.indexOf('<span class="fold-title">关联资料</span>') >= 0, '主题页关联资料折叠（带数量）');
+  clickAct(handlers, 't-source', { 'data-mid': 'm_spec', 'data-loc': '第 2 页' });
+  ok(inCtx(sandbox, 'state.route.name') === 'material' && inCtx(sandbox, 'state.highlight && state.highlight.loc') === '第 2 页', '来源点击跳转 + 定位');
+  ok(reg.get('#app').innerHTML.indexOf('body-para hl') >= 0, '来源高亮');
+  clickAct(handlers, 'd-back');
+  ok(inCtx(sandbox, 'state.route.name') === 'topic' && reg.get('#app').innerHTML.indexOf('section-fold topic-block" open') >= 0, '返回主题并恢复关联资料展开');
+  clickAct(handlers, 'd-back');
+  ok(inCtx(sandbox, 'state.route.name') === 'topics', '再返回回到最初入口');
+
+  inCtx(sandbox, 'goMaterials(); state.filters.format = "pdf"; openTopic("t_meeting", null); openMaterial("m_spec", null); doBack(); doBack();');
+  ok(inCtx(sandbox, 'state.route.name') === 'materials' && inCtx(sandbox, 'state.filters.format') === 'pdf', '多层返回回到带筛选的全部资料');
+
+  ok(inCtx(sandbox, 'materialsHTML()').indexOf('aria-label="清空搜索关键词" hidden') >= 0, '搜索清除按钮常驻且默认hidden');
+  inCtx(sandbox, 'state.filters.q = "x";');
+  ok(inCtx(sandbox, 'materialsHTML()').indexOf('aria-label="清空搜索关键词" hidden') < 0, '有关键词时不带hidden');
+  inCtx(sandbox, 'state.filters = { q:"", format:"", topic:"", status:"" };');
+}
+
+/* ══ 2. 对话框派发（本轮修复 1：data-dlg → state.dlgActions） ══ */
+{
+  const { sandbox, reg, handlers } = loadApp();
+  inCtx(sandbox, 'startCapture("");');
+  clickAct(handlers, 'c-load-sample');
+  clickAct(handlers, 'c-next');
+  clickAct(handlers, 'c-use-samples');   /* 需要先有整理结果，发布闸门才能通过 */
+  const sugId = inCtx(sandbox, 'work().items.find(function(x){return x.format==="video";}).sugs[0].id');
+  clickAct(handlers, 'sg-rename', { 'data-id': sugId });
+  ok(reg.get('#dlg').open === true, '改名对话框打开');
+  inCtx(sandbox, 'qs("#dlg-input")');   /* stub 特性：动作读取走无根 qs，先注册同一元素 */
+  reg.get('#dlg-input').value = '';
+  dlgClick(handlers, 1);
+  ok(reg.get('#dlg').open === true && inCtx(sandbox, "findSug('" + sugId + "').name") === '设备A安装与配置', '校验失败：返回 keep，对话框保持打开、名称不变');
+  reg.get('#dlg-input').value = '设备A包装参考';
+  dlgClick(handlers, 1);
+  ok(inCtx(sandbox, "findSug('" + sugId + "').name") === '设备A包装参考', '确认后名称已保存（data-dlg 派发生效）');
+  ok(reg.get('#dlg').open === false, '确认后对话框关闭');
+  const photoSug = inCtx(sandbox, 'work().items.find(function(x){return x.format==="image";}).sugs[0].id');
+  clickAct(handlers, 'sg-merge', { 'data-id': photoSug });
+  ok(reg.get('#dlg').open === true, '合并对话框打开');
+  dlgClick(handlers, 0);
+  ok(reg.get('#dlg').open === false, '取消：对话框关闭');
+  ok(inCtx(sandbox, "findSug('" + photoSug + "').kind") === 'new' && inCtx(sandbox, "findSug('" + photoSug + "').active") === true, '取消不改动建议');
+  /* 发布确认对话框的取消与确认也走同一派发 */
+  clickAct(handlers, 'c-next2');
+  inCtx(sandbox, 'work().usage = "external"; work().aiOn = true;');
+  inCtx(sandbox, 'work().items.forEach(function(it){ it.paras.forEach(function(p){ p.checked = true; }); });');
+  const mBefore = inCtx(sandbox, 'DB.materials.length');
+  clickAct(handlers, 'c-publish');
+  ok(reg.get('#dlg').open === true, '对外+AI 发布确认对话框打开');
+  dlgClick(handlers, 0);
+  ok(reg.get('#dlg').open === false && inCtx(sandbox, 'DB.materials.length') === mBefore, '取消发布：对话框关闭、未发布');
+  clickAct(handlers, 'c-publish');
+  dlgClick(handlers, 1);
+  ok(inCtx(sandbox, 'DB.materials.length') === mBefore + 5, '确认发布：走同一派发完成批次提交');
+}
+
+/* ══ 3. 核对数量实时更新 + 折叠不丢（本轮修复 2/3） ══ */
+{
+  const { sandbox, reg, handlers } = loadApp();
+  inCtx(sandbox, 'startCapture("");');
+  clickAct(handlers, 'c-load-sample');
+  clickAct(handlers, 'c-next');
+  clickAct(handlers, 'c-use-samples');
+  const it0 = inCtx(sandbox, 'work().items[0].id');           /* 规格书：3 段 */
+  const it1 = inCtx(sandbox, 'work().items[1].id');           /* 安装指南：3 段 */
+  const it2 = inCtx(sandbox, 'work().items[2].id');           /* 图片：仅登记 */
+  ok(inCtx(sandbox, 'work().items[0].foldBody') === true && inCtx(sandbox, 'work().items[1].foldBody') === false, '默认只展开第一件有正文资料');
+  ok(inCtx(sandbox, 'work().items[2].foldBody') !== true, '仅登记资料无正文折叠');
+  ok(reg.get('#app').innerHTML.indexOf('fold-head') >= 0 && reg.get('#app').innerHTML.indexOf('调整主题') >= 0, '紧凑折叠呈现在本批列表');
+  ok(reg.get('#app').innerHTML.indexOf('id="it-body-' + it0 + '" hidden') < 0 && reg.get('#app').innerHTML.indexOf('id="it-body-' + it1 + '" hidden') >= 0, '折叠默认状态正确（首件展开、其余收起）');
+
+  /* 展开第一件的「调整主题」并保持；核对不应使其折叠（无整页重渲染） */
+  clickAct(handlers, 'c-fold-topic', { 'data-id': it0 });
+  ok(q(sandbox, reg, '#it-topic-' + it0).hidden === false, '调整主题展开');
+  const p0 = inCtx(sandbox, 'work().items[0].paras[0].id');
+  const p1 = inCtx(sandbox, 'work().items[0].paras[1].id');
+  const p2 = inCtx(sandbox, 'work().items[0].paras[2].id');
+  changeAct(handlers, 'c-para-check', { 'data-id': p0 }, { checked: true });
+  ok(q(sandbox, reg, '#it-status-' + it0).textContent === '待核对 2 段', '勾选 1 段后数量标签更新（3→2）');
+  changeAct(handlers, 'c-para-check', { 'data-id': p1 }, { checked: true });
+  changeAct(handlers, 'c-para-check', { 'data-id': p2 }, { checked: true });
+  ok(q(sandbox, reg, '#it-status-' + it0).textContent === '已核对', '全部核对后显示「已核对」');
+  ok(q(sandbox, reg, '#it-remain-' + it0).textContent === '已核对', '折叠标题剩余数量同步');
+  ok(q(sandbox, reg, '#it-topic-' + it0).hidden === false, '核对过程无整页重渲染（已展开区域保留）');
+  inputAct(handlers, 'c-para-text', { 'data-id': p1 }, '壁挂安装：使用随机挂架，按孔位固定（已编辑）。');
+  ok(inCtx(sandbox, 'work().items[0].paras[1].checked') === false, '编辑正文撤销该段核对');
+  ok(q(sandbox, reg, '#it-status-' + it0).textContent === '待核对 1 段', '编辑后数量标签回到 1');
+  ok(q(sandbox, reg, '#it-src-' + it0).innerHTML.indexOf('待核对') >= 0, '出处列表同步更新');
+  clickAct(handlers, 'c-fold-topic', { 'data-id': it0 });
+  ok(q(sandbox, reg, '#it-topic-' + it0).hidden === true, '再次点击折叠收起');
+  clickAct(handlers, 'c-fold-body', { 'data-id': it1 });
+  ok(q(sandbox, reg, '#it-body-' + it1).hidden === false && inCtx(sandbox, 'work().items[1].foldBody') === true, '其它资料可单独展开检查正文');
+  /* 折叠状态经整页渲染（如建议改名后）仍保留 */
+  inCtx(sandbox, 'render();');
+  ok(reg.get('#app').innerHTML.indexOf('id="it-body-' + it1 + '" hidden') < 0, '整页渲染后展开状态保留（状态在工作副本上）');
+}
+
+/* ══ 4. 整理初稿 / 同名合并 / 防重复（保持既有行为） ══ */
+{
+  const { sandbox } = loadApp();
+  inCtx(sandbox, 'attachMaterialToTopic("m_spec", "t_quote")');
+  ok(inCtx(sandbox, 'organizeIntoTopic(topicById("t_quote"), topicById("t_quote"))') === 1, '整理初稿只取已核对段落');
+  ok(inCtx(sandbox, 'topicById("t_quote").intro[0].checked') === false, '初稿默认待核对');
+  ok(inCtx(sandbox, 'organizeIntoTopic(topicById("t_quote"), topicById("t_quote"))') === 0, '重复整理不追加');
+  inCtx(sandbox, `startCapture('');
+    var itA = addWorkItem({ name:'a.pdf', format:'pdf', sampleKey:'pdf', src:'file', size:'1 KB' });
+    var itB = addWorkItem({ name:'b.pdf', format:'pdf', sampleKey:'pdf', src:'file', size:'1 KB' });
+    itA.paras = [{ id:'pa', text:'A 段。', loc:'第 1 页', source:'第 1 页', checked:true, modified:false }];
+    itB.paras = [{ id:'pb', text:'B 段。', loc:'第 1 页', source:'第 1 页', checked:true, modified:false }];
+    itA.sugs = [{ id:'sa', kind:'new', name:'新主题X', active:true }];
+    itB.sugs = [{ id:'sb', kind:'new', name:'新主题X', active:true }];
+    itA.confirmedTopics = []; itB.confirmedTopics = [];
+    var before = DB.topics.length; confirmAssoc(); var after = DB.topics.length;`);
+  ok(inCtx(sandbox, 'after - before') === 1, '同名新主题建议合并为一个主题');
+  ok(inCtx(sandbox, 'work().items[0].sugs[0].createdId === work().items[1].sugs[0].createdId'), '两件资料关联到同一个新主题');
+  const beforePub = inCtx(sandbox, 'DB.materials.length');
+  inCtx(sandbox, 'commitPublishBatch(""); commitPublishBatch("");');
+  ok(inCtx(sandbox, 'DB.materials.length') === beforePub + 2, '批次发布只生成一次（防重复）');
+  ok(inCtx(sandbox, 'DB.topics[DB.topics.length-1].intro.every(function(p){return p.checked===false;})'), '新主题初稿全部待核对');
+}
+
+/* ══ 5. 只读视角 ══ */
+{
+  const { sandbox, reg } = loadApp();
+  inCtx(sandbox, 'state.role = "reader"; render();');
+  ok(inCtx(sandbox, 'state.route.name') === 'topics' && reg.get('#app').innerHTML.indexOf('data-act="t-edit"') < 0, '只读视角渲染正常、无编辑入口');
+}
+
+/* ══ 6. 主流程真实派发：c-next2 → 设置控件 → c-publish / 保存草稿 / 返回（本轮修复） ══ */
+{
+  const { sandbox, reg, handlers } = loadApp();
+  clickAct(handlers, 'nav', { 'data-view': 'capture' });
+  clickAct(handlers, 'c-load-sample');
+  clickAct(handlers, 'c-next');
+  clickAct(handlers, 'c-use-samples');
+  const pids = inCtx(sandbox, 'work().items.reduce(function(a,it){return a.concat(it.paras.map(function(p){return p.id;}));},[])');
+  pids.forEach((pid) => changeAct(handlers, 'c-para-check', { 'data-id': pid }, { checked: true }));
+  clickAct(handlers, 'c-confirm-assoc');
+  clickAct(handlers, 'c-next2');   /* 真实点击「下一步：发布设置」 */
+  ok(inCtx(sandbox, 'work().step') === 3, 'c-next2 真实派发后到达第 3 步');
+  const step3 = reg.get('#app').innerHTML;
+  ok(step3.indexOf('第 3 步：发布设置') >= 0, 'c-next2 后渲染出第 3 步');
+  ok(step3.indexOf('data-act="w-usage"') >= 0 && step3.indexOf('id="w-ai"') >= 0 && step3.indexOf('id="w-expiry"') >= 0 && step3.indexOf('settings-group') >= 0, '设置区完整渲染（用途 / AI / 到期同卡）');
+  /* 内用默认 + AI 关：发布无确认对话框，直接提交 */
+  const m0 = inCtx(sandbox, 'DB.materials.length');
+  clickAct(handlers, 'c-publish');
+  ok(reg.get('#dlg').open === false && inCtx(sandbox, 'DB.materials.length') === m0 + 5, '内用默认 AI 关：发布直接提交（无确认）');
+  /* 保存草稿路径（新的批次，允许不完整） */
+  clickAct(handlers, 'nav', { 'data-view': 'capture' });
+  clickAct(handlers, 'c-load-sample');
+  clickAct(handlers, 'c-next');
+  clickAct(handlers, 'c-next2');
+  const m1 = inCtx(sandbox, 'DB.materials.length');
+  clickAct(handlers, 'c-save-draft');
+  ok(inCtx(sandbox, 'DB.materials.length') === m1 + 5 && inCtx(sandbox, 'work() === null'), '保存草稿：创建 5 件草稿资料并离开流程');
+  ok(inCtx(sandbox, 'DB.materials.filter(function(m){return m.lifecycle==="draft";}).length') >= 5, '草稿生命周期正确');
+  /* 返回按钮可达（在同一批未提交时） */
+  clickAct(handlers, 'nav', { 'data-view': 'capture' });
+  clickAct(handlers, 'c-load-sample');
+  clickAct(handlers, 'c-next');
+  clickAct(handlers, 'c-next2');
+  clickAct(handlers, 'c-to-step2');
+  ok(inCtx(sandbox, 'work().step') === 2, 'c-to-step2 真实派发可达');
+  clickAct(handlers, 'c-back');
+  ok(inCtx(sandbox, 'work().step') === 1, 'c-back 真实派发可达');
+}
+
+/* ══ 7. 移动抽屉：明确点击导航目标后关闭；分组展开不关闭；Escape 收起并回焦菜单按钮 ══ */
+{
+  const { sandbox, reg, handlers } = loadApp();
+  inCtx(sandbox, 'document.body.classList.add("nav-open"); qs("#side-scrim").hidden = false;');
+  clickAct(handlers, 'nav-topic', { 'data-id': 't_meeting' });
+  ok(inCtx(sandbox, 'document.body.classList.contains("nav-open")') === false, '点击主题后关闭移动抽屉');
+  ok(inCtx(sandbox, 'state.route.name') === 'topic', '主题已打开（正文可见）');
+  inCtx(sandbox, 'document.body.classList.add("nav-open");');
+  clickAct(handlers, 'nav-toggle-group', { 'data-gid': 'g_product' });
+  ok(inCtx(sandbox, 'document.body.classList.contains("nav-open")') === true, '分组展开不关闭抽屉');
+  inCtx(sandbox, 'document.body.classList.add("nav-open"); qs("#side-scrim").hidden = false;');
+  focusLog.length = 0;
+  keydown(handlers, 'Escape');
+  ok(inCtx(sandbox, 'document.body.classList.contains("nav-open")') === false, 'Escape 收起抽屉');
+  ok(focusLog[focusLog.length - 1] === '#menu-btn', 'Escape 后焦点回到菜单按钮');
+  inCtx(sandbox, 'document.body.classList.add("nav-open");');
+  clickAct(handlers, 'nav', { 'data-view': 'materials' });
+  ok(inCtx(sandbox, 'document.body.classList.contains("nav-open")') === false, '点击「全部资料」后关闭抽屉');
+  ok(inCtx(sandbox, 'state.route.name') === 'materials', '导航仍生效');
+}
+
+/* ══ 8. 分组管理：新建分组入口（仅管理员、管理模式可见）并复用既有对话框/校验 ══ */
+{
+  const { sandbox, reg, handlers } = loadApp();
+  ok(reg.get('#app').innerHTML.indexOf('data-act="group-new-open"') < 0, '未进入分组管理时不显示「新建分组」');
+  clickAct(handlers, 'manage-groups-toggle');
+  ok(reg.get('#app').innerHTML.indexOf('data-act="group-new-open"') >= 0, '管理员分组管理模式显示「新建分组」');
+  clickAct(handlers, 'group-new-open');
+  ok(reg.get('#dlg').open === true, '新建分组对话框打开（复用既有实现）');
+  inCtx(sandbox, 'qs("#dlg-input")');
+  reg.get('#dlg-input').value = '';
+  dlgClick(handlers, 1);
+  ok(reg.get('#dlg').open === true && inCtx(sandbox, 'DB.groups.length') === 2, '空名称被拦（keep），未新增分组');
+  reg.get('#dlg-input').value = '客户与支持';
+  dlgClick(handlers, 1);
+  ok(inCtx(sandbox, 'DB.groups.length') === 3 && inCtx(sandbox, 'DB.groups[2].name') === '客户与支持', '确认后新增分组并出现在页面');
+  ok(reg.get('#dlg').open === false && reg.get('#app').innerHTML.indexOf('客户与支持') >= 0, '对话框关闭且新分组已渲染');
+  inCtx(sandbox, 'state.role = "reader"; render();');
+  ok(reg.get('#app').innerHTML.indexOf('data-act="group-new-open"') < 0 && reg.get('#app').innerHTML.indexOf('data-act="manage-groups-toggle"') < 0, '只读成员不可见新建分组与分组管理');
+}
+
+/* ══ 9. 手动文字：识别标记为「人工正文」，不得显示「未能识别」；闸门保留 ══ */
+{
+  const { sandbox, reg, handlers } = loadApp();
+  clickAct(handlers, 'nav', { 'data-view': 'capture' });
+  clickAct(handlers, 'c-add-text');
+  const mid = inCtx(sandbox, 'work().items[0].id');
+  inputAct(handlers, 'c-item-name', { 'data-id': mid }, '会议纪要模板');
+  inputAct(handlers, 'c-item-text', { 'data-id': mid }, '复盘要点：每周五整理一次行动项。');
+  ok(inCtx(sandbox, 'work().items[0].recognition') === 'manual', '手动文字识别标记为 manual');
+  ok(inCtx(sandbox, 'itemStatus(work().items[0]).label') === '人工正文', 'itemStatus 显示「人工正文」而非「未能识别」');
+  ok(inCtx(sandbox, 'work().items[0].paras[0].source') === '人工撰写', '人工出处保留（人工撰写）');
+  clickAct(handlers, 'c-next');
+  const html = reg.get('#app').innerHTML;
+  ok(html.indexOf('人工正文') >= 0 && html.indexOf('未能识别') < 0, '第 2 步资料头不再显示「未能识别」');
+  const p = inCtx(sandbox, 'work().items[0].paras[0].id');
+  changeAct(handlers, 'c-para-check', { 'data-id': p }, { checked: false });
+  ok(inCtx(sandbox, 'itemStatus(work().items[0]).label') === '人工正文 · 待核对 1 段', '取消核对后显示「人工正文 · 待核对 1 段」');
+  ok(q(sandbox, reg, '#it-status-' + mid).textContent === '人工正文 · 待核对 1 段', '资料头标签实时同步（manual 状态）');
+}
+{
+  /* 发布闸门保留：无名称/无正文的手动材料仍被拦 */
+  const { sandbox, reg, handlers } = loadApp();
+  clickAct(handlers, 'nav', { 'data-view': 'capture' });
+  clickAct(handlers, 'c-add-text');
+  clickAct(handlers, 'c-next');
+  clickAct(handlers, 'c-next2');
+  ok(reg.get('#app').innerHTML.indexOf('有手动材料还没有名称') >= 0, '手动材料缺名称仍在发布闸门列出');
+  clickAct(handlers, 'c-publish');
+  ok(inCtx(sandbox, 'work() !== null && work().step === 3'), '发布被拦（未提交，闸门未放宽）');
+}
+
+console.log(fails ? ('\n冒烟检查未通过：' + fails + ' 项') : '\n冒烟检查全部通过');
+process.exit(fails ? 1 : 0);

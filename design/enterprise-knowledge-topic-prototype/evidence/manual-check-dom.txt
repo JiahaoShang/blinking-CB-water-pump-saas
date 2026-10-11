@@ -1,0 +1,98 @@
+- note:
+  - strong: 设计预览 · 演示数据，刷新重置
+  - generic "预览说明"
+- complementary:
+  - generic: G
+  - strong: Growave 卖家控制台
+  - generic: 设计评审稿 · v0.3 · 主题与资料
+  - generic: 青
+  - generic: 青禾企业（演示租户 · 跨行业示例）
+  - navigation "控制台导航":
+    - generic: 知识
+    - button "全部主题" [active]:
+      - text: 全部主题
+    - button "全部资料":
+      - text: 全部资料
+    - button "添加资料":
+      - text: 添加资料
+    - button "问答测试":
+      - text: 问答测试
+    - generic: 主题导航
+    - button "产品与交付 1":
+      - generic: 产品与交付
+      - generic: "1"
+    - button "智能会议设备A":
+      - generic: 智能会议设备A
+    - button "团队与文化 2":
+      - generic: 团队与文化
+      - generic: "2"
+    - button "入职培训":
+      - generic: 入职培训
+    - button "企业文化":
+      - generic: 企业文化
+    - button "客户服务 1":
+      - generic: 客户服务
+      - generic: "1"
+    - button "售后标准":
+      - generic: 售后标准
+    - button "报价与合同流程 草稿":
+      - generic: 报价与合同流程
+      - generic: 草稿
+    - button "设备售前介绍":
+      - generic: 设备售前介绍
+    - button "新建主题":
+      - text: 新建主题
+  - generic: 演示原型：刷新即重置，不会保存内容
+- banner:
+  - generic: 企业知识 · 添加资料
+  - generic "演示用：切换只读视角，查看界面差异":
+    - generic: 权限视角（演示）
+    - combobox "权限视角（演示）":
+      - option "管理员" [selected]
+      - option "仅阅读成员"
+- main:
+  - generic: "1"
+  - text: 添加资料
+  - generic: "2"
+  - text: 检查整理结果
+  - generic: "3"
+  - text: 发布设置
+  - heading "第 2 步：检查整理结果" [level=1]
+  - paragraph: 检查内容，确认它们属于哪些主题。逐段核对正文；系统建议的主题可以改名、合并或拒绝。
+  - generic: 本批 1 件：1 件可核对正文，0 件仅登记原件。
+  - generic: 整批设置共同主题
+  - combobox "整批设置共同主题":
+    - option "选择主题…" [selected]
+    - option "智能会议设备A"
+    - option "售后标准"
+    - option "入职培训"
+    - option "企业文化"
+    - option "报价与合同流程"
+    - option "设备售前介绍"
+  - button "应用到整批"
+  - paragraph: 只添加这一个主题；每件资料仍可单独调整。
+  - article:
+    - generic: 手动正文
+    - generic: 人工录入示例
+    - generic: 人工正文
+    - button "检查正文 已核对" [expanded]:
+      - text: 检查正文
+      - generic: 已核对
+    - generic: 段落 1
+    - generic: 来源 · 人工撰写
+    - checkbox "已核对" [checked]
+    - text: 已核对
+    - textbox "段落 1 正文": 此处为成员确认的企业资料。
+    - button "＋ 添加段落"
+    - generic "核对出处与修改记录（1 段）"
+    - button "调整主题 暂无建议":
+      - text: 调整主题
+      - generic: 暂无建议
+    - generic "可选字段（补充信息） · 选填"
+    - option "文字" [selected]
+    - option "数字 + 单位"
+  - heading "确认主题与关联" [level=2]
+  - paragraph: 确认后建议才会生效；未确认的建议不会出现在主题导航里。
+  - button "确认主题与关联"
+  - button "返回上一步"
+  - button "下一步：发布设置"

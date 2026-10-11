@@ -1,0 +1,77 @@
+- note:
+  - strong: 设计预览 · 演示数据，刷新重置
+  - generic "预览说明"
+- complementary:
+  - generic: G
+  - strong: Growave 卖家控制台
+  - generic: 设计评审稿 · v0.3 · 主题与资料
+  - generic: 青
+  - generic: 青禾企业（演示租户 · 跨行业示例）
+  - navigation "控制台导航":
+    - generic: 知识
+    - button "全部主题":
+      - text: 全部主题
+    - button "全部资料":
+      - text: 全部资料
+    - button "问答测试":
+      - text: 问答测试
+    - generic: 主题导航
+    - button "产品与交付 1":
+      - generic: 产品与交付
+      - generic: "1"
+    - button "智能会议设备A":
+      - generic: 智能会议设备A
+    - button "团队与文化 2":
+      - generic: 团队与文化
+      - generic: "2"
+    - button "入职培训":
+      - generic: 入职培训
+    - button "企业文化":
+      - generic: 企业文化
+    - button "客户服务 1":
+      - generic: 客户服务
+      - generic: "1"
+    - button "售后标准":
+      - generic: 售后标准
+    - button "报价与合同流程 草稿":
+      - generic: 报价与合同流程
+      - generic: 草稿
+    - button "设备售前介绍":
+      - generic: 设备售前介绍
+  - generic: 演示原型：刷新即重置，不会保存内容
+- banner:
+  - generic: 企业知识 · 主题 · 设备售前介绍
+  - generic "演示用：切换只读视角，查看界面差异":
+    - generic: 权限视角（演示）
+    - combobox "权限视角（演示）":
+      - option "管理员"
+      - option "仅阅读成员" [selected]
+- main:
+  - button "返回全部主题":
+    - text: 返回全部主题
+  - heading "设备售前介绍" [level=1]
+  - generic: 已发布（AI 客服不可用）
+  - generic: 相关资料 1 条
+  - generic: 更新于 2026-10-12
+  - paragraph: 未授权用于 AI 客服。
+  - generic: 只读视角：可以阅读、搜索与跳转。
+  - heading "介绍" [level=2]
+  - paragraph: 智能会议设备A适用于中小型会议室，可用于企业视频会议。
+  - button "《会议设备A-产品规格书.pdf》 · 第 1 页"
+  - generic: 系统整理 · 已确认
+  - generic: 成员修改
+  - heading "要点" [level=2]
+  - paragraph: 还没有要点。
+  - generic "关联资料 1 条":
+    - generic: 关联资料
+    - generic: 1 条
+  - generic "相关主题 0 个":
+    - generic: 相关主题
+    - generic: 0 个
+  - generic "关系视图 小型局部关系（设计建议）":
+    - text: 关系视图
+    - generic: 小型局部关系（设计建议）
+  - generic "版本记录 1 个版本":
+    - text: 版本记录
+    - generic: 1 个版本
+- generic: 已切换为「仅阅读成员」演示视角：编辑、发布与添加入口隐藏（界面差异演示，不代表后端权限）。
