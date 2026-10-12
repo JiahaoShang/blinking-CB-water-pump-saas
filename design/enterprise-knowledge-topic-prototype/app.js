@@ -291,61 +291,80 @@ function sourceLabel(para) {
   return '《' + (m ? m.name : '已移除资料') + '》 · ' + para.source.loc;
 }
 
-/* ---------- 侧栏导航 ---------- */
+/* ---------- 平台主导航（仅模块级入口）＋ 工作区功能导航 ＋ 工作区内部主题树 ---------- */
+/* 平台主导航：只放模块级入口；本原型有效模块仅「企业知识」，其余为演示占位（aria-disabled，不造假页面、不跳生产） */
 function sideNavHTML() {
+  let h = '<div class="side-heading">平台</div>';
+  h += platformPlaceholderHTML('工作台', 'i-layout');
+  h += platformPlaceholderHTML('收件箱', 'i-inbox');
+  h += platformPlaceholderHTML('渠道账号', 'i-globe');
+  h += platformPlaceholderHTML('设置', 'i-sliders');
+  h += '<div class="side-heading">模块</div>';
+  h += '<button class="side-link active" type="button" data-act="nav" data-view="topics"><svg class="ic"><use href="#i-book"/></svg>企业知识</button>';
+  return h;
+}
+function platformPlaceholderHTML(label, icon) {
+  return '<button class="side-link" type="button" data-act="nav" data-view="__out" aria-disabled="true" title="不在本设计评审范围（演示占位）"><svg class="ic"><use href="#' + icon + '"/></svg>' + esc(label) + '</button>';
+}
+/* 企业知识功能导航（工作区顶部）：模块内入口的唯一位置；「添加资料」沿用编辑权限控制（仅管理员/获授权成员） */
+function moduleNavHTML() {
   const r = state.route;
   const isTopics = r.name === 'topics' || r.name === 'topic';
   const isMaterials = r.name === 'materials' || r.name === 'material';
-  let h = '<div class="side-heading">知识</div>';
-  h += '<button class="side-link' + (isTopics ? ' active' : '') + '" type="button" data-act="nav" data-view="topics"><svg class="ic"><use href="#i-book"/></svg>全部主题</button>';
-  h += '<button class="side-link' + (isMaterials ? ' active' : '') + '" type="button" data-act="nav" data-view="materials"><svg class="ic"><use href="#i-file"/></svg>全部资料</button>';
-  if (state.role === 'admin') {
-    h += '<button class="side-link' + (r.name === 'capture' || r.name === 'update' ? ' active' : '') + '" type="button" data-act="nav" data-view="capture"><svg class="ic"><use href="#i-upload"/></svg>添加资料</button>';
-  }
-  h += '<button class="side-link' + (r.name === 'qa' ? ' active' : '') + '" type="button" data-act="nav" data-view="qa"><svg class="ic"><use href="#i-inbox"/></svg>问答测试</button>';
-  /* 主题导航（分组 / 主题 / 新建主题）仅在主题详情页出现：总览、资料、入库等页已有主要功能入口，不重复这组导航 */
-  if (state.route.name === 'topic') {
-  h += '<div class="side-heading">主题导航</div>';
+  let h = '<button class="mn-link' + (isTopics ? ' active' : '') + '" type="button" data-act="nav" data-view="topics"><svg class="ic"><use href="#i-book"/></svg>全部主题</button>';
+  h += '<button class="mn-link' + (isMaterials ? ' active' : '') + '" type="button" data-act="nav" data-view="materials"><svg class="ic"><use href="#i-file"/></svg>全部资料</button>';
+  if (state.role === 'admin') h += '<button class="mn-link' + (r.name === 'capture' || r.name === 'update' ? ' active' : '') + '" type="button" data-act="nav" data-view="capture"><svg class="ic"><use href="#i-upload"/></svg>添加资料</button>';
+  h += '<button class="mn-link' + (r.name === 'qa' ? ' active' : '') + '" type="button" data-act="nav" data-view="qa"><svg class="ic"><use href="#i-inbox"/></svg>问答测试</button>';
+  return h;
+}
+/* 主题浏览树（工作区内部左列 + 窄屏折叠）：pfx 区分两套 DOM（'' 桌面列 / 'm' 窄屏 details），展开状态同一份 */
+function topicTreeHTML(pfx, activeId) {
+  let h = '<div class="ts-head">主题</div>';
   DB.groups.forEach((g) => {
     const open = !!state.navGroups[g.id];
     const kids = topicsOfGroup(g.id);
-    h += '<div class="nav-main-row"><button class="side-link nav-grp" type="button" id="nav-grpbtn-' + g.id + '" data-act="nav-toggle-group" data-gid="' + g.id + '" aria-expanded="' + (open ? 'true' : 'false') + '">' +
-      '<svg class="ic"><use href="#i-folder"/></svg><span class="grow">' + esc(g.name) + '</span><span class="nav-grp-count">' + kids.length + '</span>' +
-      '<svg class="ic nav-caret"><use href="#i-chev"/></svg></button></div>';
-    h += '<div class="nav-subs' + (open ? ' open' : '') + '" id="nav-sub-' + g.id + '"' + (open ? '' : ' inert') + '><div class="nav-subs-inner">';
-    kids.forEach((t) => { h += topicNavItemHTML(t); });
+    h += '<button class="ts-link ts-grp" type="button" id="' + pfx + 'nav-grpbtn-' + g.id + '" data-act="nav-toggle-group" data-gid="' + g.id + '" aria-expanded="' + (open ? 'true' : 'false') + '">' +
+      '<svg class="ic"><use href="#i-folder"/></svg><span class="grow">' + esc(g.name) + '</span><span class="ts-count">' + kids.length + '</span>' +
+      '<svg class="ic ts-caret"><use href="#i-chev"/></svg></button>';
+    h += '<div class="ts-subs' + (open ? ' open' : '') + '" id="' + pfx + 'nav-sub-' + g.id + '"' + (open ? '' : ' inert') + '><div class="ts-subs-inner">';
+    kids.forEach((t) => { h += topicTreeItemHTML(t, pfx, activeId); });
     h += '</div></div>';
   });
-  ungroupedTopics().forEach((t) => { h += topicNavItemHTML(t); });
+  ungroupedTopics().forEach((t) => { h += topicTreeItemHTML(t, pfx, activeId); });
   if (state.role === 'admin') {
-    h += '<button class="side-link side-mini" type="button" data-act="topic-new-open"><svg class="ic"><use href="#i-plus"/></svg>新建主题</button>';
-  }
+    h += '<button class="ts-link ts-mini" type="button" data-act="topic-new-open"><svg class="ic"><use href="#i-plus"/></svg>新建主题</button>';
   }
   return h;
 }
-function topicNavItemHTML(t) {
-  const on = state.route.name === 'topic' && state.route.id === t.id;
-  return '<button class="side-link sub' + (on ? ' active' : '') + '" type="button" data-act="nav-topic" data-id="' + t.id + '">' +
-    '<span class="side-dot"></span><span class="grow nav-topic-name">' + esc(t.name) + '</span>' + (t.lifecycle === 'draft' ? '<span class="tag draft-mini">草稿</span>' : '') + '</button>';
+function topicTreeItemHTML(t, pfx, activeId) {
+  const on = activeId === t.id;
+  return '<button class="ts-link ts-item' + (on ? ' active' : '') + '" type="button" data-act="nav-topic" data-id="' + t.id + '">' +
+    '<span class="ts-dot"></span><span class="grow nav-topic-name">' + esc(t.name) + '</span>' + (t.lifecycle === 'draft' ? '<span class="draft-mini">草稿</span>' : '') + '</button>';
 }
-/* 分组展开/收起的 DOM 同步（动画 200ms；收起时子项 inert、不可聚焦、读屏跳过） */
+/* 分组展开/收起的 DOM 同步（动画 200ms；收起时子项 inert、不可聚焦、读屏跳过）；桌面与窄屏两套树同步 */
 function toggleNavGroup(gid) {
   state.navGroups[gid] = !state.navGroups[gid];
   const open = state.navGroups[gid];
-  const btn = qs('#nav-grpbtn-' + gid);
-  const sub = qs('#nav-sub-' + gid);
-  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-  if (sub) {
-    if (sub.classList) sub.classList.toggle('open', open);
-    if (open) { if (sub.removeAttribute) sub.removeAttribute('inert'); }
-    else { if (sub.setAttribute) sub.setAttribute('inert', ''); }
-  }
+  ['', 'm'].forEach((pfx) => {
+    const btn = qs('#' + pfx + 'nav-grpbtn-' + gid);
+    const sub = qs('#' + pfx + 'nav-sub-' + gid);
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (sub) {
+      if (sub.classList) sub.classList.toggle('open', open);
+      if (open) { if (sub.removeAttribute) sub.removeAttribute('inert'); }
+      else { if (sub.setAttribute) sub.setAttribute('inert', ''); }
+    }
+  });
 }
 function renderNav() { const el = qs('#side-nav'); if (el) el.innerHTML = sideNavHTML(); }
+function renderModuleNav() { const el = qs('#module-nav'); if (el) el.innerHTML = moduleNavHTML(); }
+/* 窄屏「浏览主题」在选中主题后收起（桌面无此元素或本就收起，调用安全） */
+function closeMobileTopicBrowse() { const d = qs('#topic-browse-details'); if (d && d.open) d.open = false; }
 
 /* ---------- 路由渲染 ---------- */
 function render() {
   renderNav();
+  renderModuleNav();
   const r = state.route;
   const app = qs('#app');
   let html = '';
@@ -360,6 +379,19 @@ function render() {
   else if (r.name === 'update') html = updateHTML();
   else if (r.name === 'qa') html = qaHTML();
   else html = missingHTML('页面');
+  /* 主题浏览导航（工作区内部左列）：主题详情 / 编辑页出现；
+     经主题关联资料进入的资料详情沿用已有 backStack 推导上下文保留此列（不改返回栈、不做新领域模型） */
+  const bTop = state.backStack[state.backStack.length - 1];
+  const fromTopicCtx = r.name === 'material' && !!(bTop && bTop.name === 'topic' && topicById(bTop.id));
+  if (r.name === 'topic' || fromTopicCtx) {
+    const activeId = r.name === 'topic' ? r.id : (bTop ? bTop.id : null);
+    html = '<div class="workspace-grid">' +
+      '<aside class="topic-side" aria-label="主题浏览导航"><div class="topic-side-inner">' + topicTreeHTML('', activeId) + '</div></aside>' +
+      '<div class="ws-main">' +
+        '<details class="topic-side-details" id="topic-browse-details"><summary>浏览主题</summary><div class="topic-side-inner">' + topicTreeHTML('m', activeId) + '</div></details>' +
+        html +
+      '</div></div>';
+  }
   app.innerHTML = html;
   const crumb = qs('#crumb');
   if (crumb) crumb.innerHTML = crumbHTML();
@@ -1468,15 +1500,17 @@ function onClick(e) {
   switch (act) {
     case 'nav': {
       const v = el.getAttribute('data-view');
+      if (v === '__out') { toast('该入口是平台其他模块（演示占位）：不在本设计评审范围。', true); return; }
       if (state.role !== 'admin' && (v === 'capture' || v === 'update')) { toast('只读成员不能添加或更新资料（演示视角差异）。', true); return; }
-      closeMobileNav();   /* 明确点击侧栏导航目标后收起移动抽屉（桌面无影响） */
+      closeMobileNav();   /* 明确点击导航目标后收起移动抽屉（桌面无影响） */
       requestLeave(() => { resetFlows(); if (v === 'topics') goTopics(); else if (v === 'materials') goMaterials(); else if (v === 'capture') startCapture(''); else { state.route = { name: 'qa', id: null, step: 1 }; render(); } });
       return;
     }
     case 'nav-topic': {
       const id = el.getAttribute('data-id');
-      if (state.route.name === 'topic' && state.route.id === id) { closeMobileNav(); return; }   /* 重复点击当前主题：只关移动抽屉，不压返回层 */
+      if (state.route.name === 'topic' && state.route.id === id) { closeMobileNav(); closeMobileTopicBrowse(); return; }   /* 重复点击当前主题：只关抽屉/收起窄屏浏览树，不压返回层 */
       closeMobileNav();
+      closeMobileTopicBrowse();   /* 窄屏选中主题后收起内部浏览导航（桌面无此折叠） */
       requestLeave(() => { resetFlows(); openTopic(id, null); });
       return;
     }

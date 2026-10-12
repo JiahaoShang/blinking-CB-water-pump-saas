@@ -101,6 +101,16 @@ Codex 复现 3 项主流程阻断，本轮针对性修复；既往规则（核�
 
 **本轮执行的检查**：`node --check app.js`、`node --check evidence/runtime-smoke.cjs` 通过；按任务要求**只调整与新规则直接相关的断言**（出处非交互文本与保留标记、关联资料为唯一文件打开入口、总览无主题导航 / 主题页有、同主题重复点击不压栈），其余断言原样保留，复跑 `evidence/runtime-smoke.cjs` **85 项全部通过、退出码 0**。其中一处标记断言按实际渲染修正（「仅内部来源」标记出现在含此类来源的主题，如 t_onboarding；t_meeting 的同类来源在要点行、以提示行与 chip 呈现）。**未执行**：真实浏览器复验（交 Codex；本自检不代表浏览器验收，不替代上一轮真实界面证据）。
 
+## 第七轮修订自检（2026-10-12，布局归属修正，用户纠正）
+
+用户纠正：主题导航不应出现在平台主导航；平台主导航只呈现模块级入口，企业知识模块内的浏览功能集成到右侧工作区。业务实现仍未授权；上一轮截图 / DOM 证据全部保留未动。
+
+1. **平台主导航模块化**：`sideNavHTML` 重写——工作台 / 收件箱 / 渠道账号 / 设置（`data-view="__out"` + `aria-disabled`，点击 toast 提示、不导航、不造假页面）+ 企业知识（唯一有效模块入口，`nav topics`）。`nav` 处理器新增 `__out` 分支；平台 `[aria-disabled]` 样式补充。
+2. **企业知识功能导航进工作区顶部**：index.html 新增 `<nav id="module-nav" aria-label="企业知识功能导航">`；`moduleNavHTML()` 渲染 全部主题 / 全部资料 / 添加资料（仅管理员，权限控制不变）/ 问答测试；渲染入口 `renderModuleNav()` 随 `render()` 调用。
+3. **主题浏览导航进工作区内部左列**：`topicTreeHTML(pfx, activeId)` 重建树（`ts-*` 样式，白/浅底面板，约 216px），主题详情 / 编辑页渲染 `aside.topic-side[aria-label=主题浏览导航]` + 窄屏 `<details id="topic-browse-details">浏览主题</details>`（两套 DOM 前缀 ''/'m'，`toggleNavGroup` 双同步 aria-expanded 与 inert）；经主题关联资料进入的资料详情按 backStack 顶层推导保留此列（不改返回栈）；`nav-topic` 增加 `closeMobileTopicBrowse()`（重复点击当前主题 / 选中主题后收起窄屏浏览树）。≤900px 折叠、1280/1440 双列、reduced-motion 沿用全局禁用。
+
+**本轮执行的检查**：`node --check app.js`、`node --check evidence/runtime-smoke.cjs` 通过；按任务只改与布局变动直接相关的断言（主导航含模块级入口且无主题与模块内功能、功能导航在工作区、主题树在内部、窄屏浏览树与独立前缀、双树 aria/inert 同步、重复点击当前主题只关抽屉/收窄屏树不压栈、经主题进入的资料详情保留树、资料列表页无树；旧 sidebar/mobile 断言改为内导航语义），其余保留；复跑 `evidence/runtime-smoke.cjs` **99 项全部通过、退出码 0**。**未执行**：真实浏览器复验（交 Codex；不代表浏览器验收，screenshots 等既有证据不覆盖本轮布局）。
+
 ## 入口简化 · Codex 独立复验（2026-10-12）
 
 Hermes 完成原型修订后，Codex 复跑 JS 语法检查、85 项运行时冒烟检查和 `git diff --check`，均通过。当前日志：`evidence/entry-runtime-smoke.log`；此前 77 项日志与旧截图是上一轮历史证据，不代表当前出处仍可点击。
@@ -110,3 +120,17 @@ Hermes 完成原型修订后，Codex 复跑 JS 语法检查、85 项运行时冒
 范围检查：启动时受跟踪文件中排除允许更新的原型目录与两份相关文档，余下文件 SHA-256 全部未变，详见 `entry-scope-check.json`。业务代码未修改。全部资料保留为跨主题全集视图；同一资料可关联多个主题，去重的是同页重复入口，而非强制资料只能归属一个主题。旧原型及生产验收结论不变。等待用户继续体验。
 
 上一轮待修“重复点击当前主题多一层返回”本轮已修并独立复验；版本绑定、模板界面与真实识别/模型等原有未完成项仍保留。
+
+## 缓存修复记录（2026-10-12）
+
+Codex 实测暴露浏览器沿用旧 CSS 缓存（现象：新 index.html 已加载，但 `document.styleSheets[0].cssRules` 仍为旧 reduced-motion、`.workspace-grid` / `.module-nav` computedStyle 为 block；独立 HTTP 读取 style.css 与磁盘一致且已含新选择器）。本轮仅改 `index.html` 两处 URL：`style.css?v=20261012-workspace-nav` 与 `app.js?v=20261012-workspace-nav`（固定版本查询参数，避免两者不一致），未改 CSS/JS 业务逻辑、未安装依赖、未重构。**未执行**：加参数后的真实浏览器缓存命中与布局复验（交 Codex）；本记录不代表浏览器验证通过。
+
+## 工作区内导航 · Codex 独立复验（2026-10-12）
+
+本轮用户纠正导航归属，当前设计为平台主侧栏仅模块入口，企业知识功能在顶部模块导航，主题树在 `main` 内左列。Codex 独立复跑 JS 语法、99 项运行时冒烟通过（`workspace-runtime-smoke.log`），差异检查通过。此前截图和日志为历史证据。
+
+真实浏览器实点：全部主题总览没有重复内部树；进入会议设备主题后内部列显示，平台导航不含主题；通过内部列切换售后主题再返回正常；关联PDF打开后内部列仍保留，再返回主题正常。模块顶部“全部主题”按钮实点可返回。1280px下页面 scrollWidth=1280，与正文并排；390px内部“浏览主题”展开后点当前主题自动收起，平台抽屉未打开，返回层级不增加；320px通过Enter展开/收起，无页面横向溢出。截图：`workspace-topic-1280.jpg`、`workspace-topic-desktop.jpg`、`workspace-browser-mobile-390.jpg`、`workspace-mobile-320.jpg`。未做所有读屏设备或所有移动路径测试。
+
+曾发现浏览器仅加载旧CSS：服务端读取与磁盘一致且含新规则，CSSOM却无新规则；Hermes为静态资源引用加固定版本标记后，浏览器computedStyle确认工作区grid、模块导航flex，截图以修复后版本覆盖。未改任何业务代码。范围之外受跟踪文件哈希均未变，见 `workspace-scope-check.json`。
+
+交付状态：本轮布局修订完成，待用户继续体验；未授权第二批业务开发。版本精确绑定、模板界面、真实识别/模型/持久化等此前未完成项不因本轮修订通过而改变。

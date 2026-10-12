@@ -94,11 +94,18 @@ function keydown(handlers, key) {
   ok(ta2.pill === 'pub' && ta2.reason.indexOf('未授权') >= 0, 't_onboarding 蓝灰不可用 + 原因');
   ok(inCtx(sandbox, 'topicsRegionHTML()').indexOf('已发布（AI 客服不可用）') >= 0, '主题列表双标签');
 
-  /* 本轮规则 1：主题导航只在主题页出现；总览页不重复 */
-  ok(reg.get('#side-nav').innerHTML.indexOf('主题导航') < 0 && reg.get('#side-nav').innerHTML.indexOf('data-act="nav-topic"') < 0, '总览页不显示主题导航（无重复入口）');
+  /* 布局归属（2026-10-12）：平台主导航只含模块级入口；模块内功能在工作区顶部；主题树在工作区内部 */
+  const sideNav0 = reg.get('#side-nav').innerHTML;
+  ok(sideNav0.indexOf('工作台') >= 0 && sideNav0.indexOf('收件箱') >= 0 && sideNav0.indexOf('渠道账号') >= 0 && sideNav0.indexOf('设置') >= 0 && sideNav0.indexOf('企业知识') >= 0, '平台主导航含模块级入口');
+  ok(sideNav0.indexOf('aria-disabled="true"') >= 0 && sideNav0.indexOf('data-view="__out"') >= 0, '平台其他模块入口为 disabled 占位（不造假页面）');
+  ok(sideNav0.indexOf('全部主题') < 0 && sideNav0.indexOf('全部资料') < 0 && sideNav0.indexOf('添加资料') < 0 && sideNav0.indexOf('问答测试') < 0 && sideNav0.indexOf('data-act="nav-topic"') < 0, '平台主导航不含模块内功能入口与主题');
+  const mn0 = reg.get('#module-nav').innerHTML;
+  ok(mn0.indexOf('全部主题') >= 0 && mn0.indexOf('全部资料') >= 0 && mn0.indexOf('添加资料') >= 0 && mn0.indexOf('问答测试') >= 0, '企业知识功能导航在工作区（管理员含添加资料）');
+  ok(reg.get('#app').innerHTML.indexOf('aria-label="主题浏览导航"') < 0, '总览页不出现主题浏览列（不重复树）');
 
   inCtx(sandbox, 'state.filters.format = "pdf"; openTopic("t_meeting", null);');
-  ok(reg.get('#side-nav').innerHTML.indexOf('主题导航') >= 0 && reg.get('#side-nav').innerHTML.indexOf('data-act="nav-topic"') >= 0, '主题页显示主题导航');
+  ok(reg.get('#app').innerHTML.indexOf('aria-label="主题浏览导航"') >= 0 && reg.get('#app').innerHTML.indexOf('浏览主题') >= 0, '主题页在工作区内部出现主题树（含窄屏折叠）');
+  ok(reg.get('#side-nav').innerHTML.indexOf('data-act="nav-topic"') < 0, '主题树不在平台主导航');
   const topicHtmlNow = reg.get('#app').innerHTML;
   ok(topicHtmlNow.indexOf('<span class="fold-title">关联资料</span>') >= 0, '主题页关联资料折叠（带数量）');
   /* 本轮规则 2：出处为非交互文本；打开原始文件的唯一列表入口是「关联资料」 */
@@ -229,6 +236,7 @@ function keydown(handlers, key) {
   const { sandbox, reg } = loadApp();
   inCtx(sandbox, 'state.role = "reader"; render();');
   ok(inCtx(sandbox, 'state.route.name') === 'topics' && reg.get('#app').innerHTML.indexOf('data-act="t-edit"') < 0, '只读视角渲染正常、无编辑入口');
+  ok(reg.get('#module-nav').innerHTML.indexOf('添加资料') < 0, '只读视角：功能导航不出现添加资料（权限控制不变）');
 }
 
 /* ══ 6. 主流程真实派发：c-next2 → 设置控件 → c-publish / 保存草稿 / 返回（本轮修复） ══ */
@@ -270,36 +278,55 @@ function keydown(handlers, key) {
   ok(inCtx(sandbox, 'work().step') === 1, 'c-back 真实派发可达');
 }
 
-/* ══ 7. 移动抽屉 + 主题导航返回栈：重复点击当前主题只关抽屉不压栈；分组展开不关闭；Escape 收起并回焦菜单按钮 ══ */
+/* ══ 7. 布局归属（2026-10-12）：平台抽屉 / 工作区功能导航 / 内部主题树；重复点击当前主题不压栈 ══ */
 {
   const { sandbox, reg, handlers } = loadApp();
-  /* 先进入主题页（主题导航只在主题页出现） */
-  clickAct(handlers, 't-open', { 'data-id': 't_meeting' });
-  ok(inCtx(sandbox, 'state.route.name') === 'topic', '主题已打开（正文可见）');
-  /* 本轮规则 3：重复点击当前主题只关移动抽屉，不压返回层 */
+  /* 平台抽屉只含模块级导航：点平台入口（企业知识）后关闭 */
   inCtx(sandbox, 'document.body.classList.add("nav-open"); qs("#side-scrim").hidden = false;');
+  clickAct(handlers, 'nav', { 'data-view': 'topics' });
+  ok(inCtx(sandbox, 'document.body.classList.contains("nav-open")') === false, '点击平台模块入口后关闭抽屉');
+  /* 平台占位入口只提示、不导航 */
+  clickAct(handlers, 'nav', { 'data-view': '__out' });
+  ok(inCtx(sandbox, 'state.route.name') === 'topics', '平台占位入口不导航（只提示）');
+  /* 进入主题页：工作区内部主题树就位（桌面列 + 窄屏折叠两套 DOM） */
+  clickAct(handlers, 't-open', { 'data-id': 't_meeting' });
+  ok(inCtx(sandbox, 'state.route.name') === 'topic' && reg.get('#app').innerHTML.indexOf('aria-label="主题浏览导航"') >= 0, '主题树在工作区内部');
+  ok(reg.get('#app').innerHTML.indexOf('id="topic-browse-details"') >= 0 && reg.get('#app').innerHTML.indexOf('id="mnav-sub-g_product"') >= 0, '窄屏「浏览主题」折叠与独立前缀同在工作区内');
+  /* 分组开合：两套树同步（aria-expanded + inert） */
+  ok(reg.get('#app').innerHTML.indexOf('id="nav-sub-g_product" inert') < 0, '主题页默认展开所在分组（桌面树）');
+  clickAct(handlers, 'nav-toggle-group', { 'data-gid': 'g_product' });
+  ok(q(sandbox, reg, '#nav-grpbtn-g_product').getAttribute('aria-expanded') === 'false' && q(sandbox, reg, '#nav-sub-g_product').getAttribute('inert') === '', '收起：aria 与 inert 同步（桌面树）');
+  ok(q(sandbox, reg, '#mnav-grpbtn-g_product').getAttribute('aria-expanded') === 'false' && q(sandbox, reg, '#mnav-sub-g_product').getAttribute('inert') === '', '收起：窄屏树同步');
+  clickAct(handlers, 'nav-toggle-group', { 'data-gid': 'g_product' });
+  ok(q(sandbox, reg, '#nav-grpbtn-g_product').getAttribute('aria-expanded') === 'true' && q(sandbox, reg, '#nav-sub-g_product').getAttribute('inert') === null, '展开：aria 与 inert 恢复');
+  /* 重复点击当前主题：只关抽屉并收起窄屏浏览树，不压返回层 */
+  q(sandbox, reg, '#topic-browse-details').open = true;
+  inCtx(sandbox, 'document.body.classList.add("nav-open");');
   const stackBefore = inCtx(sandbox, 'state.backStack.length');
   clickAct(handlers, 'nav-topic', { 'data-id': 't_meeting' });
-  ok(inCtx(sandbox, 'document.body.classList.contains("nav-open")') === false, '重复点击当前主题：关闭移动抽屉');
+  ok(inCtx(sandbox, 'document.body.classList.contains("nav-open")') === false, '重复点击当前主题：关闭平台抽屉');
+  ok(q(sandbox, reg, '#topic-browse-details').open === false, '重复点击当前主题：收起窄屏「浏览主题」');
   ok(inCtx(sandbox, 'state.backStack.length') === stackBefore && inCtx(sandbox, 'state.route.id') === 't_meeting', '重复点击当前主题不压返回层（仍在原主题）');
-  inCtx(sandbox, 'document.body.classList.add("nav-open");');
+  /* 点击其他主题：正常导航并只压一层；窄屏浏览树以收起状态呈现 */
   clickAct(handlers, 'nav-topic', { 'data-id': 't_aftersale' });
   ok(inCtx(sandbox, 'state.route.id') === 't_aftersale' && inCtx(sandbox, 'state.backStack.length') === stackBefore + 1, '点击其他主题正常打开并只压一层');
+  ok(reg.get('#app').innerHTML.indexOf('id="topic-browse-details" open') < 0, '选中主题后窄屏浏览树收起（默认折叠）');
   clickAct(handlers, 'd-back');
   ok(inCtx(sandbox, 'state.route.id') === 't_meeting', '返回回到上一主题');
-  inCtx(sandbox, 'document.body.classList.add("nav-open");');
-  clickAct(handlers, 'nav-toggle-group', { 'data-gid': 'g_product' });
-  ok(inCtx(sandbox, 'document.body.classList.contains("nav-open")') === true, '分组展开不关闭抽屉');
+  /* 经主题关联资料进入的资料详情保留内部主题树（backStack 推导；不改返回栈） */
+  clickAct(handlers, 'm-open', { 'data-id': 'm_spec', 'data-from': 'topic' });
+  ok(inCtx(sandbox, 'state.route.name') === 'material' && reg.get('#app').innerHTML.indexOf('aria-label="主题浏览导航"') >= 0, '经主题进入的资料详情保留内部主题树');
+  clickAct(handlers, 'd-back');
+  ok(inCtx(sandbox, 'state.route.name') === 'topic', '资料详情返回主题正常');
+  /* Escape 与焦点行为保留（平台抽屉） */
   inCtx(sandbox, 'document.body.classList.add("nav-open"); qs("#side-scrim").hidden = false;');
   focusLog.length = 0;
   keydown(handlers, 'Escape');
   ok(inCtx(sandbox, 'document.body.classList.contains("nav-open")') === false, 'Escape 收起抽屉');
   ok(focusLog[focusLog.length - 1] === '#menu-btn', 'Escape 后焦点回到菜单按钮');
-  inCtx(sandbox, 'document.body.classList.add("nav-open");');
+  /* 资料列表页：无内部主题树；工作区功能导航可进入 */
   clickAct(handlers, 'nav', { 'data-view': 'materials' });
-  ok(inCtx(sandbox, 'document.body.classList.contains("nav-open")') === false, '点击「全部资料」后关闭抽屉');
-  ok(inCtx(sandbox, 'state.route.name') === 'materials', '导航仍生效');
-  ok(reg.get('#side-nav').innerHTML.indexOf('主题导航') < 0, '资料列表页不显示主题导航');
+  ok(inCtx(sandbox, 'state.route.name') === 'materials' && reg.get('#app').innerHTML.indexOf('aria-label="主题浏览导航"') < 0, '资料列表页无主题树');
 }
 
 /* ══ 8. 分组管理：新建分组入口（仅管理员、管理模式可见）并复用既有对话框/校验 ══ */
