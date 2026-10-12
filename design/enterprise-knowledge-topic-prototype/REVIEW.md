@@ -187,3 +187,20 @@ Hermes调用在600秒上限超时，代码/PRD/说明/自检证据已保存；�
 真实浏览器刷新即在全部主题出现工作区内部浏览列；展开分组后，每主题有独立文件折叠按钮，初始aria-expanded=false。Enter展开不改变总览页面；从文件树实点PDF→显示“返回全部主题”，返回后展开保持true；从主题正文的树打开PDF→“返回主题”正常。Space收起后aria-expanded=false、子区inert=true，页面仍为原主题。中央主题内容没有m-open重复打开动作，关联管理保留。390px总览可展开“浏览主题”和主题文件，点文件后浏览区收起，返回总览，scrollWidth=viewportWidth=390。截图overview-topic-files.jpg、overview-topic-files-mobile.jpg。
 
 未完成：本轮未完整走查所有手机路径/读屏设备；真实上传/识别/模型/数据库与既有延期事项仍未验收。此次仅设计交付，业务代码未修改。
+
+## 第十轮修订自检（2026-10-12，中央总览分组折叠；用户批准）
+
+用户批准：中央「全部主题」总览分组列表增加展开 / 收起（控制下方主题，主题名仍点入正文）；左侧主题文件树不改、不在中央复制文件列表。改动仅限本原型目录与 v0.3 PRD；未改业务代码、**未提交**、未部署；上文全部历史证据保留未动。
+
+1. **三个组头可折叠（两个渲染路径一致）**：产品与交付 / 团队与文化 / 未分组三个组头由纯标题改为 `h2` 内真实 `<button class="sec-fold">`（`data-act="ov-fold"`、`aria-expanded` / `aria-controls`、Enter / Space 原生触发；folder 图标、组名、数量徽标与三角箭头都在按钮内）；下方主题行包进 `.sec-body > .sec-body-inner > .rows`（收起 `inert`、0fr↔1fr 动画 200ms）。`topicsHTML` 与 `topicsRegionHTML` 共用新 `ovSecHTML()`；`groupMngHTML()` 抽出既有管理模式控件串，两条路径一致。默认展开（`ovGroupDisplayOpen` 默认 true，保持原视觉）；18 / 16 / 13 字号、缩进、导航位置、上传单卡、主题文件树 / 唯一文件入口与全部业务规则未动。
+2. **状态与独立性**：新增轻量 UI 状态 `state.ovFolds`（gid → 展开态）；`toggleOverviewGroup` 只改该状态并对 DOM 就地同步（aria / inert / 动画类），不导航、不压返回层；折叠状态跨整页渲染与「进入主题正文 → 返回」保持。与左侧浏览树的 `state.navGroups` 完全独立（冒烟断言了双向不联动、同屏共存：左侧展开 / 中央收起）。
+3. **搜索**：`ovGroupDisplayOpen(gid)` 在有关键词时返回 true（命中组临时展开展示）；搜索不改 `state.ovFolds`；清空关键词（输入清空或「×」）后渲染按用户原状态恢复——搜索结果不会被折叠藏住。
+4. **管理操作**：改名 / 删除 / 移动保持可操作；改名 / 删除按钮输出在 `h2` 之外（折叠按钮的兄弟节点，不嵌套 button）；管理模式中折叠仍可操作。
+5. **缓存防旧版本**：`index.html` 资源版本参数改为 `?v=20261012-overview-fold`（只改两处链接 URL）。
+
+**本轮执行的检查**：`node --check app.js`、`node --check evidence/runtime-smoke.cjs` 通过；`evidence/runtime-smoke.cjs` **186 项通过、退出码 0**（日志 `evidence/overview-fold-runtime-smoke.log`）——只新增 / 调整与本轮直接相关的断言（三个组头为真实按钮、aria-expanded / aria-controls、默认展开无 inert、收起不导航不压返回层、收起 DOM 同步与跨整页渲染保持、未操作分组不受影响、与左侧树两套状态独立（含同屏共存两种方向）、跨进入主题返回保持、搜索命中组临时展开 / 无命中不渲染 / 不改用户状态 / 清空恢复、管理模式改名 / 删除 / 移动保留与对话框可用、折叠按钮不嵌套、样式 0fr→1fr 与箭头旋转、reduced-motion 保留、资源版本），其余 153 项断言原样保留通过；另做生成 HTML 标签配平复核（默认 / 收起 / 管理模式 / 搜索命中 / 搜索无命中 / 清空恢复六种结构，全部配平，摘录 `evidence/overview-fold-dom.txt`）。**未执行**：真实浏览器渲染、键盘与 320 / 390 布局复验（交 Codex；本自检不代表浏览器验收，历史截图与日志保留、不覆盖本轮）。会话内出现的 `evidence/central-overview-folded.jpg`（2026-10-12 18:34）非制作方产出，仅作为参考，未纳入本自检结论。
+
+
+### 中央总览折叠 · Codex独立复验（2026-10-12）
+
+复跑JS语法与186项运行时冒烟通过，日志overview-fold-independent.log。真实浏览器实点中央“产品与交付”组头后aria-expanded=false；输入“会议”时命中组临时展开，清空搜索恢复false；Space收起“团队与文化”同样false。进入未分组主题再返回后产品分组仍false；管理模式两组改名/删除按钮保留。截图central-overview-folded.jpg是Codex本轮最终图，不是制作方自检结论。未做所有移动路径/读屏设备完整验收；业务代码未修改，真实解析/模型等未完成项继续保留。

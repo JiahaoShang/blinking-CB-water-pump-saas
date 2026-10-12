@@ -1,7 +1,8 @@
 'use strict';
 /* 运行时冒烟检查（Hermes 编写，Codex 保存便于复跑）：最小 DOM stub 加载真实 app.js，
    覆盖第三轮修复（对话框派发 / 核对数量实时更新 / 紧凑折叠）与既往回归项；
-   第九轮（2026-10-12）：总览内部主题 / 文件树、每主题折叠与状态同步、唯一文件入口、两种返回语义。 */
+   第九轮（2026-10-12）：总览内部主题 / 文件树、每主题折叠与状态同步、唯一文件入口、两种返回语义；
+   第十轮（2026-10-12）：中央总览分组折叠（默认展开、收起不导航、与左侧树独立、跨返回保持、搜索临时展开 / 清空恢复、管理按钮不嵌套）。 */
 const fs = require('fs');
 const vm = require('vm');
 const APP = require('path').join(__dirname, '..', 'app.js');
@@ -443,7 +444,7 @@ function keydown(handlers, key) {
   ok(m600 >= 0 && m480 > m600 && CSS.slice(m600, m480).indexOf('.topic-sec .rows .row{padding-left:22px}') >= 0, '窄屏（≤600px，含 320/390）缩进收窄为 12px');
   ok(CSS.indexOf('.mode-card[hidden]{display:none}') >= 0, '单卡片样式：非当前方式 hidden 即不显示');
   ok(/\.row-title strong\{font-size:15px;font-weight:550;color:var\(--text-1\)/.test(CSS), '全局行规则保持原样（全部资料 / 主题详情不受影响）');
-  ok(IDX.indexOf('style.css?v=20261012-topic-file-tree') >= 0 && IDX.indexOf('app.js?v=20261012-topic-file-tree') >= 0, 'index.html 资源版本 = 20261012-topic-file-tree');
+  ok(IDX.indexOf('style.css?v=20261012-overview-fold') >= 0 && IDX.indexOf('app.js?v=20261012-overview-fold') >= 0, 'index.html 资源版本 = 20261012-overview-fold');
 }
 
 /* ══ 11. 第九轮（2026-10-12）：总览内部主题 / 文件树；折叠不导航；唯一文件入口；两种返回语义 ══ */
@@ -513,7 +514,91 @@ function keydown(handlers, key) {
   ok(/\.ts-files\{display:grid;grid-template-rows:0fr/.test(CSS) && /\.ts-files\.open\{grid-template-rows:1fr\}/.test(CSS), '文件列表折叠样式（0fr → 1fr，与分组一致）');
   ok(/\.ts-file-name\{overflow:hidden;text-overflow:ellipsis;white-space:nowrap/.test(CSS) && CSS.indexOf('.ts-filesbtn[aria-expanded="true"] .ts-caret{transform:rotate(180deg)}') >= 0, '长名省略 + 折叠箭头旋转样式');
   ok(CSS.indexOf('@media (prefers-reduced-motion:reduce)') >= 0 && /\.ts-file\.active\{background:var\(--accent-soft\)/.test(CSS), '当前文件选中态样式 + reduced-motion 规则保留');
-  ok(IDX.indexOf('style.css?v=20261012-topic-file-tree') >= 0, 'index.html 资源版本 = 20261012-topic-file-tree（避免缓存）');
+  ok(IDX.indexOf('style.css?v=20261012-overview-fold') >= 0, 'index.html 资源版本 = 20261012-overview-fold（避免缓存）');
+}
+
+/* ══ 12. 第十轮（2026-10-12）：中央总览分组折叠——默认展开 / 收起不导航 / 两侧独立 / 返回保持 / 搜索 / 管理按钮 ══ */
+{
+  const path = require('path');
+  const { sandbox, reg, handlers } = loadApp();
+
+  /* A. 默认展开：三个组头（产品与交付 / 团队与文化 / 未分组）为真实 button，aria-expanded=true，子区无 inert */
+  const ov = reg.get('#app').innerHTML;
+  ok((ov.match(/class="sec-fold"/g) || []).length === 3, '三个组头均为真实折叠按钮（产品与交付 / 团队与文化 / 未分组）');
+  ok(ov.indexOf('id="ov-fold-btn-g_product" aria-expanded="true"') >= 0 && ov.indexOf('aria-controls="ov-body-g_product"') >= 0 && ov.indexOf('id="ov-fold-btn-g_team" aria-expanded="true"') >= 0 && ov.indexOf('id="ov-fold-btn-ungrouped" aria-expanded="true"') >= 0, '组头按钮 aria-expanded=true + aria-controls（三组一致）');
+  ok(ov.indexOf('id="ov-body-g_product" inert') < 0 && ov.indexOf('id="ov-body-g_team" inert') < 0 && ov.indexOf('id="ov-body-ungrouped" inert') < 0, '初始展开：三个子区均无 inert（保持原视觉）');
+  ok(ov.indexOf('class="sec-body open" id="ov-body-g_product"') >= 0 && ov.indexOf('class="sec-body open" id="ov-body-ungrouped"') >= 0, '子区默认带 open（0fr→1fr 动画展开态）');
+  ok(ov.indexOf('data-act="t-open" data-id="t_meeting"') >= 0 && ov.indexOf('data-act="t-open" data-id="t_quote"') >= 0, '主题名仍为进入正文的按钮（分组行与未分组行均保留）');
+
+  /* B. 收起不导航：只改折叠状态与 DOM，不动路由 / 返回栈 */
+  const rt0 = inCtx(sandbox, 'state.route.name');
+  const stk0 = inCtx(sandbox, 'state.backStack.length');
+  clickAct(handlers, 'ov-fold', { 'data-gid': 'g_team' });
+  ok(inCtx(sandbox, 'state.route.name') === rt0 && inCtx(sandbox, 'state.backStack.length') === stk0, '收起分组不导航、不压返回层');
+  ok(q(sandbox, reg, '#ov-fold-btn-g_team').getAttribute('aria-expanded') === 'false' && q(sandbox, reg, '#ov-body-g_team').getAttribute('inert') === '' && q(sandbox, reg, '#ov-body-g_team').classList.contains('open') === false, '收起同步：aria-expanded / inert / 动画类（团队与文化）');
+
+  /* C. 跨整页渲染保持（轻量 UI 状态）；未操作分组不受影响 */
+  inCtx(sandbox, 'render();');
+  const ovR = reg.get('#app').innerHTML;
+  ok(ovR.indexOf('id="ov-fold-btn-g_team" aria-expanded="false"') >= 0 && ovR.indexOf('id="ov-body-g_team" inert') >= 0, '收起状态跨整页渲染保持');
+  ok(ovR.indexOf('id="ov-fold-btn-g_product" aria-expanded="true"') >= 0 && ovR.indexOf('id="ov-fold-btn-ungrouped" aria-expanded="true"') >= 0, '未操作的分组保持展开');
+
+  /* D. 两侧折叠状态独立：左侧树开合不联动中央，中央开合不联动左侧 */
+  clickAct(handlers, 'nav-toggle-group', { 'data-gid': 'g_product' });
+  ok(inCtx(sandbox, 'state.navGroups.g_product') === true && inCtx(sandbox, 'state.ovFolds.g_product') === undefined, '左侧树展开不改变中央折叠状态');
+  inCtx(sandbox, 'render();');
+  const ovD = reg.get('#app').innerHTML;
+  ok(ovD.indexOf('data-gid="g_product" aria-expanded="true"') >= 0 && ovD.indexOf('id="ov-fold-btn-g_product" aria-expanded="true"') >= 0, '同屏：左侧展开 / 中央仍默认展开（互不联动）');
+  clickAct(handlers, 'ov-fold', { 'data-gid': 'g_product' });
+  ok(inCtx(sandbox, 'state.ovFolds.g_product') === false && inCtx(sandbox, 'state.navGroups.g_product') === true, '中央收起不影响左侧展开状态');
+  inCtx(sandbox, 'render();');
+  const ovD2 = reg.get('#app').innerHTML;
+  ok(ovD2.indexOf('data-gid="g_product" aria-expanded="true"') >= 0 && ovD2.indexOf('id="ov-fold-btn-g_product" aria-expanded="false"') >= 0, '同屏：左侧展开 / 中央收起（两套状态各自保持）');
+
+  /* E. 跨进入主题返回保持 */
+  clickAct(handlers, 't-open', { 'data-id': 't_meeting' });
+  ok(inCtx(sandbox, 'state.route.name') === 'topic', '进入主题正文');
+  clickAct(handlers, 'd-back');
+  ok(inCtx(sandbox, 'state.route.name') === 'topics', '返回总览');
+  const ovE = reg.get('#app').innerHTML;
+  ok(ovE.indexOf('id="ov-fold-btn-g_product" aria-expanded="false"') >= 0 && ovE.indexOf('id="ov-body-g_product" inert') >= 0, '返回后用户收起的分组仍收起');
+  ok(ovE.indexOf('id="ov-fold-btn-g_team" aria-expanded="false"') >= 0 && ovE.indexOf('id="ov-fold-btn-ungrouped" aria-expanded="true"') >= 0, '返回后其他分组状态不变（团队与文化收起 / 未分组展开）');
+
+  /* F. 搜索：命中组临时展开、不改用户状态；清空恢复原状态；命中结果不被折叠藏住 */
+  const el2 = { id: 'search-q', value: '智能', closest: () => null };
+  (handlers.input || []).forEach((fn) => fn({ target: el2 }));
+  ok(inCtx(sandbox, 'state.topicQ') === '智能', '搜索输入进入状态（真实 input 派发）');
+  const region = reg.get('#topics-region').innerHTML;
+  ok(region.indexOf('id="ov-fold-btn-g_product" aria-expanded="true"') >= 0 && region.indexOf('id="ov-body-g_product" inert') < 0 && region.indexOf('ov-fold-btn-g_team') < 0, '搜索时命中组临时展开展示、无命中分组不渲染（折叠不会藏住命中）');
+  ok(inCtx(sandbox, 'state.ovFolds.g_product') === false && inCtx(sandbox, 'state.ovFolds.g_team') === false, '搜索不改用户折叠状态');
+  ok(q(sandbox, reg, '#search-clear').hidden === false, '有关键词时清除按钮出现');
+  clickAct(handlers, 'search-clear');
+  const region2 = reg.get('#topics-region').innerHTML;
+  ok(inCtx(sandbox, 'state.topicQ') === '' && region2.indexOf('id="ov-fold-btn-g_product" aria-expanded="false"') >= 0 && region2.indexOf('id="ov-body-g_product" inert') >= 0, '清空搜索后恢复用户原折叠状态');
+  ok(q(sandbox, reg, '#search-clear').hidden === true, '清空后清除按钮隐藏');
+
+  /* G. 管理分组：改名 / 删除 / 移动仍可操作，且不嵌套在折叠按钮内 */
+  clickAct(handlers, 'manage-groups-toggle');
+  const mg = reg.get('#app').innerHTML;
+  ok((mg.match(/data-act="group-rename"/g) || []).length === 2 && (mg.match(/data-act="group-delete"/g) || []).length === 2, '管理模式：两个分组的改名 / 删除按钮仍在组头');
+  ok(mg.indexOf('data-act="group-new-open"') >= 0 && (mg.match(/data-act="topic-move"/g) || []).length >= 1, '管理模式：新建分组与主题移动控件保留');
+  const iBtn = mg.indexOf('id="ov-fold-btn-g_product"');
+  const iClose = mg.indexOf('</button>', iBtn);
+  ok(iBtn >= 0 && iClose > iBtn && mg.slice(iBtn, iClose).indexOf('group-rename') < 0 && mg.indexOf('data-act="group-rename"') > iClose, '改名 / 删除位于折叠按钮之外（不嵌套 button）');
+  clickAct(handlers, 'group-rename', { 'data-gid': 'g_product' });
+  ok(reg.get('#dlg').open === true, '改名对话框仍可打开（管理操作保持）');
+  dlgClick(handlers, 0);
+  ok(reg.get('#dlg').open === false, '取消改名：对话框关闭（未改动分组）');
+  clickAct(handlers, 'ov-fold', { 'data-gid': 'g_team' });
+  ok(q(sandbox, reg, '#ov-fold-btn-g_team').getAttribute('aria-expanded') === 'true', '管理模式中分组折叠仍可操作（展开回调）');
+
+  /* H. 样式与资源版本（本轮直接相关） */
+  const CSS = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+  const IDX = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  ok(/\.sec-body\{display:grid;grid-template-rows:0fr;transition:grid-template-rows \.2s ease\}/.test(CSS) && /\.sec-body\.open\{grid-template-rows:1fr\}/.test(CSS), '组区折叠样式（0fr → 1fr，与既有折叠一致）');
+  ok(/\.sec-fold\{display:flex;align-items:center;gap:7px/.test(CSS) && CSS.indexOf('.sec-fold[aria-expanded="true"] .sec-caret{transform:rotate(180deg)}') >= 0, '组头按钮与箭头旋转样式');
+  ok(CSS.indexOf('@media (prefers-reduced-motion:reduce)') >= 0 && CSS.indexOf('*{transition:none!important}') >= 0, 'reduced-motion 全局禁用保留（覆盖新开合动画）');
+  ok(IDX.indexOf('style.css?v=20261012-overview-fold') >= 0 && IDX.indexOf('app.js?v=20261012-overview-fold') >= 0, 'index.html 资源版本 = 20261012-overview-fold（避免缓存）');
 }
 
 console.log(fails ? ('\n冒烟检查未通过：' + fails + ' 项') : '\n冒烟检查全部通过');

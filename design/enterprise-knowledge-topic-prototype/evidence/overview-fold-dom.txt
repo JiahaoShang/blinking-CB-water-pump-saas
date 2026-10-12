@@ -1,0 +1,8 @@
+OK topicsHTML 默认（全展开） 折叠按钮=3 收起子区=0
+OK topicsHTML 折叠 g_product 折叠按钮=3 收起子区=1
+OK topicsHTML 管理模式 折叠按钮=3 收起子区=0
+OK topicsRegionHTML 默认 折叠按钮=3 收起子区=0
+OK topicsRegionHTML 搜索命中（临时展开） 折叠按钮=1 收起子区=0
+OK topicsRegionHTML 搜索无命中（空态） 折叠按钮=0 收起子区=0
+OK topicsRegionHTML 清空恢复（g_product 收） 折叠按钮=3 收起子区=1
+组头片段: <h2><button class="sec-fold" type="button" data-act="ov-fold" data-gid="g_product" id="ov-fold-btn-g_product" aria-expanded="true" aria-controls="ov-body-g_product"><svg class="ic"><use href="#i-folder"/></svg>产品与交付<span class="topic-count">2 个主题</span> | <h2><button class="sec-fold" type="button" data-act="ov-fold" data-gid="g_team" id="ov-fold-btn-g_team" aria-expanded="true" aria-controls="ov-body-g_team"><svg cla

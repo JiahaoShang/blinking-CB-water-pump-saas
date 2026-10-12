@@ -226,6 +226,7 @@ const state = {
   topicQ: '',
   navGroups: {},           // gid -> 展开态（主题浏览树的主题分组；默认收起）
   navTopicFiles: {},       // tid -> 展开态（主题下的关联文件列表；默认收起，跨阅读/返回保持）
+  ovFolds: {},             // gid -> 展开态（中央总览分组；默认展开；与 navGroups 独立，跨进入主题/返回保持）
   manageGroups: false,
   topicEdit: null,         // 主题编辑工作副本
   work: null, workDirty: false,     // 添加资料三步工作副本
@@ -450,6 +451,35 @@ function qaHTML() {
 }
 
 /* ---------- 全部主题（默认入口） ---------- */
+/* 中央总览分组折叠（2026-10-12 第十轮，用户批准）：组头标题内为真实按钮（Enter/Space 原生），控制下方主题行；
+   默认展开（保持原视觉）；折叠状态记在 state.ovFolds → 跨进入主题 / 返回保持；与左侧浏览树的 navGroups 互不联动；
+   搜索时命中组临时展开、不改用户状态，清空关键词后恢复用户原折叠状态；收起时子区 inert（不可聚焦、读屏跳过），
+   开合动画 200ms、reduced-motion 全局禁用；管理分组的改名 / 删除按钮在折叠按钮之外（不嵌套 button）。 */
+function ovGroupDisplayOpen(gid) { return state.topicQ.trim() ? true : (state.ovFolds[gid] === undefined ? true : !!state.ovFolds[gid]); }
+function groupMngHTML(gid) {
+  return (state.role === 'admin' && state.manageGroups)
+    ? '<span class="mng-controls"><button class="linkbtn" type="button" data-act="group-rename" data-gid="' + gid + '">改名</button><button class="linkbtn danger-link" type="button" data-act="group-delete" data-gid="' + gid + '">删除分组</button></span>'
+    : '';
+}
+function ovSecHTML(gid, name, icon, count, mng, rowsHTML) {
+  const open = ovGroupDisplayOpen(gid);
+  return '<section class="topic-sec"><div class="topic-sec-head"><h2><button class="sec-fold" type="button" data-act="ov-fold" data-gid="' + gid + '" id="ov-fold-btn-' + gid + '" aria-expanded="' + (open ? 'true' : 'false') + '" aria-controls="ov-body-' + gid + '">' +
+    (icon ? '<svg class="ic"><use href="#i-folder"/></svg>' : '') + esc(name) +
+    '<span class="topic-count">' + count + ' 个主题</span><svg class="ic sec-caret"><use href="#i-chev"/></svg></button></h2>' + (mng || '') +
+    '</div><div class="sec-body' + (open ? ' open' : '') + '" id="ov-body-' + gid + '"' + (open ? '' : ' inert') + '><div class="sec-body-inner"><div class="rows">' + rowsHTML + '</div></div></div></section>';
+}
+function toggleOverviewGroup(gid) {
+  state.ovFolds[gid] = !ovGroupDisplayOpen(gid);   /* 只改折叠状态：不导航、不压返回层；搜索中显示态仍保持展开 */
+  const open = ovGroupDisplayOpen(gid);
+  const btn = qs('#ov-fold-btn-' + gid);
+  const body = qs('#ov-body-' + gid);
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (body) {
+    if (body.classList) body.classList.toggle('open', open);
+    if (open) { if (body.removeAttribute) body.removeAttribute('inert'); }
+    else { if (body.setAttribute) body.setAttribute('inert', ''); }
+  }
+}
 function topicsHTML() {
   const q = state.topicQ.trim();
   const match = (t) => !q || t.name.indexOf(q) >= 0 || t.intro.some((p) => p.text.indexOf(q) >= 0);
@@ -458,15 +488,11 @@ function topicsHTML() {
     const list = topicsOfGroup(g.id);
     const shown = list.filter(match);
     if (q && !shown.length) return '';
-    return '<section class="topic-sec">' +
-      '<div class="topic-sec-head"><h2><svg class="ic"><use href="#i-folder"/></svg>' + esc(g.name) + '</h2>' +
-      '<span class="topic-count">' + list.length + ' 个主题</span>' +
-      (state.role === 'admin' && state.manageGroups ? '<span class="mng-controls"><button class="linkbtn" type="button" data-act="group-rename" data-gid="' + g.id + '">改名</button><button class="linkbtn danger-link" type="button" data-act="group-delete" data-gid="' + g.id + '">删除分组</button></span>' : '') +
-      '</div><div class="rows">' + rowsFor(list) + '</div></section>';
+    return ovSecHTML(g.id, g.name, true, list.length, groupMngHTML(g.id), rowsFor(list));
   }).join('');
   const un = ungroupedTopics();
   const unShown = un.filter(match);
-  const unHTML = (!q || unShown.length) && un.length ? '<section class="topic-sec"><div class="topic-sec-head"><h2>未分组</h2><span class="topic-count">' + un.length + ' 个主题</span></div><div class="rows">' + rowsFor(un) + '</div></section>' : '';
+  const unHTML = (!q || unShown.length) && un.length ? ovSecHTML('ungrouped', '未分组', false, un.length, '', rowsFor(un)) : '';
   const total = DB.topics.length;
   const shownTotal = DB.topics.filter(match).length;
   let h = '<div class="toolbar"><div><h1>全部主题</h1><p class="lead">按主题查看企业知识。先看正文与要点，需要时再查看关联的原始资料。</p></div>';
@@ -493,12 +519,10 @@ function topicsRegionHTML() {
     const list = topicsOfGroup(g.id);
     const shown = list.filter(match);
     if (q && !shown.length) return;
-    h += '<section class="topic-sec"><div class="topic-sec-head"><h2><svg class="ic"><use href="#i-folder"/></svg>' + esc(g.name) + '</h2><span class="topic-count">' + list.length + ' 个主题</span>' +
-      (state.role === 'admin' && state.manageGroups ? '<span class="mng-controls"><button class="linkbtn" type="button" data-act="group-rename" data-gid="' + g.id + '">改名</button><button class="linkbtn danger-link" type="button" data-act="group-delete" data-gid="' + g.id + '">删除分组</button></span>' : '') +
-      '</div><div class="rows">' + shown.map(topicRowHTML).join('') + '</div></section>';
+    h += ovSecHTML(g.id, g.name, true, list.length, groupMngHTML(g.id), shown.map(topicRowHTML).join(''));
   });
   const un = ungroupedTopics().filter(match);
-  if (un.length) h += '<section class="topic-sec"><div class="topic-sec-head"><h2>未分组</h2><span class="topic-count">' + un.length + ' 个主题</span></div><div class="rows">' + un.map(topicRowHTML).join('') + '</div></section>';
+  if (un.length) h += ovSecHTML('ungrouped', '未分组', false, un.length, '', un.map(topicRowHTML).join(''));
   if (q && !DB.topics.filter(match).length) {
     h += '<div class="empty"><h2>没有找到匹配的主题</h2><p>按搜索框里的「×」清空关键词，或换个词再试。</p><button class="button secondary" type="button" data-act="search-clear">清空搜索</button></div>';
   }
@@ -1570,6 +1594,7 @@ function onClick(e) {
       return;
     }
     case 'nav-toggle-group': toggleNavGroup(el.getAttribute('data-gid')); return;
+    case 'ov-fold': { toggleOverviewGroup(el.getAttribute('data-gid')); return; }   /* 中央总览分组开合：只折叠、不导航、不压返回层 */
     case 'nav-topic-files': { toggleNavTopicFiles(el.getAttribute('data-id')); return; }   /* 只开合主题下的文件列表：不导航、不压返回层 */
     case 'nav-file': {
       const id = el.getAttribute('data-id');

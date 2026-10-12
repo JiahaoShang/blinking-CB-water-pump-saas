@@ -266,6 +266,15 @@ details:is(.opt-box,.opt-details,.scenario-box,.more-wrap)>summary .ic{color:var
 .topic-sec-head h2{display:flex;align-items:center;gap:7px;margin:0;font-size:18px;font-weight:600}
 .topic-sec-head h2 .ic{color:var(--text-3)}
 .topic-count{font-size:12.5px;color:var(--text-3)}
+/* 总览分组折叠（2026-10-12 第十轮）：组头标题内为真实按钮（Enter/Space 原生触发），控制下方主题行；
+   默认展开；子区 0fr→1fr 动画、收起 inert（不可聚焦、读屏跳过）；reduced-motion 由全局规则禁用 */
+.sec-fold{display:flex;align-items:center;gap:7px;padding:0;font:inherit;color:inherit;text-align:left;border-radius:var(--r-sm)}
+.sec-fold:hover{color:var(--accent-hover)}
+.topic-sec-head .sec-fold .sec-caret{width:14px;height:14px;flex:none;transition:transform .2s ease;color:var(--text-4)}
+.sec-fold[aria-expanded="true"] .sec-caret{transform:rotate(180deg)}
+.sec-body{display:grid;grid-template-rows:0fr;transition:grid-template-rows .2s ease}
+.sec-body.open{grid-template-rows:1fr}
+.sec-body-inner{overflow:hidden;min-height:0}
 /* 全部主题列表层级（仅本页，作用域 .topic-sec）：主题名 16px/600 > 说明 13px/常规/较浅；
    主题行相对分组区块缩进约 20px（行左内边距 30px − 行负外边距 10px），
    说明（相关资料 / 更新日期）与主题名左侧对齐；不影响「全部资料」列表与主题详情排版 */
