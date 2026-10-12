@@ -558,6 +558,11 @@ class KnowledgeUI:
     # ── GET 路由 ─────────────────────────────────────────────────────────
 
     def knowledge_get(self, path: str, query: dict) -> bool:
+        # 第二批（任务3）新路由优先：全部主题 / 全部资料(view=materials) / 添加资料 / 主题与批次 /
+        # 由主题浏览树打开的资料详情 / 受认证下载 / 静态资源；旧路径（含旧列表视图）返回 False 继续走本类。
+        import enterprise_knowledge_phase2_ui as phase2_ui
+        if phase2_ui.get(self, path, query):
+            return True
         if path == "/admin/knowledge":
             self.knowledge_list_page(query)
             return True
@@ -930,6 +935,12 @@ class KnowledgeUI:
                     "<input type='hidden' name='confirmed' value=''><button>允许 AI 客服使用</button></form>")
         else:
             toggle = f"<span class='kb-reason'>AI 授权：{'已开启' if authorized else '未开启'}</span>"
+        # 灵活字段上下文入口（第二批）：旧资料/旧地址页面不必猜 URL 或依赖开发命令进入。
+        flexible_entry = ""
+        if self._kb_can_manage():
+            flexible_entry = (
+                f"<p class='kb-hint'><a href='/admin/knowledge/fields/{item_id}?back=/admin/knowledge/item/{item_id}'>灵活字段（可选模板）</a>："
+                "为这份知识补充业务字段、来源与核对；采用与升级只作用于草稿。</p>")
         return f"""<aside class='kb-side'><section>
 <h2>属性</h2><dl>
 <dt>分类</dt><dd>{esc(category) or '—'}</dd>
@@ -937,7 +948,7 @@ class KnowledgeUI:
 <dt>允许 AI 客服使用</dt><dd>{'已授权' if authorized else '未授权'}</dd>
 <dt>到期时间</dt><dd>{esc(expiry)}</dd>
 <dt>关联对象</dt>{relation}
-</dl></section><section><h2>操作</h2>{toggle}<p class='kb-hint'>授权与停用立即生效，不影响历史版本与同事阅读。</p></section></aside>"""
+</dl></section><section><h2>操作</h2>{toggle}{flexible_entry}<p class='kb-hint'>授权与停用立即生效，不影响历史版本与同事阅读。</p></section></aside>"""
 
     def _kb_versions_tab(self, item) -> str:
         from app import esc
@@ -1392,6 +1403,10 @@ class KnowledgeUI:
     def knowledge_post(self, path: str, form: dict) -> bool:
         if not re.match(r"^/admin/knowledge(/|$)", path):
             return False
+        # 第二批（任务3）写入：添加资料 / 批次核对与发布 / 主题与分组；服务层逐次检查权限与企业归属。
+        import enterprise_knowledge_phase2_ui as phase2_ui
+        if phase2_ui.post(self, path, form):
+            return True
         if not self._kb_can_manage():
             self._kb_forbidden()
             return True
@@ -1533,6 +1548,9 @@ class KnowledgeUI:
         date_value = str(form.get("expiry_date", "")).strip()
         time_value = str(form.get("expiry_time", "")).strip()
         if not date_value:
+            if time_value:
+                # 只填时间没有日期：明确报错，不静默当长期有效（与第二批界面同口径）。
+                raise ValueError("到期时间需要先填写日期：只填时间不能保存（留空表示长期有效）。")
             return None
         return date_value + ("T" + time_value if time_value else "")
 

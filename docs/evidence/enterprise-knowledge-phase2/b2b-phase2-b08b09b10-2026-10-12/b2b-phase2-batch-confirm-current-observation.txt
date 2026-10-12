@@ -1,0 +1,18 @@
+B2-B10 批量发布确认路径现状（真实浏览器实测，2026-10-12，隔离 18974 临时库；本轮未改动批量路径）:
+
+1) 批量发布表单标记（step=publish）:
+   {"formConfirm": false, "formField": null, "btnField": "confirm_ai", "btnValue": "1", "hiddenConfirm": "0"}
+   —— 确认属性在「发布」按钮上，而 static/knowledge-phase2.js 的对话框按表单属性
+   （form[data-kb2-confirm] 选择器 + form.getAttribute('data-kb2-confirm-field')）挂接。
+
+2) 点击批量「发布」按钮：未出现确认对话框（dialog open: False），为直接提交。
+
+3) 批次设为 对外 + 授权 AI 后点击发布（已核对段落）：
+   URL 落点 ?error=对外且授权 AI 客服使用的发布需要确认：请先确认再发布
+   → 后台正确拒绝未确认提交；来源保持未发布（批次 a26cb0b8858423eea59705ee / 源 b4b557a3e68a7cb5e22055d6）。
+
+4) 已发布批次重复点发布（internal）：直接提交 → “已发布：…跳过 1 件”（幂等）。
+
+结论（事实陈述，不下产品结论）：批量「发布」在现状下不经确认对话框；对外+AI 的批量发布
+经界面无法完成（后台确认要求不变）。独立验收曾表述“批量确认已工作”，与本实测不符；
+本轮按用户指示（exact blockers only / 不改批量）保留原状并登记，交独立复核决定口径。

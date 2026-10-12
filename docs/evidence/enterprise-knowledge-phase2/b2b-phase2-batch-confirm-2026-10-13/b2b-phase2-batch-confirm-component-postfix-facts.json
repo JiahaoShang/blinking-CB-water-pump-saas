@@ -1,0 +1,41 @@
+{
+  "scenarios": {
+    "confirmFlow": {
+      "confirmDialogBuilt": true,
+      "guardDialogBuilt": true,
+      "saveNoDialog": true,
+      "saveNotPrevented": true,
+      "saveConfirmFieldUntouched": true,
+      "publishPrevented": true,
+      "publishDialogOpened": true,
+      "publishDialogTitle": "发布批次",
+      "publishDialogMessage": "发布前会逐件校验正文核对情况；对外且授权 AI 需要确认。继续发布？",
+      "confirmFieldBeforeConfirm": "0",
+      "cancelClosed": true,
+      "cancelNoSubmit": true,
+      "cancelConfirmField": "0",
+      "cancelFocusRestored": true,
+      "escapeDialogReopened": true,
+      "escapeClosed": true,
+      "escapeNoSubmit": true,
+      "escapeConfirmField": "0",
+      "escapeFocusRestored": true,
+      "nullSubmitterPrevented": true,
+      "nullSubmitterDialogOpened": true,
+      "acceptClosed": true,
+      "acceptConfirmField": "1",
+      "acceptResubmitted": true,
+      "acceptSubmitter": "action=publish",
+      "replayNotPrevented": true,
+      "replayNoSecondDialog": true
+    },
+    "fallback": {
+      "confirmDialogBuilt": true,
+      "publishDialogOpened": true,
+      "fallbackSubmitted": true,
+      "fallbackVia": "submit",
+      "fallbackConfirmField": "1",
+      "fallbackInjectedAction": true
+    }
+  }
+}

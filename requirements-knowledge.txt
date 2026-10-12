@@ -1,0 +1,12 @@
+# 企业知识第二批 · 真实文字解析依赖（仅用于本批次；安装到隔离虚拟环境）
+# 目标环境：Python 3.9+（本项目开发机为 3.9.6）。
+# 版本与 Python 兼容性按官方 PyPI 元数据核对（2026-10-12）：
+#   pypdf 6.20.0      Requires-Python >=3.9
+#   python-docx 1.2.0 Requires-Python >=3.9
+# 安装方式（不改全局环境）：
+#   python3 -m venv .venv-knowledge
+#   .venv-knowledge/bin/python -m pip install -r requirements-knowledge.txt
+# 说明：解析组件仅由 knowledge_ingestion.py 惰性导入；未安装时相关格式明确失败，
+#       不阻塞第一批及其它模块的运行。
+pypdf==6.20.0
+python-docx==1.2.0

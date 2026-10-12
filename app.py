@@ -38,6 +38,7 @@ import ai_client
 from business_channels import BusinessChannels
 from business_channel_ui import BusinessChannelUI
 from enterprise_knowledge import EnterpriseKnowledge
+from enterprise_knowledge_phase2 import EnterpriseKnowledgePhase2, start_knowledge_phase2_worker
 from enterprise_knowledge_ui import KnowledgeUI
 from knowledge_delivery import knowledge_sync_status, refresh_indexing_status, start_knowledge_worker
 from ai_client import AIConfig, AIConfigurationError, AIService, AIUnavailableError
@@ -299,7 +300,7 @@ def parse_float(value: str | None) -> float | None:
         return None
 
 
-class Database(BusinessChannels, EnterpriseKnowledge):
+class Database(BusinessChannels, EnterpriseKnowledge, EnterpriseKnowledgePhase2):
     def __init__(self, path: str | os.PathLike[str], *, initialize: bool = True):
         self.path = str(path)
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -946,6 +947,8 @@ class Database(BusinessChannels, EnterpriseKnowledge):
 
         self.init_business_channels()
         self.init_enterprise_knowledge()
+        # 第二批侧车表（主题/关系/入库任务）；只建缺失表，不改动第一批结构。
+        self.init_knowledge_phase2()
         if 'audience' not in {r['name'] for r in self.conn.execute('PRAGMA table_info(product_fields)')}:
             self.conn.execute("ALTER TABLE product_fields ADD COLUMN audience TEXT NOT NULL DEFAULT 'external'")
         for name, definition in (('indexing_status', "TEXT NOT NULL DEFAULT 'pending'"), ('batch', "TEXT NOT NULL DEFAULT ''")):
@@ -4529,12 +4532,20 @@ def _knowledge_qa_model_evidence(evidence: list[dict]) -> list[dict]:
     for index, unit in enumerate(evidence[:KNOWLEDGE_QA_EVIDENCE_LIMIT], start=1):
         if unit["source"] == "knowledge":
             label = f"{unit['form_label']}《{unit['title']}》"
+            version_label = f"v{unit['version_number']}"
+        elif unit["source"] == "topic":
+            label = f"主题《{unit['topic_title']}》· 第 {unit.get('paragraph_index')} 段"
+            version_label = f"主题 v{unit.get('topic_version_number')}"
+        elif unit["source"] == "item_field":
+            label = f"资料《{unit['title']}》字段「{unit['label']}」"
+            version_label = f"v{unit['version_number']}"
         else:
             label = f"产品字段 {unit['model']} · {unit['label']}"
+            version_label = f"v{unit['version_number']}"
         items.append({
             "key": f"e{index}",
             "label": label,
-            "version_label": f"v{unit['version_number']}",
+            "version_label": version_label,
             "text": str(unit.get("text") or "")[:800],
             "evidence": unit,
         })
@@ -4555,6 +4566,35 @@ def build_knowledge_evidence_answer(evidence: dict) -> tuple[str, dict]:
             "quote": quote,
             "filename": evidence["title"] or "企业知识",
             "location": f"知识条目 · v{evidence['version_number']}（{evidence['form_label']}）",
+            "published_at": evidence.get("published_at") or "",
+        }
+    elif evidence["source"] == "topic":
+        citation = {
+            "kind": "topic",
+            "title": evidence["topic_title"],
+            "version": f"主题 v{evidence.get('topic_version_number')}",
+            "version_id": evidence.get("topic_version_id"),
+            "topic_id": evidence.get("topic_id"),
+            "paragraph_id": evidence.get("paragraph_id"),
+            "quote": quote,
+            "filename": evidence["topic_title"],
+            "location": f"主题 · v{evidence.get('topic_version_number')} · 第 {evidence.get('paragraph_index')} 段",
+            "published_at": evidence.get("published_at") or "",
+        }
+    elif evidence["source"] == "item_field":
+        citation = {
+            "kind": "item_field",
+            "title": evidence["title"],
+            "form_label": evidence["form_label"],
+            "version": f"v{evidence['version_number']}",
+            "version_id": evidence["version_id"],
+            "item_id": evidence["item_id"],
+            "field_key": evidence["field_key"],
+            "label": evidence["label"],
+            "quote": quote,
+            "filename": evidence["title"] or "企业知识",
+            "location": f"字段「{evidence['label']}」 · v{evidence['version_number']}",
+            "field_source": evidence.get("field_source") or "",
             "published_at": evidence.get("published_at") or "",
         }
     else:
@@ -4653,8 +4693,11 @@ def answer_question_prefer_dify(
     )
     if status == "grounded" or ai is None or ai.mode != ai_client.MODE_DEEPSEEK:
         return status, answer_text, answer_product_id, version_id, citations, reason, "local"
-    # 没有文章/FAQ 类候选时保持第一段结果：不做多余的模型调用（既有字段问答行为不变）。
-    if not db.list_ai_answerable_knowledge(tenant_id):
+    # 候选判断（B2-B12）：合格的主题 / 知识 / 字段候选任一存在才进入知识问答；
+    # 均无时保持第一段结果（不做多余模型调用，既有产品问答语义不变）。
+    if not (db.list_ai_answerable_knowledge(tenant_id)
+            or db.kb2_list_topic_qa_evidence(tenant_id)
+            or db.kb2_list_item_field_qa_evidence(tenant_id)):
         return status, answer_text, answer_product_id, version_id, citations, reason, "local"
     outcome = answer_knowledge_question(db, ai, tenant_id, conversation_id, question)
     if outcome["status"] == "grounded":
@@ -5732,7 +5775,7 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             ("tasks", "/admin/tasks", "tool", "人工任务"),
         )),
         ("会话收件箱", tuple(inbox_items or ())),
-        ("产品经营", (("knowledge", "/admin/knowledge", "book", "全部知识"),)),
+        ("产品经营", (("knowledge", "/admin/knowledge", "book", "全部主题"),)),
         ("创意中心", (("creative", "/admin/creative", "palette", "产品展示页"),)),
         ("经营分析", (("analytics", "/admin/analytics", "chart", "分析报表"),)),
         ("团队与接入", (
@@ -5773,10 +5816,14 @@ def console_layout(title: str, body: str, active: str, *, lang: str = "zh", path
             if is_knowledge:
                 chev = "<svg class='ic' viewBox='0 0 24 24' aria-hidden='true'><path d='m6 9 6 6 6-6'/></svg>"
                 # 清单3：直接进入子视图默认展开；主按钮进入并展开；箭头独立只切换；活动态只在对应项。
-                sub_active = any(sub_key == active for sub_key, _sub_url, _sub_icon, _sub_label in KNOWLEDGE_NAV_SUBS)
+                # 「添加资料」按权限过滤（管理员或 products 授权；后端仍逐次强制）。
+                sub_items = tuple(
+                    item for item in KNOWLEDGE_NAV_SUBS
+                    if item[0] != "knowledge_add" or nav_keys is None or "knowledge_add" in nav_keys)
+                sub_active = any(sub_key == active for sub_key, _sub_url, _sub_icon, _sub_label in sub_items)
                 subs = "".join(
                     f"<a class='side-link sub{' active' if sub_key == active else ''}' href='{sub_url}'>{svg_icon(sub_icon)}{sub_label}</a>"
-                    for sub_key, sub_url, sub_icon, sub_label in KNOWLEDGE_NAV_SUBS
+                    for sub_key, sub_url, sub_icon, sub_label in sub_items
                 )
                 subs_collapsed_attr = "" if sub_active else " inert aria-hidden='true'"
                 link_parts.append(
@@ -5865,11 +5912,13 @@ DEMO_TOOL_PATHS = {"/admin/products/seed", "/admin/products/seed-lowara", "/admi
 GRANTABLE_MODULES = (("products", "产品管理"), ("tasks", "人工任务"), ("rfqs", "RFQ 询价"), ("sales", "销售工作台"), ("sites", "网站 API 接入"), ("creative", "创意中心"), ("inbox", "会话收件箱"), ("channels", "渠道账号管理"))
 GRANTABLE_MODULE_KEYS = tuple(key for key, _label in GRANTABLE_MODULES)
 MODULE_LABELS = dict(GRANTABLE_MODULES)
-# 企业知识统一入口的折叠子项（第一批任务3：全部知识 / 产品与服务 / 文章与 FAQ / 文件资料）。
+# 企业知识统一入口的折叠子项（v0.3 §5：知识四项 = 全部主题（主链接）/ 全部资料 / 添加资料 / 问答测试；
+# 「添加资料」只对管理员或获 products 授权的成员显示，真实权限由后端强制。
+# 「知识模板」是编辑权限下的管理入口（v0.2 §7），按独立验收要求不进冻结的四入口侧栏，从添加资料页 /
+# 资料字段区等上下文位置进入（2026-10-13）。
 KNOWLEDGE_NAV_SUBS = (
-    ("knowledge_products", "/admin/knowledge?view=product_service", "box", "产品与服务"),
-    ("knowledge_articles", "/admin/knowledge?view=article_faq", "book", "文章与 FAQ"),
-    ("knowledge_files", "/admin/knowledge?view=files", "file", "文件资料"),
+    ("knowledge_materials", "/admin/knowledge?view=materials", "file", "全部资料"),
+    ("knowledge_add", "/admin/knowledge/add", "tool", "添加资料"),
     ("knowledge_qa", "/admin/knowledge/qa", "chat", "问答测试"),
 )
 # 旧角色名兼容（旧库迁移与既有测试）：等价于"员工 + 对应模块授权"，能力与迁移前一致。
@@ -8206,6 +8255,8 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
     def console_nav_keys(self) -> set[str]:
         """侧栏可见集：概览人人可见；管理员另见成员管理/渠道接入等；员工按已授权模块。"""
         keys = {"admin", "knowledge"}
+        if self.db.knowledge_can_manage(self.tenant_id, self.user_id):
+            keys.add("knowledge_add")  # 「添加资料」子项：管理员或获 products 授权的成员
         if self.user_role == "admin":
             keys.add("users")
             keys.add("settings")
@@ -13368,9 +13419,12 @@ def make_server(
     server = ThreadingHTTPServer((host, port), AppHandler)
     if knowledge_worker:
         stop = start_knowledge_worker(db_path)
+        # 第二批统一入库的可恢复处理线程（从数据库继续待处理来源；不含外部消息/模型）。
+        stop_ingest = start_knowledge_phase2_worker(db_path)
         close = server.server_close
         def close_with_worker():
             stop.set()
+            stop_ingest.set()
             close()
         server.server_close = close_with_worker
     return server

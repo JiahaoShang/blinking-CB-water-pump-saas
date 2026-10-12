@@ -1,0 +1,26 @@
+批量发布确认路径 · 真实浏览器观测（Chrome headless=new + CDP；临时库 18990 + 临时原件目录；2026-10-13）
+
+驱动脚本：b2b-phase2-batch-confirm-cdp-drive.mjs（本目录）；服务脚本：b2b-phase2-batch-confirm-serve-temp.py（本目录）。
+机器结果：b2b-phase2-batch-confirm-{probe,prefix,postfix,topic}-browser.json；截图见 gui-*.png。
+
+1) 浏览器原生提交语义（probe，支撑根因与修复机制）：
+   - form.submit()（程序化）：POST 体 email=…&password=…&confirm_ai=0 —— 不带提交按钮字段（action 丢失）。
+   - form.requestSubmit(按钮)：POST 体携带 action=publish —— 保留触发按钮字段（修复采用）。
+   - Enter 隐式提交：携带默认按钮字段（本探针表单仅一个提交按钮）。
+
+2) 修复前（prefix；与独立观察文件同口径）：
+   - 发布设置表单属性：{formConfirm:false, formField:null, btnConfirm:true, btnField:'confirm_ai', btnValue:'1', saveSkip:false, hiddenConfirm:'0'}。
+   - 实点「发布」：无对话框（open:false），直接提交 POST action=publish&confirm_ai=0 →
+     URL 落点 ?error=对外且授权 AI 客服使用的发布需要确认：请先确认再发布；来源保持未发布（DB：extracted）。
+
+3) 修复后（postfix；同一个真实浏览器全流程）：
+   - 「保存设置」：无对话框（MutationObserver 未捕获），直接提交 action=save&confirm_ai=0，落点 notice=已保存发布设置。
+   - 「发布」：对话框打开（gui-batch-confirm-dialog.png），URL 保持 ?step=publish 不变。
+   - 真实 Escape：对话框关闭、无提交、URL 不变、hidden confirm_ai 保持 '0'。
+   - 「发布」→「取消」：对话框关闭、无提交、URL 不变。
+   - 「发布」→「继续」（gui-batch-confirm-before-continue.png）：POST **action=publish&confirm_ai=1** →
+     落点 notice=已发布：正文发布 1 件、归档 0 件、跳过 0 件。；页面显示已发布（gui-batch-published.png）。
+   - 内部批次「发布」→「继续」：POST action=publish&confirm_ai=1 → 已发布（gui-batch-internal-published.png）。
+   - DB 复核：来源/批次/条目/版本均 published；审计各恰好 1 条 kb2_batch batch_published（取消/Escape 未产生发布）。
+   - 组件回归（与 B2-B10 同组件）：主题页「发布主题」→ 对话框（gui-topic-confirm-dialog.png）→「继续」→
+     POST next=…&confirm_ai=1 → v1 发布、页面「已发布」（gui-topic-published.png）、审计 topic_published version=1;usage=external;ai_authorized=1。

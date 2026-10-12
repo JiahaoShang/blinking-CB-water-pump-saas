@@ -1,0 +1,34 @@
+{
+  "scenario": "probe",
+  "steps": [
+    {
+      "programmaticSubmit(postData)": "email=%E6%8E%A2%E9%92%88%40example.invalid&password=x&confirm_ai=0"
+    },
+    {
+      "form.submit() 是否携带 action 字段": false
+    },
+    {
+      "form.requestSubmit(button) 是否携带 action 字段": true
+    },
+    {
+      "requestSubmit action 值": "publish"
+    },
+    {
+      "Enter 隐式提交是否携带 action 字段": true
+    },
+    {
+      "Enter 隐式提交 action 值": "publish"
+    }
+  ],
+  "posts": [
+    {
+      "url": "http://127.0.0.1:18990/login",
+      "postData": "email=%E6%8E%A2%E9%92%88%40example.invalid&password=x&confirm_ai=0"
+    },
+    {
+      "url": "http://127.0.0.1:18990/login",
+      "postData": "email=%E6%8E%A2%E9%92%88%40example.invalid&password=x&action=publish&confirm_ai=0"
+    }
+  ],
+  "dialogs": {}
+}

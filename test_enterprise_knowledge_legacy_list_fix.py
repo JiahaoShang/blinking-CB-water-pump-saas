@@ -128,7 +128,7 @@ class KnowledgeLegacyListFixTests(unittest.TestCase):
 
     def test_all_view_lists_original_product_and_article(self):
         """「全部知识」：原产品与新文章同时出现（此前该请求因 KeyError category_value 直接 500）。"""
-        page = self.get_page("/admin/knowledge")
+        page = self.get_page("/admin/knowledge?view=all")
         self.assertIn(self.product_row_title, page)
         self.assertIn(ARTICLE_TITLE, page)
         # 分类筛选的两个候选值都能渲染（categories 推导即此前崩溃点）。
@@ -143,24 +143,24 @@ class KnowledgeLegacyListFixTests(unittest.TestCase):
         self.assertNotIn(ARTICLE_TITLE, page)
 
     def test_category_filter_returns_correct_rows(self):
-        product_page = self.get_page("/admin/knowledge?category=" + quote(PRODUCT_CATEGORY))
+        product_page = self.get_page("/admin/knowledge?view=all&category=" + quote(PRODUCT_CATEGORY))
         self.assertIn(self.product_row_title, product_page)
         self.assertNotIn(ARTICLE_TITLE, product_page)
-        article_page = self.get_page("/admin/knowledge?category=" + quote(ARTICLE_CATEGORY))
+        article_page = self.get_page("/admin/knowledge?view=all&category=" + quote(ARTICLE_CATEGORY))
         self.assertIn(ARTICLE_TITLE, article_page)
         self.assertNotIn(self.product_row_title, article_page)
 
     def test_search_filter_returns_correct_rows(self):
-        product_page = self.get_page("/admin/knowledge?q=" + quote(PRODUCT_MODEL))
+        product_page = self.get_page("/admin/knowledge?view=all&q=" + quote(PRODUCT_MODEL))
         self.assertIn(self.product_row_title, product_page)
         self.assertNotIn(ARTICLE_TITLE, product_page)
-        article_page = self.get_page("/admin/knowledge?q=" + quote("保修"))
+        article_page = self.get_page("/admin/knowledge?view=all&q=" + quote("保修"))
         self.assertIn(ARTICLE_TITLE, article_page)
         self.assertNotIn(self.product_row_title, article_page)
 
     def test_product_detail_reachable_and_ids_snapshots_preserved(self):
         """列表中的产品链接可直达详情页；原产品 ID 与已发布版本快照保持（未迁移、未重建）。"""
-        page = self.get_page("/admin/knowledge")
+        page = self.get_page("/admin/knowledge?view=all")
         match = re.search(r"/admin/knowledge/product/([a-f0-9]{8,64})", page)
         self.assertIsNotNone(match, "列表页应包含原产品详情链接")
         product_id = match.group(1)

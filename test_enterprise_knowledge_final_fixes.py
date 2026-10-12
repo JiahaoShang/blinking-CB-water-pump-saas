@@ -136,9 +136,14 @@ class NavStructureTests(HttpBase):
     """清单 8：主入口「全部知识」；去重复入口；正文不再重复四视图；标题口语化。"""
 
     def test_main_nav_item_is_all_knowledge_without_duplicate_product_entry(self):
+        # 2026-10-12 知情四项导航（v0.3 §5）：主入口「全部主题」+ 子项 全部资料 / 添加资料 / 问答测试。
         _, _, page = self.get("/admin/knowledge")
-        # 侧栏主入口（折叠导航主链接）文本为「全部知识」，与最终原型一致。
-        self.assertRegex(page, r"data-kb-nav-main[^>]*>(?:.*?)全部知识</a>")
+        self.assertRegex(page, r"data-kb-nav-main[^>]*>(?:.*?)全部主题</a>")
+        for label, href in (("全部资料", "/admin/knowledge?view=materials"),
+                            ("添加资料", "/admin/knowledge/add"),
+                            ("问答测试", "/admin/knowledge/qa")):
+            self.assertIn(f"<a class='side-link sub' href='{href}'", page)
+            self.assertIn(label, page)
         # 不再保留重复的独立「产品管理」主入口。
         self.assertNotIn("<a class='side-link' href='/admin/products'>", page)
         self.assertNotIn("side-count' data-nav-count='products'", page)
@@ -154,17 +159,20 @@ class NavStructureTests(HttpBase):
         self.assertIn(f"href='/admin/products/{product_id}'", page, "产品模块编辑/复核入口在知识产品页上下文可达")
 
     def test_body_does_not_repeat_view_navigation(self):
+        # 知识四项只在侧栏出现；正文（中央工作区）不重复一份入口导航。
         _, _, page = self.get("/admin/knowledge")
-        for view in ("product_service", "article_faq", "files"):
-            self.assertEqual(page.count(f"href='/admin/knowledge?view={view}'"), 1,
-                             f"视图链接 {view} 只应在侧栏出现一次（正文不得重复四个导航）")
-        self.assertEqual(page.count("href='/admin/knowledge/qa'"), 1)
+        self.assertEqual(page.count("id='nav-knowledge-subs'"), 1, "入口导航只在侧栏出现一次")
+        self.assertEqual(page.count("href='/admin/knowledge?view=materials'"), 1, "全部资料只在侧栏出现")
+        self.assertEqual(page.count("href='/admin/knowledge/qa'"), 1, "问答测试只在侧栏出现")
 
     def test_view_headings_use_plain_prototype_language(self):
+        # 默认入口（全部主题）标题口语化；旧列表视图（?view=）保留原标题与旧地址。
         _, _, page = self.get("/admin/knowledge")
-        self.assertIn("<h1>全部知识</h1>", page)
-        self.assertIn("企业知识统一入口：文章、FAQ、产品与服务、文件资料都在这里管理", page)
+        self.assertIn("<h1>全部主题</h1>", page)
+        self.assertIn("按主题查看企业知识", page)
         self.assertNotIn("已发布 + 对外 + 已授权 + 未过期 + 当前版本准备完成", page, "标题描述不得再用长技术合取")
+        _, _, page = self.get("/admin/knowledge?view=all")
+        self.assertIn("<h1>全部知识</h1>", page)
         _, _, page = self.get("/admin/knowledge?view=article_faq")
         self.assertIn("<h1>文章与 FAQ</h1>", page)
         _, _, page = self.get("/admin/knowledge?view=product_service")
@@ -219,8 +227,8 @@ class ContextualCreateTests(HttpBase):
         self.assertIn("/admin/knowledge/new?form=service", page)
         self.assertNotIn("/admin/knowledge/new?form=article", page)
         self.assertNotIn("/admin/knowledge/new?form=faq", page)
-        # 「全部知识」保留通用菜单（含上传文件）。
-        _, _, page = self.get("/admin/knowledge")
+        # 旧「全部知识」列表（?view=all）保留通用菜单（含上传文件）。
+        _, _, page = self.get("/admin/knowledge?view=all")
         for token in ("/admin/knowledge/new?form=article", "/admin/knowledge/new?form=faq",
                       "/admin/knowledge/new?form=product", "/admin/knowledge/import"):
             self.assertIn(token, page)

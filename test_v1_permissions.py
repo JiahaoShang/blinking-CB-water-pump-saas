@@ -103,7 +103,7 @@ class ModulePermissionTests(unittest.TestCase):
         status, _, page = form_request(self.server, "GET", "/admin", cookie=self.product_cookie)
         self.assertEqual(status, 200)
         self.assertNotIn("data-nav-count='products'", page)
-        self.assertIn("全部知识", page, "统一知识入口对所有成员可见")
+        self.assertIn("全部主题", page, "统一知识入口对所有成员可见（2026-10-12 知识四项导航）")
         self.assertNotIn("data-nav-count='tasks'", page)
         self.assertNotIn("data-nav-count='sales'", page)
         self.assertEqual(form_request(self.server, "GET", "/admin/products", cookie=self.product_cookie)[0], 200)

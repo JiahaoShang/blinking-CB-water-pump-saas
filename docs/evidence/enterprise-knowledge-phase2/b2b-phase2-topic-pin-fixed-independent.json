@@ -1,0 +1,70 @@
+[
+  {
+    "case": "missing_version_id",
+    "outcome": "rejected",
+    "error": "段落来源缺少确切版本（资料摘录必须钉住版本）"
+  },
+  {
+    "case": "missing_source_id",
+    "outcome": "rejected",
+    "error": "段落来源缺少登记原件（资料摘录必须钉住原件）"
+  },
+  {
+    "case": "missing_location",
+    "outcome": "rejected",
+    "error": "段落来源缺少实际位置（资料摘录必须记录位置）"
+  },
+  {
+    "case": "item_only",
+    "outcome": "rejected",
+    "error": "段落来源缺少确切版本（资料摘录必须钉住版本）"
+  },
+  {
+    "case": "other_item_version_id",
+    "outcome": "rejected",
+    "error": "段落来源版本不属于该资料"
+  },
+  {
+    "case": "other_item_source_id",
+    "outcome": "rejected",
+    "error": "段落来源原件不属于该资料"
+  },
+  {
+    "case": "foreign_tenant_version_id",
+    "outcome": "rejected",
+    "error": "段落来源版本不属于该资料"
+  },
+  {
+    "case": "foreign_tenant_source_id",
+    "outcome": "rejected",
+    "error": "段落来源原件不属于该资料"
+  },
+  {
+    "case": "fake_txt_page_999",
+    "outcome": "rejected",
+    "error": "段落来源位置不在该原件的识别结果中（不能使用不存在的页码/行号/段落）"
+  },
+  {
+    "case": "same_item_wrong_version_source_pair",
+    "outcome": "rejected",
+    "error": "段落来源原件与该版本不匹配（同一资料下也不允许错配的来源/版本）：请选择该版本实际关联的原件"
+  },
+  {
+    "case": "edit_published_paragraph_keep_checked",
+    "outcome": "rejected: 还有 1 段未核对（第 1 段）：逐段核对后才能发布",
+    "text": "保修240个月",
+    "checked": false,
+    "origin": "edited",
+    "source": {
+      "kind": "knowledge",
+      "item_id": "39cbc1cc1199a570218a11cd",
+      "version_id": "4f2527b9f97057dc839d54df",
+      "source_id": "f3004f88920cad2c97380326",
+      "location": {
+        "kind": "line",
+        "line": 1
+      },
+      "material_title": "warranty"
+    }
+  }
+]

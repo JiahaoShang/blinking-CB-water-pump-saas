@@ -111,7 +111,7 @@ class DesignAlignFixesTests(unittest.TestCase):
 
     def test_a01_mobile_row_layout_guard_and_structure_preserved(self):
         item_id = self.make_item("A01 布局回归条目")
-        page = self.get200("/admin/knowledge")
+        page = self.get200("/admin/knowledge?view=all")
         # 旧的挤压写法（flex-wrap + 徽标 order 顶置）必须消失
         self.assertNotIn("order:-1", page, "不再用 order 顶置徽标挤压标题行")
         # 移动端两行网格：徽标行（类型/状态/箭头）+ 标题/说明整行
@@ -138,7 +138,7 @@ class DesignAlignFixesTests(unittest.TestCase):
 
     def test_a02_product_unpublished_shows_draft_label_in_row_and_detail(self):
         product_id = self.db.create_product(TENANT, "ALIGN-390", "对齐测试泵", "冷却水循环")
-        page = self.get200("/admin/knowledge")
+        page = self.get200("/admin/knowledge?view=all")
         match = re.search(
             r"<a class='kb-row' href='/admin/knowledge/product/%s'>.*?</a>" % re.escape(product_id), page, re.S)
         self.assertIsNotNone(match, "原产品应出现在知识列表")
@@ -149,7 +149,7 @@ class DesignAlignFixesTests(unittest.TestCase):
         detail = self.get200(f"/admin/knowledge/product/{product_id}")
         self.assertIn("<span class='kb-pill draft'>草稿</span>", detail, "详情页同一枚状态标签：草稿")
         # 未动 state.status / ID：产品仍以草稿状态出现在筛选中（状态筛选草稿能命中）
-        filtered = self.get200("/admin/knowledge?status=draft")
+        filtered = self.get200("/admin/knowledge?view=all&status=draft")
         self.assertIn(f"/admin/knowledge/product/{product_id}", filtered)
 
     # ── 3. 详情页确认范围与 R16 对齐 ─────────────────────────────────────

@@ -126,7 +126,7 @@ class KnowledgeListSnapshotAndStopTests(unittest.TestCase):
         v1_title, v2_title = "A1 列表快照 v1", "A1 列表快照 v2（草稿）"
         item_id = self.make_published_article(v1_title, V1_BODY, V1_CATEGORY)
         self.save_draft(item_id, v2_title, V2_BODY, V2_CATEGORY)
-        page = self.get200("/admin/knowledge")
+        page = self.get200("/admin/knowledge?view=all")
         self.assertIn(v1_title, page, "列表标题取已发布快照")
         self.assertNotIn(v2_title, page, "草稿标题不得顶替线上展示")
         self.assertIn("分类：" + V1_CATEGORY, page, "列表分类取已发布快照")
@@ -139,13 +139,13 @@ class KnowledgeListSnapshotAndStopTests(unittest.TestCase):
         v1_title, v2_title = "A2 搜索口径 v1", "A2 搜索口径 v2（草稿）"
         item_id = self.make_published_article(v1_title, V1_BODY, V1_CATEGORY)
         self.save_draft(item_id, v2_title, V2_BODY, V2_CATEGORY)
-        v1_page = self.get200("/admin/knowledge?q=" + quote("保修 24 个月"))
+        v1_page = self.get200("/admin/knowledge?view=all&q=" + quote("保修 24 个月"))
         self.assertIn(v1_title, v1_page, "搜索命中已发布正文")
-        v2_page = self.get200("/admin/knowledge?q=" + quote("36 个月"))
+        v2_page = self.get200("/admin/knowledge?view=all&q=" + quote("36 个月"))
         self.assertNotIn(v1_title, v2_page, "草稿独有正文不得被搜索命中")
-        cat_page = self.get200("/admin/knowledge?category=" + quote(V1_CATEGORY))
+        cat_page = self.get200("/admin/knowledge?view=all&category=" + quote(V1_CATEGORY))
         self.assertIn(v1_title, cat_page)
-        draft_cat_page = self.get200("/admin/knowledge?category=" + quote(V2_CATEGORY))
+        draft_cat_page = self.get200("/admin/knowledge?view=all&category=" + quote(V2_CATEGORY))
         self.assertNotIn(v1_title, draft_cat_page, "草稿分类不得成为筛选值")
 
     def test_a03_detail_shows_published_and_editor_shows_draft(self):
@@ -179,7 +179,7 @@ class KnowledgeListSnapshotAndStopTests(unittest.TestCase):
         self.assertNotIn("已发布；处理状态按真实本地内容准备结果显示。", detail)
         self.assertIn(v2_title, detail)
         self.assertIn("当前版本 v2", detail)
-        lst = self.get200("/admin/knowledge")
+        lst = self.get200("/admin/knowledge?view=all")
         self.assertIn(v2_title, lst, "发布后列表切到 v2")
         self.assertNotIn(v1_title, lst)
 
@@ -227,7 +227,7 @@ class KnowledgeListSnapshotAndStopTests(unittest.TestCase):
         self.assertIn(f"/admin/knowledge/item/{item_id}/enable", detail)
         versions = self.get200(f"/admin/knowledge/item/{item_id}?tab=versions")
         self.assertIn("草稿（未发布）", versions, "草稿仍出现在版本历史")
-        lst = self.get200("/admin/knowledge")
+        lst = self.get200("/admin/knowledge?view=all")
         self.assertIn("已停用", lst)
 
         # 重新启用：恢复原已发布状态、沿用原线上版本，草稿保持。

@@ -249,7 +249,8 @@ class EditedTitlePersistenceTests(HttpBase):
         self.assertEqual(json.loads(published["content_json"])["title"], "发布后的标题")
         _, _, page = self.get(f"/admin/knowledge/item/{item['id']}")
         self.assertIn("发布后的标题", page)
-        _, _, page = self.get("/admin/knowledge")
+        # 2026-10-12 IA：旧「全部知识」列表保留在 ?view=all。
+        _, _, page = self.get("/admin/knowledge?view=all")
         self.assertIn("发布后的标题", page)
 
 
@@ -321,7 +322,7 @@ class UserFacingLanguageTests(HttpBase):
         self.assertIn("草稿已保存", page)
         self.assertIn("演示管理员", page, "负责人显示企业内可识别的人名或邮箱")
         self.assertNotIn(item["owner_user_id"], page, "不得显示内部用户 ID")
-        _, _, page = self.get("/admin/knowledge")
+        _, _, page = self.get("/admin/knowledge?view=all")
         self.assertIn("负责人：演示管理员", page)
 
     def test_no_developer_jargon_in_first_batch_ui(self):

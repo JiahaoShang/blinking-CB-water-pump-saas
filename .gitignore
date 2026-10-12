@@ -5,3 +5,6 @@ data/
 .env
 
 *.model-secrets/
+
+# 企业知识第二批隔离运行环境（requirements-knowledge.txt；不入库）
+.venv-knowledge/

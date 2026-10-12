@@ -600,7 +600,18 @@ class EnterpriseKnowledge:
         if not draft:
             raise ValueError("没有待发布的草稿")
         snapshot = json.loads(draft["content_json"] or "{}")
+        # 任务5 / B2-B09 钩子（第二批）：入库资料的核对 / 排除 / 来源身份 / 正文一致性在共享发布
+        # 服务强制校验（旧入口与书签路径同样不能绕过）；第一批旧资料（无第二批来源）保持兼容。
+        publish_gate = getattr(self, "_kb2_validate_publish_draft", None)
+        if publish_gate is not None:
+            publish_gate(tenant_id, item_id, draft)
         self._validate_publish_content(item["form"], snapshot)
+        # 任务4 钩子（第二批模板字段）：采用模板的资料在发布前校验必填字段；
+        # 返回带字段快照的完整内容，随发布一起提交；未采用模板时为 None（第一批行为不变）。
+        fields_hook = getattr(self, "_kb2_prepare_publish_fields_content", None)
+        published_snapshot = None
+        if fields_hook is not None:
+            published_snapshot = fields_hook(tenant_id, item_id, snapshot)
         if draft["usage"] == "external" and draft["ai_authorized"] and not confirm_ai:
             raise ValueError("对外且授权 AI 客服使用的知识发布需要确认")
         previous = self.get_published_knowledge_version(tenant_id, item_id)
@@ -608,6 +619,11 @@ class EnterpriseKnowledge:
             # 发布新版后旧版本不得继续用于回答：旧快照仅作历史保留。
             self.conn.execute("UPDATE knowledge_versions SET status='superseded' WHERE id=?", (previous["id"],))
         timestamp = _now()
+        if published_snapshot is not None:
+            self.conn.execute(
+                "UPDATE knowledge_versions SET content_json=? WHERE tenant_id=? AND id=?",
+                (self._dump_content(published_snapshot), tenant_id, draft["id"]),
+            )
         self.conn.execute(
             "UPDATE knowledge_versions SET status='published', published_at=? WHERE id=?", (timestamp, draft["id"])
         )
@@ -699,6 +715,11 @@ class EnterpriseKnowledge:
             (version_id, timestamp, tenant_id, item_id),
         )
         self._audit(tenant_id, "knowledge", item_id, "restored", editor["email"], f"from_version={source['version']};new_version={next_version}")
+        # 第二批钩子（B2-B11）：恢复即用恢复点字段快照初始化工作集（字段行）；
+        # 之后发生的明确编辑进入新草稿的发布快照（发布按当前工作集冻结）。
+        init_fields = getattr(self, "_kb2_init_fields_from_restore", None)
+        if init_fields is not None:
+            init_fields(tenant_id, item_id, version_id)
         self.conn.commit()
         return version_id
 
@@ -1261,6 +1282,13 @@ class EnterpriseKnowledge:
                     "fact_source_id": fact.get("source_document_id"),
                     "text": text,
                 })
+        # 第二批钩子（任务5）：主题逐段过滤 + 灵活字段闸门（均先过各自资格再进入候选）。
+        topic_hook = getattr(self, "kb2_list_topic_qa_evidence", None)
+        if topic_hook is not None:
+            evidence.extend(topic_hook(tenant_id, now=now))
+        field_hook = getattr(self, "kb2_list_item_field_qa_evidence", None)
+        if field_hook is not None:
+            evidence.extend(field_hook(tenant_id, now=now))
         return evidence
 
     def knowledge_evidence_valid_after_model(
@@ -1293,6 +1321,12 @@ class EnterpriseKnowledge:
                             and fact.get("source_document_id") == evidence.get("fact_source_id")):
                         return True, ""
             return False, "该产品字段的核准、使用范围、出处或版本已变化（生成期间发生变化）"
+        if evidence.get("source") in ("topic", "item_field"):
+            # 第二批钩子（任务5）：主题段 / 灵活字段的生成后复核。
+            hook = getattr(self, "kb2_evidence_valid_after_model", None)
+            if hook is not None:
+                return hook(tenant_id, evidence, now=now)
+            return False, "该证据类型未启用（生成期间发生变化）"
         return False, "未知证据来源"
 
     # ── 任务2/4：真实本地内容准备（投影 + 分块；不用计时、也不无条件标记完成）────────

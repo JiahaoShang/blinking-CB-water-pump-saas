@@ -324,18 +324,20 @@ class UITests(Tasks23Base):
         self.assertIn("aria-controls='nav-knowledge-subs'", page)
         self.assertIn("aria-expanded='false'", page)
         self.assertIn("nav-subs", page)
-        self.assertIn("产品与服务", page)
-        self.assertIn("文章与 FAQ", page)
-        self.assertIn("文件资料", page)
+        # 2026-10-12 知识四项导航（v0.3 §5）：全部主题（主链接）与子项。
+        self.assertIn("全部资料", page)
+        self.assertIn("添加资料", page)
+        self.assertIn("问答测试", page)
         self.assertIn("prefers-reduced-motion", page)
 
     def test_search_clear_keeps_filters_and_hides_without_query(self):
         self.publish_prepared(self.create_article(title="整机保修与售后响应政策"), confirm_ai=True)
-        _, _, page = self.get("/admin/knowledge?q=%E4%BF%9D%E4%BF%AE&status=published")
+        # 旧「全部知识」列表（?view=all）保留旧版搜索清空标记。
+        _, _, page = self.get("/admin/knowledge?view=all&q=%E4%BF%9D%E4%BF%AE&status=published")
         self.assertIn("整机保修", page)
         self.assertIn("aria-label='清空搜索'", page)
         self.assertIn("status=published", page)  # 清空搜索的链接保留其他筛选
-        _, _, page = self.get("/admin/knowledge?status=published")
+        _, _, page = self.get("/admin/knowledge?view=all&status=published")
         # 清单2 修订：清空按钮始终在 DOM（JS 输入时即时显隐），无关键词时带 hidden。
         self.assertRegex(page, r"data-kb-clear[^>]* hidden")
 

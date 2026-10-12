@@ -167,13 +167,13 @@ class SearchClearTests(Review23Base):
 
     def test_clear_button_markup_and_hidden_state(self):
         self.publish_prepared(self.create_article(title="整机保修与售后响应政策"), confirm_ai=True)
-        _, _, page = self.get("/admin/knowledge?q=%E4%BF%9D%E4%BF%AE&status=published")
+        _, _, page = self.get("/admin/knowledge?view=all&q=%E4%BF%9D%E4%BF%AE&status=published")
         self.assertIn("<button type='button' class='kb-clear' data-kb-clear", page)
         self.assertIn("aria-label='清空搜索'", page)
         # 有词时不带 hidden；其他筛选保留在数据属性里（JS 兜底路径也保筛选）。
         self.assertRegex(page, r"data-kb-clear[^>]*data-href='[^']*status=published[^']*'[^>]*>")
         self.assertNotRegex(page, r"data-kb-clear[^>]*data-href='[^']*status=published[^']*' hidden")
-        _, _, page = self.get("/admin/knowledge?status=published")
+        _, _, page = self.get("/admin/knowledge?view=all&status=published")
         self.assertRegex(page, r"data-kb-clear[^>]* hidden")
         # 输入框右侧留出按钮空间（文字不被 × 遮挡）。
         self.assertIn("padding:9px 40px 9px 12px", page)
@@ -193,11 +193,12 @@ class NavTests(Review23Base):
         self.assertIn("<a class='side-link active' href='/admin/knowledge'", page)
 
     def test_direct_subview_defaults_expanded_and_active(self):
-        _, _, page = self.get("/admin/knowledge?view=article_faq")
+        # 2026-10-12 知识四项导航：直接进入子视图「全部资料」默认展开，活动态只在子项。
+        _, _, page = self.get("/admin/knowledge?view=materials")
         self.assertIn("data-sub-active='1'", page)
         self.assertIn("aria-expanded='true'", page)
         self.assertNotRegex(page, r"id='nav-knowledge-subs'[^>]*inert")
-        self.assertIn("<a class='side-link sub active' href='/admin/knowledge?view=article_faq'", page)
+        self.assertIn("<a class='side-link sub active' href='/admin/knowledge?view=materials'", page)
         # 子视图时主链接不是活动态（活动态只在子项上）。
         self.assertNotIn("<a class='side-link active' href='/admin/knowledge'", page)
 
@@ -294,7 +295,7 @@ class RowAccessibilityTests(Review23Base):
     def test_row_is_whole_link_with_single_pill(self):
         item_id = self.create_article(title="保修政策")
         self.publish_prepared(item_id, confirm_ai=True)
-        _, _, page = self.get("/admin/knowledge")
+        _, _, page = self.get("/admin/knowledge?view=all")
         self.assertIn(f"<a class='kb-row' href='/admin/knowledge/item/{item_id}'", page)
         self.assertEqual(page.count("<span class='kb-pill"), 1, "每行只应有一枚生命周期标签")
 
@@ -327,7 +328,7 @@ class PrototypeAlignmentTests(Review23Base):
             self.assertNotIn("setTimeout", self.kb_js_block(page), path)
 
     def test_preserved_ux_tokens(self):
-        _, _, page = self.get("/admin/knowledge")
+        _, _, page = self.get("/admin/knowledge?view=all")
         self.assertIn("kb-addmenu", page)                    # 添加菜单
         self.assertIn("--ok-soft", page)                     # 绿色可用配色
         self.assertIn("grid-template-rows", page)            # 折叠动画
