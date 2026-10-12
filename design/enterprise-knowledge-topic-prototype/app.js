@@ -229,7 +229,6 @@ const state = {
   topicEdit: null,         // 主题编辑工作副本
   work: null, workDirty: false,     // 添加资料三步工作副本
   update: null, updateDirty: false, // 更新资料工作副本
-  highlight: null,         // {mid, loc}：从主题来源跳到资料后高亮定位
   dlgActions: [], lastFocus: null, pendingNav: null
 };
 
@@ -304,6 +303,8 @@ function sideNavHTML() {
     h += '<button class="side-link' + (r.name === 'capture' || r.name === 'update' ? ' active' : '') + '" type="button" data-act="nav" data-view="capture"><svg class="ic"><use href="#i-upload"/></svg>添加资料</button>';
   }
   h += '<button class="side-link' + (r.name === 'qa' ? ' active' : '') + '" type="button" data-act="nav" data-view="qa"><svg class="ic"><use href="#i-inbox"/></svg>问答测试</button>';
+  /* 主题导航（分组 / 主题 / 新建主题）仅在主题详情页出现：总览、资料、入库等页已有主要功能入口，不重复这组导航 */
+  if (state.route.name === 'topic') {
   h += '<div class="side-heading">主题导航</div>';
   DB.groups.forEach((g) => {
     const open = !!state.navGroups[g.id];
@@ -318,6 +319,7 @@ function sideNavHTML() {
   ungroupedTopics().forEach((t) => { h += topicNavItemHTML(t); });
   if (state.role === 'admin') {
     h += '<button class="side-link side-mini" type="button" data-act="topic-new-open"><svg class="ic"><use href="#i-plus"/></svg>新建主题</button>';
+  }
   }
   return h;
 }
@@ -502,7 +504,8 @@ function topicHTML(id) {
   }
   h += '</section>';
 
-  /* 关联资料：默认折叠，展开后可见列表与管理控件（阅读优先，按需查看） */
+  /* 关联资料：默认折叠；它是主题内打开原始文件的唯一列表入口 */
+  if (mats.length) h += '<p class="hint-line">查看原始文件，请展开关联资料。</p>';
   h += '<details class="section-fold topic-block"' + (matsOpen ? ' open' : '') + '><summary><span class="fold-title">关联资料</span><span class="fold-count">' + mats.length + ' 条</span></summary><div class="fold-body">';
   if (mats.length) {
     h += '<div class="rows">' + mats.map((m) => materialRowHTML(m, id)).join('') + '</div>';
@@ -551,9 +554,9 @@ function topicParaHTML(p, kind) {
     '<div class="tp-foot">' + srcChipHTML(p) + (p.system ? (p.checked ? '<span class="tag done">系统整理 · 已确认</span>' : '<span class="tag review">系统整理 · 待核对</span>') : '') + (p.modified ? '<span class="tag edit">成员修改</span>' : '') + (gap ? '<span class="tag internal">来源为仅内部 / 未授权 · 不用于对外回答</span>' : '') + '</div></div>';
 }
 function srcChipHTML(p) {
+  /* 出处为非交互文本（span）：保留文件名称、页码 / 段落与人工出处；打开原始文件统一走「关联资料」折叠列表，不另造入口 */
   const label = sourceLabel(p);
-  if (!label) return '<span class="src-chip muted-src">来源：成员人工撰写</span>';
-  return '<button class="src-chip" type="button" data-act="t-source" data-mid="' + p.source.mid + '" data-loc="' + esc(p.source.loc) + '">' + esc(label) + '</button>';
+  return '<span class="src-chip muted-src">来源：' + esc(label || '成员人工撰写') + '</span>';
 }
 function materialRowHTML(m, fromTopic) {
   const a = availability(m);
@@ -628,7 +631,6 @@ function materialHTML(id) {
   const a = availability(m);
   const ri = recogInfo(m);
   const back = currentBackLabel();
-  const hl = state.highlight && state.highlight.mid === id ? state.highlight.loc : null;
   let h = '<div class="detail-top"><button class="back-link" type="button" data-act="d-back"><svg class="ic"><use href="#i-back"/></svg>' + esc(back) + '</button></div>';
   h += '<div class="detail-head"><div class="detail-title"><span class="tag type">' + esc(FORMAT[m.format].label) + '</span><h1>' + esc(m.name) + '</h1><span class="pill ' + a.pill + '">' + esc(a.label) + '</span></div>';
   if (state.role === 'admin') {
@@ -641,7 +643,6 @@ function materialHTML(id) {
       '</div></details></div>';
   }
   h += '</div>';
-  if (hl) h += '<div class="notice banner"><svg class="ic"><use href="#i-check"/></svg><span>已从主题来源定位到本资料：' + esc(hl) + '（示例文本高亮，不渲染真实原件）。</span></div>';
   if (m.updateDraft && state.role === 'admin') {
     h += '<div class="draft-banner banner"><span><b>有更新草稿待发布</b>：v' + (m.currentVersion + 1) + ' 候选已保存，当前发布版本（v' + m.currentVersion + '）继续有效。</span>' +
       '<span class="actions"><button class="button secondary" type="button" data-act="m-update">继续编辑更新</button><button class="button" type="button" data-act="u-publish-now">发布新版</button><button class="button ghost" type="button" data-act="u-discard">放弃更新草稿</button></span></div>';
@@ -660,7 +661,7 @@ function materialHTML(id) {
   /* 正文 */
   h += '<section class="topic-block"><div class="section-head"><h2>正文</h2>' + (m.paras.length ? '<span class="sec-note">' + (m.recognition === 'manual' ? '人工撰写内容' : '识别整理的正文') + '：引用时以这里的版本为准。</span>' : '') + '</div>';
   if (m.paras.length) {
-    h += m.paras.map((p) => '<div class="body-para' + (hl && p.loc === hl ? ' hl' : '') + '"><div class="bp-head"><span class="src-label">' + esc(p.loc) + '</span>' + (p.modified ? '<span class="tag edit">人工修改</span>' : '') + (p.checked ? '<span class="tag done">已核对</span>' : '<span class="tag review">待核对</span>') + '</div><p>' + esc(p.text) + '</p></div>').join('');
+    h += m.paras.map((p) => '<div class="body-para"><div class="bp-head"><span class="src-label">' + esc(p.loc) + '</span>' + (p.modified ? '<span class="tag edit">人工修改</span>' : '') + (p.checked ? '<span class="tag done">已核对</span>' : '<span class="tag review">待核对</span>') + '</div><p>' + esc(p.text) + '</p></div>').join('');
   } else {
     h += '<div class="empty empty-inline"><p>' + (m.recognition === 'failed' ? '未能识别出正文。' + esc(m.failReason) : '这份资料没有正文：仅登记了原件。') + '</p>' +
       '<span class="actions">' + (state.role === 'admin' ? '<button class="button secondary" type="button" data-act="m-manual">补充手动正文</button>' : '') + '<button class="button secondary" type="button" data-act="m-attach-focus">关联主题</button></span></div>';
@@ -1261,7 +1262,6 @@ function openMaterial(id, viaLabel) {
   const fromTopic = state.route.name === 'topic' && state.route.id !== id;
   pushBack(viaLabel);
   if (fromTopic) state.reopenMats = true;   /* 返回主题时恢复「关联资料」展开（一次性） */
-  if (!(state.highlight && state.highlight.mid === id)) state.highlight = null;
   state.route = { name: 'material', id: id, step: 1 };
   render();
 }
@@ -1271,7 +1271,7 @@ function doBack() {
   else if (b.name === 'material' && materialById(b.id)) { state.route = { name: 'material', id: b.id, step: 1 }; }
   else if (b.name === 'materials') { state.route = { name: 'materials', id: null, step: 1 }; }
   else { state.route = { name: 'topics', id: null, step: 1 }; }
-  state.highlight = null; render();
+  render();
 }
 function isDirty() { return state.workDirty || state.updateDirty || (state.topicEdit && state.topicEdit.dirty); }
 function requestLeave(go) {
@@ -1473,7 +1473,13 @@ function onClick(e) {
       requestLeave(() => { resetFlows(); if (v === 'topics') goTopics(); else if (v === 'materials') goMaterials(); else if (v === 'capture') startCapture(''); else { state.route = { name: 'qa', id: null, step: 1 }; render(); } });
       return;
     }
-    case 'nav-topic': { const id = el.getAttribute('data-id'); closeMobileNav(); requestLeave(() => { resetFlows(); openTopic(id, null); }); return; }
+    case 'nav-topic': {
+      const id = el.getAttribute('data-id');
+      if (state.route.name === 'topic' && state.route.id === id) { closeMobileNav(); return; }   /* 重复点击当前主题：只关移动抽屉，不压返回层 */
+      closeMobileNav();
+      requestLeave(() => { resetFlows(); openTopic(id, null); });
+      return;
+    }
     case 'nav-toggle-group': toggleNavGroup(el.getAttribute('data-gid')); return;
     case 't-open': { const id = el.getAttribute('data-id'); requestLeave(() => { resetFlows(); openTopic(id, null); }); return; }
     case 't-open-from-mat': { const id = el.getAttribute('data-id'); const m = materialById(state.route.id); requestLeave(() => { resetFlows(); openTopic(id, m ? '返回资料「' + m.name + '」' : null); }); return; }
@@ -1482,12 +1488,6 @@ function onClick(e) {
       const from = el.getAttribute('data-from');
       if (from === 'topic') { const t2 = topicById(state.route.id); requestLeave(() => { resetFlows(); openMaterial(id, t2 ? '返回主题「' + t2.name + '」' : null); }); }
       else requestLeave(() => { resetFlows(); openMaterial(id, null); });
-      return;
-    }
-    case 't-source': {
-      const mid = el.getAttribute('data-mid'); const loc = el.getAttribute('data-loc');
-      const t2 = topicById(state.route.id);
-      requestLeave(() => { resetFlows(); state.highlight = { mid: mid, loc: loc }; openMaterial(mid, t2 ? '返回主题「' + t2.name + '」' : null); });
       return;
     }
     case 't-rel-open': { const id = el.getAttribute('data-id'); const t2 = topicById(state.route.id); requestLeave(() => { resetFlows(); openTopic(id, t2 ? '返回主题「' + t2.name + '」' : null); }); return; }
