@@ -566,22 +566,14 @@ table.fields td .muted{display:block;margin-top:2px}
   *{transition:none!important}
 }
 
-/* ── 布局归属（2026-10-12）：平台主导航仅模块级；企业知识功能导航在工作区顶部；主题树在工作区内部左列 ── */
-.console .side-link[aria-disabled="true"]{opacity:.55;cursor:default}
-.console .side-link[aria-disabled="true"]:hover{background:none;color:var(--nav-text)}
-.module-nav{position:sticky;top:var(--topbar-h);z-index:14;display:flex;gap:2px;align-items:center;overflow-x:auto;
-  padding:5px 22px;background:rgba(255,255,255,.94);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
-.module-nav .mn-link{display:inline-flex;align-items:center;gap:7px;padding:7px 12px;border-radius:var(--r-md);
-  font-size:13.5px;color:var(--text-2);white-space:nowrap;flex:none}
-.module-nav .mn-link:hover{background:var(--surface-2);color:var(--text-1)}
-.module-nav .mn-link.active{background:var(--accent-soft);color:#3A2FBF;font-weight:600}
-.module-nav .mn-link .ic{width:15px;height:15px;opacity:.8}
-.module-nav .mn-link.active .ic{opacity:1;color:var(--accent)}
+/* ── 布局归属（2026-10-12 侧栏恢复）：知识四项在左侧主导航；主题浏览树在工作区内部左列；
+   顶部功能导航与平台其他模块占位（第七轮）经用户纠正已撤回（2026-10-12），相关样式随之删除 ── */
 
-/* 工作区内部主题浏览列：白/浅底、细分隔、约 216px；中央正文仍为主内容 */
+/* 工作区内部主题浏览列：白/浅底、细分隔、约 216px；中央正文仍为主内容。
+   sticky top 只让开顶栏 60px（不再为已撤回的顶部功能导航留空） */
 .workspace-grid{display:grid;grid-template-columns:216px minmax(0,1fr);gap:18px;align-items:start}
 .ws-main{min-width:0}
-.topic-side{position:sticky;top:110px;max-height:calc(100vh - 130px);overflow-y:auto;min-width:0}
+.topic-side{position:sticky;top:70px;max-height:calc(100vh - 90px);overflow-y:auto;min-width:0}
 .topic-side-inner{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:var(--sh-xs);padding:10px;min-width:0}
 .ts-head{font-size:11px;font-weight:600;letter-spacing:.1em;color:var(--text-3);margin:2px 8px 6px}
 .ts-link{display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border-radius:var(--r-md);
@@ -616,5 +608,4 @@ table.fields td .muted{display:block;margin-top:2px}
     border-bottom:1.6px solid var(--text-3);transform:rotate(-45deg);transition:transform .18s ease}
   .topic-side-details[open]>summary::before{transform:rotate(45deg)}
   .topic-side-details .topic-side-inner{border:0;box-shadow:none;padding:0 0 12px;background:transparent}
-  .module-nav{padding:5px 12px}
 }

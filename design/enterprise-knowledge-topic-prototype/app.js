@@ -291,30 +291,20 @@ function sourceLabel(para) {
   return '《' + (m ? m.name : '已移除资料') + '》 · ' + para.source.loc;
 }
 
-/* ---------- 平台主导航（仅模块级入口）＋ 工作区功能导航 ＋ 工作区内部主题树 ---------- */
-/* 平台主导航：只放模块级入口；本原型有效模块仅「企业知识」，其余为演示占位（aria-disabled，不造假页面、不跳生产） */
+/* ---------- 左侧主导航（知识四项）＋ 工作区内部主题树 ---------- */
+/* 侧栏主导航：知识四项（全部主题 / 全部资料 / 添加资料 / 问答测试）——与第六轮前一致；「添加资料」沿用编辑权限控制（仅管理员/获授权成员）。
+   主题浏览树按已确认布局放在工作区内部左列，不放侧栏；顶部功能导航与平台其他模块占位已按用户纠正撤回（2026-10-12）。 */
 function sideNavHTML() {
-  let h = '<div class="side-heading">平台</div>';
-  h += platformPlaceholderHTML('工作台', 'i-layout');
-  h += platformPlaceholderHTML('收件箱', 'i-inbox');
-  h += platformPlaceholderHTML('渠道账号', 'i-globe');
-  h += platformPlaceholderHTML('设置', 'i-sliders');
-  h += '<div class="side-heading">模块</div>';
-  h += '<button class="side-link active" type="button" data-act="nav" data-view="topics"><svg class="ic"><use href="#i-book"/></svg>企业知识</button>';
-  return h;
-}
-function platformPlaceholderHTML(label, icon) {
-  return '<button class="side-link" type="button" data-act="nav" data-view="__out" aria-disabled="true" title="不在本设计评审范围（演示占位）"><svg class="ic"><use href="#' + icon + '"/></svg>' + esc(label) + '</button>';
-}
-/* 企业知识功能导航（工作区顶部）：模块内入口的唯一位置；「添加资料」沿用编辑权限控制（仅管理员/获授权成员） */
-function moduleNavHTML() {
   const r = state.route;
   const isTopics = r.name === 'topics' || r.name === 'topic';
   const isMaterials = r.name === 'materials' || r.name === 'material';
-  let h = '<button class="mn-link' + (isTopics ? ' active' : '') + '" type="button" data-act="nav" data-view="topics"><svg class="ic"><use href="#i-book"/></svg>全部主题</button>';
-  h += '<button class="mn-link' + (isMaterials ? ' active' : '') + '" type="button" data-act="nav" data-view="materials"><svg class="ic"><use href="#i-file"/></svg>全部资料</button>';
-  if (state.role === 'admin') h += '<button class="mn-link' + (r.name === 'capture' || r.name === 'update' ? ' active' : '') + '" type="button" data-act="nav" data-view="capture"><svg class="ic"><use href="#i-upload"/></svg>添加资料</button>';
-  h += '<button class="mn-link' + (r.name === 'qa' ? ' active' : '') + '" type="button" data-act="nav" data-view="qa"><svg class="ic"><use href="#i-inbox"/></svg>问答测试</button>';
+  let h = '<div class="side-heading">知识</div>';
+  h += '<button class="side-link' + (isTopics ? ' active' : '') + '" type="button" data-act="nav" data-view="topics"><svg class="ic"><use href="#i-book"/></svg>全部主题</button>';
+  h += '<button class="side-link' + (isMaterials ? ' active' : '') + '" type="button" data-act="nav" data-view="materials"><svg class="ic"><use href="#i-file"/></svg>全部资料</button>';
+  if (state.role === 'admin') {
+    h += '<button class="side-link' + (r.name === 'capture' || r.name === 'update' ? ' active' : '') + '" type="button" data-act="nav" data-view="capture"><svg class="ic"><use href="#i-upload"/></svg>添加资料</button>';
+  }
+  h += '<button class="side-link' + (r.name === 'qa' ? ' active' : '') + '" type="button" data-act="nav" data-view="qa"><svg class="ic"><use href="#i-inbox"/></svg>问答测试</button>';
   return h;
 }
 /* 主题浏览树（工作区内部左列 + 窄屏折叠）：pfx 区分两套 DOM（'' 桌面列 / 'm' 窄屏 details），展开状态同一份 */
@@ -357,14 +347,12 @@ function toggleNavGroup(gid) {
   });
 }
 function renderNav() { const el = qs('#side-nav'); if (el) el.innerHTML = sideNavHTML(); }
-function renderModuleNav() { const el = qs('#module-nav'); if (el) el.innerHTML = moduleNavHTML(); }
 /* 窄屏「浏览主题」在选中主题后收起（桌面无此元素或本就收起，调用安全） */
 function closeMobileTopicBrowse() { const d = qs('#topic-browse-details'); if (d && d.open) d.open = false; }
 
 /* ---------- 路由渲染 ---------- */
 function render() {
   renderNav();
-  renderModuleNav();
   const r = state.route;
   const app = qs('#app');
   let html = '';
@@ -1500,9 +1488,8 @@ function onClick(e) {
   switch (act) {
     case 'nav': {
       const v = el.getAttribute('data-view');
-      if (v === '__out') { toast('该入口是平台其他模块（演示占位）：不在本设计评审范围。', true); return; }
       if (state.role !== 'admin' && (v === 'capture' || v === 'update')) { toast('只读成员不能添加或更新资料（演示视角差异）。', true); return; }
-      closeMobileNav();   /* 明确点击导航目标后收起移动抽屉（桌面无影响） */
+      closeMobileNav();   /* 明确点击侧栏导航目标后收起移动抽屉（桌面无影响） */
       requestLeave(() => { resetFlows(); if (v === 'topics') goTopics(); else if (v === 'materials') goMaterials(); else if (v === 'capture') startCapture(''); else { state.route = { name: 'qa', id: null, step: 1 }; render(); } });
       return;
     }

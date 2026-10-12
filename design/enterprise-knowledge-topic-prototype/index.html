@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>企业知识管理 · v0.3 主题与资料设计评审原型（主题浏览 + 统一入库）</title>
 <meta name="description" content="企业知识管理 v0.3：主题浏览与统一资料入库的可点击设计评审原型。演示数据仅存在于浏览器内存，不读取文件内容、不上传、未连接后端。">
-<link rel="stylesheet" href="style.css?v=20261012-workspace-nav">
-<script src="app.js?v=20261012-workspace-nav" defer></script>
+<link rel="stylesheet" href="style.css?v=20261012-sidebar-restore">
+<script src="app.js?v=20261012-sidebar-restore" defer></script>
 </head>
 <body>
 
@@ -19,7 +19,7 @@
       <p>v0.3 设计评审稿：主题浏览、三联入库（添加资料 → 检查整理结果 → 发布设置）与资料更新均为演示，未连接后端、不读取文件内容、不调用模型。真实识别、保存与处理由后端实现，本原型不伪造结果。</p>
       <p>「使用示例整理结果（演示）」是评审控件：把预置示例文字当作整理结果填入文字型文件；图片、视频、网页只登记原件。没有假处理计时。主题正文初稿也用固定演示段落与确切出处整理，不调用模型。</p>
       <p>权限视角只演示界面差异（只读成员看不到编辑、发布与添加入口）；真实权限由后端强制。刷新或关闭页面后，所有演示改动消失。</p>
-      <p>平台主导航的「工作台 / 收件箱 / 渠道账号 / 设置」是演示占位（点击只提示，不在本原型范围）；本原型唯一有效模块是「企业知识」——模块内功能导航在工作区顶部，主题浏览列在工作区内部左侧（窄屏折叠为内容区「浏览主题」）。</p>
+      <p>左侧主导航是企业知识的功能入口（全部主题 / 全部资料 / 添加资料 / 问答测试）；主题浏览列在工作区内部左侧，打开主题后出现（窄屏折叠为内容区「浏览主题」）。</p>
       <p>两个维度（资料形式 × 内容主题）、多主题关联、返回栈与未覆盖清单等完整设计说明见原型目录 README 与 PRD v0.3。</p>
     </div>
   </details>
@@ -81,7 +81,6 @@
         </select>
       </label>
     </header>
-    <nav class="module-nav" id="module-nav" aria-label="企业知识功能导航"></nav>
     <main id="app" aria-live="polite"></main>
   </div>
 </div>
