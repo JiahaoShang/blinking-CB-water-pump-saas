@@ -577,14 +577,15 @@ table.fields td .muted{display:block;margin-top:2px}
   .mng-controls{flex-basis:100%;margin-left:0}
 }
 @media (prefers-reduced-motion:reduce){
-  /* 含主题分组展开/收起与折叠箭头动画：一并禁用 */
+  /* 含主题分组 / 主题文件列表的展开收起与折叠箭头动画：一并禁用 */
   *{transition:none!important}
 }
 
 /* ── 布局归属（2026-10-12 侧栏恢复）：知识四项在左侧主导航；主题浏览树在工作区内部左列；
    顶部功能导航与平台其他模块占位（第七轮）经用户纠正已撤回（2026-10-12），相关样式随之删除 ── */
 
-/* 工作区内部主题浏览列：白/浅底、细分隔、约 216px；中央正文仍为主内容。
+/* 工作区内部主题 / 文件浏览列：白/浅底、细分隔、约 216px；中央正文仍为主内容。
+   2026-10-12 第九轮：从「全部主题」总览起即显示（分组 → 主题 → 关联文件；主题独立折叠）。
    sticky top 只让开顶栏 60px（不再为已撤回的顶部功能导航留空） */
 .workspace-grid{display:grid;grid-template-columns:216px minmax(0,1fr);gap:18px;align-items:start}
 .ws-main{min-width:0}
@@ -609,6 +610,25 @@ table.fields td .muted{display:block;margin-top:2px}
 .ts-item.active{font-weight:600}
 .ts-dot{width:5px;height:5px;border-radius:50%;border:1.5px solid var(--text-4);margin:0 2px 0 3px;flex:none}
 .ts-mini{font-size:12.5px;color:var(--text-3);margin-top:4px;border-top:1px solid var(--border-subtle)}
+/* 主题行 = 名称按钮（进入正文）+ 独立折叠按钮（带数量）：只开合该主题的关联文件列表，不导航、不压返回层 */
+.ts-topic-row{display:flex;align-items:center;gap:1px}
+.ts-topic-row>.ts-item{flex:1;min-width:0}
+.ts-filesbtn{display:flex;align-items:center;gap:3px;flex:none;padding:4px 6px;border-radius:var(--r-sm);color:var(--text-3);font-size:11.5px}
+.ts-filesbtn:hover{background:var(--surface-2);color:var(--text-1)}
+.ts-filesbtn .ts-caret{width:12px;height:12px}
+.ts-filesbtn[aria-expanded="true"] .ts-caret{transform:rotate(180deg)}
+.ts-filesbtn-n{font-variant-numeric:tabular-nums}
+/* 主题下关联文件（默认收起；收起时子项 inert；时长与分组一致，reduced-motion 全局禁用）：
+   文件行 = 形式线稿图标 + 名称（长名省略 + title）；当前文件有选中态 */
+.ts-files{display:grid;grid-template-rows:0fr;transition:grid-template-rows .2s ease}
+.ts-files.open{grid-template-rows:1fr}
+.ts-files-inner{overflow:hidden;min-height:0;display:flex;flex-direction:column;gap:1px}
+.ts-file{display:flex;align-items:center;gap:7px;width:100%;padding:5px 8px 5px 34px;border-radius:var(--r-sm);color:var(--text-2);font-size:12.5px;text-align:left;min-width:0}
+.ts-file:hover{background:var(--surface-2);color:var(--text-1)}
+.ts-file.active{background:var(--accent-soft);color:var(--text-1);font-weight:600}
+.ts-file .ic{width:13px;height:13px;color:var(--text-3);flex:none}
+.ts-file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.ts-none{font-size:11.5px;color:var(--text-4);padding:3px 8px 5px 34px;line-height:1.5}
 /* 窄屏：内部主题树折叠到内容区（与平台「打开导航」分离） */
 .topic-side-details{display:none}
 @media(max-width:900px){

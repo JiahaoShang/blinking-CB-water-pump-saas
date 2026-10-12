@@ -1,6 +1,7 @@
 'use strict';
 /* 运行时冒烟检查（Hermes 编写，Codex 保存便于复跑）：最小 DOM stub 加载真实 app.js，
-   覆盖第三轮修复（对话框派发 / 核对数量实时更新 / 紧凑折叠）与既往回归项。 */
+   覆盖第三轮修复（对话框派发 / 核对数量实时更新 / 紧凑折叠）与既往回归项；
+   第九轮（2026-10-12）：总览内部主题 / 文件树、每主题折叠与状态同步、唯一文件入口、两种返回语义。 */
 const fs = require('fs');
 const vm = require('vm');
 const APP = require('path').join(__dirname, '..', 'app.js');
@@ -94,24 +95,33 @@ function keydown(handlers, key) {
   ok(ta2.pill === 'pub' && ta2.reason.indexOf('未授权') >= 0, 't_onboarding 蓝灰不可用 + 原因');
   ok(inCtx(sandbox, 'topicsRegionHTML()').indexOf('已发布（AI 客服不可用）') >= 0, '主题列表双标签');
 
-  /* 布局归属（2026-10-12 侧栏恢复）：知识四项在左侧主导航；主题浏览树在工作区内部（顶部功能导航与平台占位已撤回） */
+  /* 布局归属（2026-10-12 侧栏恢复）+ 第九轮：知识四项在左侧主导航；内部浏览列从总览即显示 */
   const sideNav0 = reg.get('#side-nav').innerHTML;
   ok(sideNav0.indexOf('全部主题') >= 0 && sideNav0.indexOf('全部资料') >= 0 && sideNav0.indexOf('添加资料') >= 0 && sideNav0.indexOf('问答测试') >= 0, '左侧主导航含知识四项（管理员含添加资料）');
   ok(sideNav0.indexOf('工作台') < 0 && sideNav0.indexOf('收件箱') < 0 && sideNav0.indexOf('渠道账号') < 0 && sideNav0.indexOf('设置') < 0 && sideNav0.indexOf('aria-disabled') < 0, '主导航不含平台其他模块占位（已撤回）');
-  ok(sideNav0.indexOf('data-act="nav-topic"') < 0, '主题树不在左侧主导航');
-  ok(reg.get('#app').innerHTML.indexOf('aria-label="主题浏览导航"') < 0, '总览页不出现主题浏览列（不重复树）');
+  ok(sideNav0.indexOf('data-act="nav-topic"') < 0 && sideNav0.indexOf('data-act="nav-file"') < 0, '主题 / 文件树不在左侧主导航');
+  /* 第九轮（2026-10-12）：内部主题 / 文件浏览列从总览（route=topics）即显示，
+     主题下按分组 → 主题 → 关联文件组织，文件默认收起（替代旧「总览不出现树」规则） */
+  const ovNow = reg.get('#app').innerHTML;
+  ok(ovNow.indexOf('aria-label="主题浏览导航"') >= 0 && ovNow.indexOf('id="topic-browse-details"') >= 0, '总览页出现主题 / 文件浏览列（桌面 + 窄屏两套）');
+  ok(ovNow.indexOf('id="nav-filesbtn-t_meeting"') >= 0 && ovNow.indexOf('id="mnav-filesbtn-t_meeting"') >= 0, '每个主题行含独立折叠按钮（两套树）');
+  ok(ovNow.indexOf('id="nav-files-t_meeting" inert') >= 0 && ovNow.indexOf('ts-files open') < 0, '各主题文件默认收起（inert、无 open）');
+  ok(ovNow.indexOf('data-act="nav-file" data-id="m_spec"') >= 0, '主题下的文件列表由树渲染（唯一文件入口的载体）');
 
   inCtx(sandbox, 'state.filters.format = "pdf"; openTopic("t_meeting", null);');
   ok(reg.get('#app').innerHTML.indexOf('aria-label="主题浏览导航"') >= 0 && reg.get('#app').innerHTML.indexOf('浏览主题') >= 0, '主题页在工作区内部出现主题树（含窄屏折叠）');
   ok(reg.get('#side-nav').innerHTML.indexOf('data-act="nav-topic"') < 0, '主题树不在左侧主导航（在工作区内部）');
   const topicHtmlNow = reg.get('#app').innerHTML;
   ok(topicHtmlNow.indexOf('<span class="fold-title">关联资料</span>') >= 0, '主题页关联资料折叠（带数量）');
-  /* 本轮规则 2：出处为非交互文本；打开原始文件的唯一列表入口是「关联资料」 */
+  /* 第九轮规则：出处为非交互文本；打开原始文件的唯一列表入口 = 主题浏览树的文件列表（关联资料不再重复按钮） */
+  ok(topicHtmlNow.indexOf('data-act="m-open"') < 0, '主题页「关联资料」不再含文件打开按钮（不重复入口）');
+  ok(topicHtmlNow.indexOf('data-act="nav-file"') >= 0 && topicHtmlNow.indexOf('data-act="t-detach"') >= 0 && topicHtmlNow.indexOf('关联已有资料') >= 0, '树文件列表为打开入口；「关联资料」保留非点击信息与原关联编辑 / 移除操作');
   ok(topicHtmlNow.indexOf('data-act="t-source"') < 0 && topicHtmlNow.indexOf('src-chip muted-src') >= 0 && topicHtmlNow.indexOf('· 第 2 页') >= 0, '出处为非交互文本且保留文件与位置');
   ok(topicHtmlNow.indexOf('来源为仅内部 / 未授权 · 不用于对外回答') >= 0 || inCtx(sandbox, 'topicHTML("t_onboarding")').indexOf('来源为仅内部 / 未授权 · 不用于对外回答') >= 0, '出处保留不符合对外 AI 条件的标记（含此类来源的主题）');
-  ok(topicHtmlNow.indexOf('查看原始文件，请展开关联资料') >= 0, '主题页有轻量提示（关联资料为文件唯一入口）');
-  clickAct(handlers, 'm-open', { 'data-id': 'm_spec', 'data-from': 'topic' });
-  ok(inCtx(sandbox, 'state.route.name') === 'material', '经「关联资料」列表打开资料');
+  ok(topicHtmlNow.indexOf('从主题浏览列表打开原始文件') >= 0, '主题页轻量提示指向主题浏览列表');
+  clickAct(handlers, 'nav-file', { 'data-id': 'm_spec' });
+  ok(inCtx(sandbox, 'state.route.name') === 'material', '经树文件列表打开资料');
+  ok(inCtx(sandbox, 'state.backStack[state.backStack.length-1].name') === 'topic', '主题树开文件的返回上下文 = 原主题');
   clickAct(handlers, 'd-back');
   ok(inCtx(sandbox, 'state.route.name') === 'topic' && reg.get('#app').innerHTML.indexOf('section-fold topic-block" open') >= 0, '返回主题并恢复关联资料展开');
   clickAct(handlers, 'd-back');
@@ -308,9 +318,9 @@ function keydown(handlers, key) {
   ok(reg.get('#app').innerHTML.indexOf('id="topic-browse-details" open') < 0, '选中主题后窄屏浏览树收起（默认折叠）');
   clickAct(handlers, 'd-back');
   ok(inCtx(sandbox, 'state.route.id') === 't_meeting', '返回回到上一主题');
-  /* 经主题关联资料进入的资料详情保留内部主题树（backStack 推导；不改返回栈） */
-  clickAct(handlers, 'm-open', { 'data-id': 'm_spec', 'data-from': 'topic' });
-  ok(inCtx(sandbox, 'state.route.name') === 'material' && reg.get('#app').innerHTML.indexOf('aria-label="主题浏览导航"') >= 0, '经主题进入的资料详情保留内部主题树');
+  /* 经主题树文件列表进入的资料详情保留内部主题树（既有 backStack 推导；不改返回栈） */
+  clickAct(handlers, 'nav-file', { 'data-id': 'm_spec' });
+  ok(inCtx(sandbox, 'state.route.name') === 'material' && reg.get('#app').innerHTML.indexOf('aria-label="主题浏览导航"') >= 0, '经主题树进入的资料详情保留内部主题树');
   clickAct(handlers, 'd-back');
   ok(inCtx(sandbox, 'state.route.name') === 'topic', '资料详情返回主题正常');
   /* Escape 与焦点行为保留（平台抽屉） */
@@ -433,7 +443,77 @@ function keydown(handlers, key) {
   ok(m600 >= 0 && m480 > m600 && CSS.slice(m600, m480).indexOf('.topic-sec .rows .row{padding-left:22px}') >= 0, '窄屏（≤600px，含 320/390）缩进收窄为 12px');
   ok(CSS.indexOf('.mode-card[hidden]{display:none}') >= 0, '单卡片样式：非当前方式 hidden 即不显示');
   ok(/\.row-title strong\{font-size:15px;font-weight:550;color:var\(--text-1\)/.test(CSS), '全局行规则保持原样（全部资料 / 主题详情不受影响）');
-  ok(IDX.indexOf('style.css?v=20261012-input-switch') >= 0 && IDX.indexOf('app.js?v=20261012-input-switch') >= 0, 'index.html 资源版本 = 20261012-input-switch');
+  ok(IDX.indexOf('style.css?v=20261012-topic-file-tree') >= 0 && IDX.indexOf('app.js?v=20261012-topic-file-tree') >= 0, 'index.html 资源版本 = 20261012-topic-file-tree');
+}
+
+/* ══ 11. 第九轮（2026-10-12）：总览内部主题 / 文件树；折叠不导航；唯一文件入口；两种返回语义 ══ */
+{
+  const path = require('path');
+  const { sandbox, reg, handlers } = loadApp();
+  /* 总览默认状态：树即显示、每主题下文件列表默认收起、文件行 = 名称 + 形式线稿图标 + title、空主题明确无资料 */
+  const ov = reg.get('#app').innerHTML;
+  ok(ov.indexOf('data-act="nav-file" data-id="m_spec"') >= 0 && ov.indexOf('title="会议设备A-产品规格书.pdf"') >= 0 && ov.indexOf('ts-file-name') >= 0, '总览树文件行：名称 + title（长名安全省略）');
+  ok((ov.match(/data-act="nav-file" data-id="m_guide"/g) || []).length === 2 * inCtx(sandbox, 'materialById("m_guide").topics.length'), '同一资料关联多个主题：两套树下各主题分别列出（同一实体 id，不复制归档）');
+  ok(inCtx(sandbox, 'DB.materials.filter(function(m){return m.id==="m_guide";}).length') === 1 && inCtx(sandbox, 'materialById("m_guide").topics.join(",")') === 't_meeting,t_onboarding', '多主题关联仍是同一资料实体（DB 多对多）');
+  ok(ov.indexOf('id="nav-files-t_quote" inert') >= 0 && ov.indexOf('无关联资料') >= 0, '空主题明确无资料');
+  ok(ov.indexOf('<use href="#i-image"/>') >= 0 && ov.indexOf('<use href="#i-video"/>') >= 0 && ov.indexOf('<use href="#i-globe"/>') >= 0 && ov.indexOf('<use href="#i-pen"/>') >= 0, '文件行含形式线稿图标（图片 / 视频 / 网页 / 手动正文）');
+
+  /* 折叠按钮：只开合文件列表，不导航、不压返回层；两套树同步；跨渲染保持 */
+  const rt0 = inCtx(sandbox, 'state.route.name');
+  const st0 = inCtx(sandbox, 'state.backStack.length');
+  clickAct(handlers, 'nav-topic-files', { 'data-id': 't_meeting' });
+  ok(inCtx(sandbox, 'state.route.name') === rt0 && inCtx(sandbox, 'state.backStack.length') === st0, '折叠按钮只开合文件列表（不导航、不压返回层）');
+  ok(q(sandbox, reg, '#nav-filesbtn-t_meeting').getAttribute('aria-expanded') === 'true' && q(sandbox, reg, '#nav-files-t_meeting').getAttribute('inert') === null && q(sandbox, reg, '#nav-files-t_meeting').classList.contains('open') === true, '展开同步：aria-expanded / inert / 动画类（桌面树）');
+  ok(q(sandbox, reg, '#mnav-filesbtn-t_meeting').getAttribute('aria-expanded') === 'true' && q(sandbox, reg, '#mnav-files-t_meeting').getAttribute('inert') === null, '展开同步：窄屏树');
+  ok(ov.indexOf('aria-controls="nav-files-t_meeting"') >= 0 && ov.indexOf('aria-controls="mnav-files-t_meeting"') >= 0, '折叠按钮 aria-controls 指向对应文件列表（两套树）');
+  inCtx(sandbox, 'render();');
+  ok(q(sandbox, reg, '#nav-filesbtn-t_meeting').getAttribute('aria-expanded') === 'true', '展开状态跨渲染保持（轻量 UI 状态）');
+  clickAct(handlers, 'nav-topic-files', { 'data-id': 't_meeting' });
+  ok(inCtx(sandbox, 'state.navTopicFiles.t_meeting') === false && q(sandbox, reg, '#nav-files-t_meeting').getAttribute('inert') === '' && q(sandbox, reg, '#mnav-files-t_meeting').getAttribute('inert') === '', '再次点击收起：状态与 inert 同步（两套树）');
+
+  /* 总览树直开文件 → 返回实际总览（不假装曾进入主题正文） */
+  clickAct(handlers, 'nav-file', { 'data-id': 'm_spec' });
+  ok(inCtx(sandbox, 'state.route.name') === 'material' && inCtx(sandbox, 'state.route.id') === 'm_spec', '总览树文件列表直开资料');
+  ok(inCtx(sandbox, 'state.backStack[state.backStack.length-1].name') === 'topics', '返回点 = 总览（未经过主题正文）');
+  ok(reg.get('#app').innerHTML.indexOf('aria-label="主题浏览导航"') >= 0 && reg.get('#app').innerHTML.indexOf('ts-file active') >= 0, '资料详情保留浏览列 + 当前文件选中态');
+  const stDup = inCtx(sandbox, 'state.backStack.length');
+  clickAct(handlers, 'nav-file', { 'data-id': 'm_spec' });
+  ok(inCtx(sandbox, 'state.route.id') === 'm_spec' && inCtx(sandbox, 'state.backStack.length') === stDup, '重复点击当前文件不压返回层');
+  clickAct(handlers, 'd-back');
+  ok(inCtx(sandbox, 'state.route.name') === 'topics', '返回实际总览（不是主题正文）');
+
+  /* 主题树开文件 → 返回原主题（展开状态保持）→ 再返回总览；主题页唯一文件入口 */
+  clickAct(handlers, 'nav-topic-files', { 'data-id': 't_meeting' });
+  clickAct(handlers, 'nav-topic', { 'data-id': 't_meeting' });
+  ok(inCtx(sandbox, 'state.route.name') === 'topic' && inCtx(sandbox, 'state.route.id') === 't_meeting', '从树进入主题正文');
+  const tp = reg.get('#app').innerHTML;
+  ok(tp.indexOf('data-act="m-open"') < 0 && tp.indexOf('data-act="nav-file"') >= 0, '主题页唯一文件入口 = 树文件列表（关联资料不重复按钮）');
+  ok(tp.indexOf('从主题浏览列表打开原始文件') >= 0, '主题页提示指向主题浏览列表');
+  ok(tp.indexOf('class="row-main row-info"') >= 0 && tp.indexOf('data-act="t-detach"') >= 0 && tp.indexOf('data-act="t-attach"') >= 0, '「关联资料」非点击信息 + 原关联移除 / 添加操作保留');
+  clickAct(handlers, 'nav-file', { 'data-id': 'm_spec' });
+  ok(inCtx(sandbox, 'state.backStack[state.backStack.length-1].name') === 'topic' && inCtx(sandbox, 'state.backStack[state.backStack.length-1].id') === 't_meeting', '返回上下文 = 原主题（backStack 顶层）');
+  clickAct(handlers, 'd-back');
+  ok(inCtx(sandbox, 'state.route.name') === 'topic' && inCtx(sandbox, 'state.route.id') === 't_meeting', '返回原主题');
+  ok(q(sandbox, reg, '#nav-filesbtn-t_meeting').getAttribute('aria-expanded') === 'true', '文件列表展开状态跨阅读 / 返回保持');
+  clickAct(handlers, 'd-back');
+  ok(inCtx(sandbox, 'state.route.name') === 'topics', '再返回总览');
+
+  /* 全部资料全集与经列表打开的资料不受影响（不扩展浏览列） */
+  clickAct(handlers, 'nav', { 'data-view': 'materials' });
+  ok(inCtx(sandbox, 'state.route.name') === 'materials' && reg.get('#app').innerHTML.indexOf('aria-label="主题浏览导航"') < 0, '全部资料页不扩展浏览列');
+  ok(reg.get('#app').innerHTML.indexOf('data-act="m-open"') >= 0, '全部资料列表仍可打开资料（全集检索保留）');
+  clickAct(handlers, 'm-open', { 'data-id': 'm_spec' });
+  ok(inCtx(sandbox, 'state.route.name') === 'material' && reg.get('#app').innerHTML.indexOf('aria-label="主题浏览导航"') < 0, '经全部资料打开的资料详情不显示浏览列（不扩展）');
+  clickAct(handlers, 'd-back');
+  ok(inCtx(sandbox, 'state.route.name') === 'materials', '返回全部资料');
+
+  /* 样式与资源版本（本轮直接相关） */
+  const CSS = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+  const IDX = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  ok(/\.ts-files\{display:grid;grid-template-rows:0fr/.test(CSS) && /\.ts-files\.open\{grid-template-rows:1fr\}/.test(CSS), '文件列表折叠样式（0fr → 1fr，与分组一致）');
+  ok(/\.ts-file-name\{overflow:hidden;text-overflow:ellipsis;white-space:nowrap/.test(CSS) && CSS.indexOf('.ts-filesbtn[aria-expanded="true"] .ts-caret{transform:rotate(180deg)}') >= 0, '长名省略 + 折叠箭头旋转样式');
+  ok(CSS.indexOf('@media (prefers-reduced-motion:reduce)') >= 0 && /\.ts-file\.active\{background:var\(--accent-soft\)/.test(CSS), '当前文件选中态样式 + reduced-motion 规则保留');
+  ok(IDX.indexOf('style.css?v=20261012-topic-file-tree') >= 0, 'index.html 资源版本 = 20261012-topic-file-tree（避免缓存）');
 }
 
 console.log(fails ? ('\n冒烟检查未通过：' + fails + ' 项') : '\n冒烟检查全部通过');

@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>企业知识管理 · v0.3 主题与资料设计评审原型（主题浏览 + 统一入库）</title>
 <meta name="description" content="企业知识管理 v0.3：主题浏览与统一资料入库的可点击设计评审原型。演示数据仅存在于浏览器内存，不读取文件内容、不上传、未连接后端。">
-<link rel="stylesheet" href="style.css?v=20261012-input-switch">
-<script src="app.js?v=20261012-input-switch" defer></script>
+<link rel="stylesheet" href="style.css?v=20261012-topic-file-tree">
+<script src="app.js?v=20261012-topic-file-tree" defer></script>
 </head>
 <body>
 
@@ -19,7 +19,7 @@
       <p>v0.3 设计评审稿：主题浏览、三联入库（添加资料 → 检查整理结果 → 发布设置）与资料更新均为演示，未连接后端、不读取文件内容、不调用模型。真实识别、保存与处理由后端实现，本原型不伪造结果。</p>
       <p>「使用示例整理结果（演示）」是评审控件：把预置示例文字当作整理结果填入文字型文件；图片、视频、网页只登记原件。没有假处理计时。主题正文初稿也用固定演示段落与确切出处整理，不调用模型。</p>
       <p>权限视角只演示界面差异（只读成员看不到编辑、发布与添加入口）；真实权限由后端强制。刷新或关闭页面后，所有演示改动消失。</p>
-      <p>左侧主导航是企业知识的功能入口（全部主题 / 全部资料 / 添加资料 / 问答测试）；主题浏览列在工作区内部左侧，打开主题后出现（窄屏折叠为内容区「浏览主题」）。</p>
+      <p>左侧主导航是企业知识的功能入口（全部主题 / 全部资料 / 添加资料 / 问答测试）；主题 / 文件浏览列在工作区内部左侧：全部主题总览与主题页均显示，主题下可直接展开关联文件（默认收起；窄屏折叠为内容区「浏览主题」）。打开原始文件统一从该浏览列的文件列表进入。</p>
       <p>两个维度（资料形式 × 内容主题）、多主题关联、返回栈与未覆盖清单等完整设计说明见原型目录 README 与 PRD v0.3。</p>
     </div>
   </details>
@@ -47,6 +47,8 @@
 <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M21 4h-7"/><path d="M10 4H3"/><path d="M21 12h-9"/><path d="M8 12H3"/><path d="M21 20h-5"/><path d="M12 20H3"/><path d="M14 2v4"/><path d="M8 10v4"/><path d="M16 18v4"/></symbol>
 <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></symbol>
 <symbol id="i-layout" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 9v12"/></symbol>
+<symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/></symbol>
+<symbol id="i-video" viewBox="0 0 24 24"><path d="m16 13 5.24 3.5a.5.5 0 0 0 .76-.43V7.93a.5.5 0 0 0-.76-.43L16 11"/><rect x="2" y="6" width="14" height="12" rx="2"/></symbol>
 </defs></svg>
 
 <div class="console">

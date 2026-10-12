@@ -224,7 +224,8 @@ const state = {
   role: 'admin',
   filters: { q: '', format: '', topic: '', status: '' },
   topicQ: '',
-  navGroups: {},           // gid -> 展开态（侧栏主题分组；默认收起）
+  navGroups: {},           // gid -> 展开态（主题浏览树的主题分组；默认收起）
+  navTopicFiles: {},       // tid -> 展开态（主题下的关联文件列表；默认收起，跨阅读/返回保持）
   manageGroups: false,
   topicEdit: null,         // 主题编辑工作副本
   work: null, workDirty: false,     // 添加资料三步工作副本
@@ -307,8 +308,13 @@ function sideNavHTML() {
   h += '<button class="side-link' + (r.name === 'qa' ? ' active' : '') + '" type="button" data-act="nav" data-view="qa"><svg class="ic"><use href="#i-inbox"/></svg>问答测试</button>';
   return h;
 }
-/* 主题浏览树（工作区内部左列 + 窄屏折叠）：pfx 区分两套 DOM（'' 桌面列 / 'm' 窄屏 details），展开状态同一份 */
-function topicTreeHTML(pfx, activeId) {
+/* 主题浏览树（工作区内部左列 + 窄屏折叠）：pfx 区分两套 DOM（'' 桌面列 / 'm' 窄屏 details），展开状态同一份。
+   结构：分组 → 主题 → 主题下关联文件（数据仍为 DB.materials 的 topics 多对多：一份资料关联多个主题时
+   是同一实体，只在各主题下分别列出，不复制归档；只关联真正相关的资料，不按资料形式限制主题）。
+   主题行 = 主题名按钮（进入正文）+ 独立折叠按钮（带数量；只开合文件列表，不导航、不压返回层）；
+   分组与主题文件默认收起，展开状态记在轻量 UI 状态上（navGroups / navTopicFiles）。 */
+const FORMAT_ICON = { pdf: 'i-file', docx: 'i-file', image: 'i-image', video: 'i-video', web: 'i-globe', manual: 'i-pen', other: 'i-file' };
+function topicTreeHTML(pfx, activeId, activeMid) {
   let h = '<div class="ts-head">主题</div>';
   DB.groups.forEach((g) => {
     const open = !!state.navGroups[g.id];
@@ -317,19 +323,36 @@ function topicTreeHTML(pfx, activeId) {
       '<svg class="ic"><use href="#i-folder"/></svg><span class="grow">' + esc(g.name) + '</span><span class="ts-count">' + kids.length + '</span>' +
       '<svg class="ic ts-caret"><use href="#i-chev"/></svg></button>';
     h += '<div class="ts-subs' + (open ? ' open' : '') + '" id="' + pfx + 'nav-sub-' + g.id + '"' + (open ? '' : ' inert') + '><div class="ts-subs-inner">';
-    kids.forEach((t) => { h += topicTreeItemHTML(t, pfx, activeId); });
+    kids.forEach((t) => { h += topicTreeItemHTML(t, pfx, activeId, activeMid); });
     h += '</div></div>';
   });
-  ungroupedTopics().forEach((t) => { h += topicTreeItemHTML(t, pfx, activeId); });
+  ungroupedTopics().forEach((t) => { h += topicTreeItemHTML(t, pfx, activeId, activeMid); });
   if (state.role === 'admin') {
     h += '<button class="ts-link ts-mini" type="button" data-act="topic-new-open"><svg class="ic"><use href="#i-plus"/></svg>新建主题</button>';
   }
   return h;
 }
-function topicTreeItemHTML(t, pfx, activeId) {
+function topicTreeItemHTML(t, pfx, activeId, activeMid) {
   const on = activeId === t.id;
-  return '<button class="ts-link ts-item' + (on ? ' active' : '') + '" type="button" data-act="nav-topic" data-id="' + t.id + '">' +
-    '<span class="ts-dot"></span><span class="grow nav-topic-name">' + esc(t.name) + '</span>' + (t.lifecycle === 'draft' ? '<span class="draft-mini">草稿</span>' : '') + '</button>';
+  const mats = DB.materials.filter((m) => m.topics.includes(t.id));
+  const open = !!state.navTopicFiles[t.id];
+  let h = '<div class="ts-topic-row">' +
+    '<button class="ts-link ts-item' + (on ? ' active' : '') + '" type="button" data-act="nav-topic" data-id="' + t.id + '">' +
+      '<span class="ts-dot"></span><span class="grow nav-topic-name" title="' + esc(t.name) + '">' + esc(t.name) + '</span>' + (t.lifecycle === 'draft' ? '<span class="draft-mini">草稿</span>' : '') + '</button>' +
+    '<button class="ts-filesbtn" type="button" data-act="nav-topic-files" data-id="' + t.id + '" id="' + pfx + 'nav-filesbtn-' + t.id + '" aria-expanded="' + (open ? 'true' : 'false') + '" aria-controls="' + pfx + 'nav-files-' + t.id + '" aria-label="展开或收起「' + esc(t.name) + '」的关联文件（' + mats.length + '）">' +
+      '<svg class="ic ts-caret"><use href="#i-chev"/></svg><span class="ts-filesbtn-n">' + mats.length + '</span></button></div>';
+  h += '<div class="ts-files' + (open ? ' open' : '') + '" id="' + pfx + 'nav-files-' + t.id + '"' + (open ? '' : ' inert') + '><div class="ts-files-inner">';
+  if (mats.length) {
+    mats.forEach((m) => {
+      const fileOn = activeMid === m.id;
+      h += '<button class="ts-file' + (fileOn ? ' active' : '') + '" type="button" data-act="nav-file" data-id="' + m.id + '" title="' + esc(m.name) + '">' +
+        '<svg class="ic"><use href="#' + (FORMAT_ICON[m.format] || 'i-file') + '"/></svg><span class="ts-file-name">' + esc(m.name) + '</span></button>';
+    });
+  } else {
+    h += '<p class="ts-none">无关联资料</p>';
+  }
+  h += '</div></div>';
+  return h;
 }
 /* 分组展开/收起的 DOM 同步（动画 200ms；收起时子项 inert、不可聚焦、读屏跳过）；桌面与窄屏两套树同步 */
 function toggleNavGroup(gid) {
@@ -346,8 +369,24 @@ function toggleNavGroup(gid) {
     }
   });
 }
+/* 主题文件列表的开合（动画 200ms）：只更新该主题的折叠按钮与文件列表，不整页重渲染；
+   收起时子项 inert、不可聚焦、读屏跳过；桌面与窄屏两套树同步。状态在 state.navTopicFiles → 跨阅读/返回保持 */
+function toggleNavTopicFiles(tid) {
+  state.navTopicFiles[tid] = !state.navTopicFiles[tid];
+  const open = state.navTopicFiles[tid];
+  ['', 'm'].forEach((pfx) => {
+    const btn = qs('#' + pfx + 'nav-filesbtn-' + tid);
+    const reg = qs('#' + pfx + 'nav-files-' + tid);
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (reg) {
+      if (reg.classList) reg.classList.toggle('open', open);
+      if (open) { if (reg.removeAttribute) reg.removeAttribute('inert'); }
+      else { if (reg.setAttribute) reg.setAttribute('inert', ''); }
+    }
+  });
+}
 function renderNav() { const el = qs('#side-nav'); if (el) el.innerHTML = sideNavHTML(); }
-/* 窄屏「浏览主题」在选中主题后收起（桌面无此元素或本就收起，调用安全） */
+/* 窄屏「浏览主题」在选中主题或文件后收起（桌面无此元素或本就收起，调用安全） */
 function closeMobileTopicBrowse() { const d = qs('#topic-browse-details'); if (d && d.open) d.open = false; }
 
 /* ---------- 路由渲染 ---------- */
@@ -367,16 +406,22 @@ function render() {
   else if (r.name === 'update') html = updateHTML();
   else if (r.name === 'qa') html = qaHTML();
   else html = missingHTML('页面');
-  /* 主题浏览导航（工作区内部左列）：主题详情 / 编辑页出现；
-     经主题关联资料进入的资料详情沿用已有 backStack 推导上下文保留此列（不改返回栈、不做新领域模型） */
+  /* 主题 / 文件浏览列（工作区内部左列）：从「全部主题」总览（route=topics）起即显示；
+     主题详情 / 编辑页继续显示；由该树打开的资料详情（总览树或主题树，用既有 backStack 顶层判定）同样保留；
+     经「全部资料」列表打开的资料与其他页不显示（不扩展）。
+     返回上下文只用这份轻量 UI 状态与既有 backStack：总览树直开文件 → 返回实际总览（不假装曾进入主题正文）；
+     主题树开文件 → 返回原主题，再返回总览。 */
   const bTop = state.backStack[state.backStack.length - 1];
-  const fromTopicCtx = r.name === 'material' && !!(bTop && bTop.name === 'topic' && topicById(bTop.id));
-  if (r.name === 'topic' || fromTopicCtx) {
-    const activeId = r.name === 'topic' ? r.id : (bTop ? bTop.id : null);
+  const bTopTopic = !!(bTop && bTop.name === 'topic' && topicById(bTop.id));
+  const bTopOverview = !!(bTop && bTop.name === 'topics');
+  const treeCtx = r.name === 'topics' || r.name === 'topic' || (r.name === 'material' && (bTopTopic || bTopOverview));
+  if (treeCtx) {
+    const activeId = r.name === 'topic' ? r.id : (bTopTopic ? bTop.id : null);
+    const activeMid = r.name === 'material' ? r.id : null;
     html = '<div class="workspace-grid">' +
-      '<aside class="topic-side" aria-label="主题浏览导航"><div class="topic-side-inner">' + topicTreeHTML('', activeId) + '</div></aside>' +
+      '<aside class="topic-side" aria-label="主题浏览导航"><div class="topic-side-inner">' + topicTreeHTML('', activeId, activeMid) + '</div></aside>' +
       '<div class="ws-main">' +
-        '<details class="topic-side-details" id="topic-browse-details"><summary>浏览主题</summary><div class="topic-side-inner">' + topicTreeHTML('m', activeId) + '</div></details>' +
+        '<details class="topic-side-details" id="topic-browse-details"><summary>浏览主题</summary><div class="topic-side-inner">' + topicTreeHTML('m', activeId, activeMid) + '</div></details>' +
         html +
       '</div></div>';
   }
@@ -524,11 +569,12 @@ function topicHTML(id) {
   }
   h += '</section>';
 
-  /* 关联资料：默认折叠；它是主题内打开原始文件的唯一列表入口 */
-  if (mats.length) h += '<p class="hint-line">查看原始文件，请展开关联资料。</p>';
+  /* 关联资料：默认折叠；只保留非点击资料信息与原关联编辑 / 移除 / 添加操作——
+     打开原始文件统一从主题浏览树的文件列表（不在此重复文件打开按钮） */
+  if (mats.length) h += '<p class="hint-line">从主题浏览列表打开原始文件。</p>';
   h += '<details class="section-fold topic-block"' + (matsOpen ? ' open' : '') + '><summary><span class="fold-title">关联资料</span><span class="fold-count">' + mats.length + ' 条</span></summary><div class="fold-body">';
   if (mats.length) {
-    h += '<div class="rows">' + mats.map((m) => materialRowHTML(m, id)).join('') + '</div>';
+    h += '<div class="rows">' + mats.map((m) => materialRowHTML(m, id, false)).join('') + '</div>';
   } else {
     h += '<div class="empty empty-inline"><p>还没有关联资料。</p>' + (state.role === 'admin' ? '<span class="actions"><button class="button secondary" type="button" data-act="t-add-mat">添加资料</button><button class="button secondary" type="button" data-act="t-attach-pick">关联已有资料</button></span>' : '') + '</div>';
   }
@@ -578,14 +624,19 @@ function srcChipHTML(p) {
   const label = sourceLabel(p);
   return '<span class="src-chip muted-src">来源：' + esc(label || '成员人工撰写') + '</span>';
 }
-function materialRowHTML(m, fromTopic) {
+/* 资料行两个用法：openable !== false = 「全部资料」列表（跨主题检索，保留可点击打开）；
+   openable === false = 主题「关联资料」（非点击信息 + 原关联编辑/移除操作；打开原始文件统一走主题浏览树，不重复按钮） */
+function materialRowHTML(m, fromTopic, openable) {
   const a = availability(m);
   const ri = recogInfo(m);
   const tnames = m.topics.map((tid) => { const t = topicById(tid); return t ? t.name : ''; }).filter(Boolean);
-  return '<div class="row"><button class="row-main" type="button" data-act="m-open" data-id="' + m.id + '" data-from="' + (fromTopic ? 'topic' : 'list') + '">' +
-    '<span class="row-title"><span class="tag type">' + esc(FORMAT[m.format].label) + '</span><strong>' + esc(m.name) + '</strong>' +
+  const info = '<span class="row-title"><span class="tag type">' + esc(FORMAT[m.format].label) + '</span><strong>' + esc(m.name) + '</strong>' +
     (m.updateDraft ? '<span class="tag review">有更新草稿</span>' : '') + '</span>' +
-    '<span class="row-meta"><span>' + esc(ri.label) + '</span>' + (tnames.length ? '<span>主题：' + esc(tnames.join('、')) + '</span>' : '<span>未关联主题</span>') + '</span></button>' +
+    '<span class="row-meta"><span>' + esc(ri.label) + '</span>' + (tnames.length ? '<span>主题：' + esc(tnames.join('、')) + '</span>' : '<span>未关联主题</span>') + '</span>';
+  const main = openable === false
+    ? '<div class="row-main row-info">' + info + '</div>'
+    : '<button class="row-main" type="button" data-act="m-open" data-id="' + m.id + '">' + info + '</button>';
+  return '<div class="row">' + main +
     '<div class="row-side"><span class="pill ' + a.pill + '">' + esc(a.label) + '</span>' + (state.role === 'admin' && fromTopic ? '<button class="icon-btn" type="button" data-act="t-detach" data-id="' + m.id + '" aria-label="从本主题移除关联 ' + esc(m.name) + '"><svg class="ic"><use href="#i-x"/></svg></button>' : '') + '</div></div>';
 }
 function relationTreeHTML(t, mats) {
@@ -633,7 +684,7 @@ function listRegionHTML() {
   const list = materialFiltered();
   let h = '';
   if (list.length) {
-    h += '<div class="rows">' + list.map((m) => materialRowHTML(m, null)).join('') + '</div>';
+    h += '<div class="rows">' + list.map((m) => materialRowHTML(m, null, true)).join('') + '</div>';
     h += '<div class="list-count">共 ' + DB.materials.length + ' 条资料，当前显示 ' + list.length + ' 条</div>';
   } else {
     const f = state.filters;
@@ -1519,15 +1570,19 @@ function onClick(e) {
       return;
     }
     case 'nav-toggle-group': toggleNavGroup(el.getAttribute('data-gid')); return;
-    case 't-open': { const id = el.getAttribute('data-id'); requestLeave(() => { resetFlows(); openTopic(id, null); }); return; }
-    case 't-open-from-mat': { const id = el.getAttribute('data-id'); const m = materialById(state.route.id); requestLeave(() => { resetFlows(); openTopic(id, m ? '返回资料「' + m.name + '」' : null); }); return; }
-    case 'm-open': {
+    case 'nav-topic-files': { toggleNavTopicFiles(el.getAttribute('data-id')); return; }   /* 只开合主题下的文件列表：不导航、不压返回层 */
+    case 'nav-file': {
       const id = el.getAttribute('data-id');
-      const from = el.getAttribute('data-from');
-      if (from === 'topic') { const t2 = topicById(state.route.id); requestLeave(() => { resetFlows(); openMaterial(id, t2 ? '返回主题「' + t2.name + '」' : null); }); }
-      else requestLeave(() => { resetFlows(); openMaterial(id, null); });
+      if (!materialById(id)) return;
+      if (state.route.name === 'material' && state.route.id === id) { closeMobileNav(); closeMobileTopicBrowse(); return; }   /* 重复点击当前文件：只关抽屉/收起窄屏浏览树，不压返回层 */
+      closeMobileNav();
+      closeMobileTopicBrowse();   /* 窄屏选中文件后收起内部浏览树（桌面无此折叠） */
+      requestLeave(() => { resetFlows(); openMaterial(id, null); });   /* 返回上下文交给既有 backStack：总览树开文件→实际总览；主题树开文件→原主题 */
       return;
     }
+    case 't-open': { const id = el.getAttribute('data-id'); requestLeave(() => { resetFlows(); openTopic(id, null); }); return; }
+    case 't-open-from-mat': { const id = el.getAttribute('data-id'); const m = materialById(state.route.id); requestLeave(() => { resetFlows(); openTopic(id, m ? '返回资料「' + m.name + '」' : null); }); return; }
+    case 'm-open': { const id = el.getAttribute('data-id'); requestLeave(() => { resetFlows(); openMaterial(id, null); }); return; }
     case 't-rel-open': { const id = el.getAttribute('data-id'); const t2 = topicById(state.route.id); requestLeave(() => { resetFlows(); openTopic(id, t2 ? '返回主题「' + t2.name + '」' : null); }); return; }
     case 'd-back': { requestLeave(() => { resetFlows(); doBack(); }); return; }
     case 'search-clear': {
