@@ -375,5 +375,66 @@ function keydown(handlers, key) {
   ok(inCtx(sandbox, 'work() !== null && work().step === 3'), '发布被拦（未提交，闸门未放宽）');
 }
 
+/* ══ 10. 单一资料输入卡片（默认文件 / 切换保留工作批次与模式 / 返回第 1 步保持、新流程重置）
+   + 全部主题列表层级的字号作用域（本轮新增；其余断言原样保留） ══ */
+{
+  const path = require('path');
+  const { sandbox, reg, handlers } = loadApp();
+  const CSS = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+  const IDX = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+
+  clickAct(handlers, 'nav', { 'data-view': 'capture' });
+  ok(inCtx(sandbox, 'work().inputMode') === 'file', '第 1 步默认输入方式 = 文件');
+  const s1 = inCtx(sandbox, 'captureStep1HTML()');
+  ok((s1.match(/data-mode-card="/g) || []).length === 3 && (s1.match(/data-mode-card="(url|text)" hidden/g) || []).length === 2 && s1.indexOf('data-mode-card="file" hidden') < 0, '单模式显示：只显示文件输入卡片（另外两种隐藏）');
+  ok((s1.match(/aria-pressed="true"/g) || []).length === 1 && s1.indexOf('data-act="c-input-mode"') > s1.indexOf('data-mode-card="text"'), '三个切换按钮在卡片下方且恰有一个 pressed（文件 / 网页地址 / 手动文字）');
+
+  /* 切换不丢工作批次（已添加列表），并就地更新显示（不整页重渲染） */
+  clickAct(handlers, 'c-load-sample');
+  const items0 = inCtx(sandbox, 'work().items.length');
+  clickAct(handlers, 'c-input-mode', { 'data-mode': 'url' });
+  ok(inCtx(sandbox, 'work().inputMode') === 'url' && inCtx(sandbox, 'work().items.length') === items0, '切换到网页地址：工作批次保留（' + items0 + ' 件）');
+  ok(q(sandbox, reg, '[data-mode-card="url"]').hidden === false && q(sandbox, reg, '[data-mode-card="file"]').hidden === true, '切换后就地只显示所选卡片（无整页重渲染）');
+  inCtx(sandbox, 'render();');
+  const s2 = inCtx(sandbox, 'captureStep1HTML()');
+  ok(s2.indexOf('data-mode-card="url" hidden') < 0 && s2.indexOf('data-mode-card="file" hidden') >= 0 && inCtx(sandbox, 'work().inputMode') === 'url', '重复 render 后模式保持（存在工作副本上）');
+
+  /* 列表中的手动正文编辑不因切换丢失（内容随输入写入工作副本） */
+  clickAct(handlers, 'c-input-mode', { 'data-mode': 'text' });
+  clickAct(handlers, 'c-add-text');
+  const mid2 = inCtx(sandbox, 'work().items[work().items.length-1].id');
+  inputAct(handlers, 'c-item-name', { 'data-id': mid2 }, '会议纪要模板');
+  inputAct(handlers, 'c-item-text', { 'data-id': mid2 }, '复盘要点：每周五整理一次行动项。');
+  clickAct(handlers, 'c-input-mode', { 'data-mode': 'file' });
+  ok(inCtx(sandbox, 'work().items[work().items.length-1].name') === '会议纪要模板' && inCtx(sandbox, 'work().items[work().items.length-1].paras[0].text').indexOf('每周五') >= 0, '切换不丢列表中的手动正文与名称');
+
+  /* 返回第 1 步保持本次选择；新添加流程才重置为文件 */
+  clickAct(handlers, 'c-input-mode', { 'data-mode': 'text' });
+  clickAct(handlers, 'c-next');
+  clickAct(handlers, 'c-back');
+  ok(inCtx(sandbox, 'work().step') === 1 && inCtx(sandbox, 'work().inputMode') === 'text', '返回第 1 步保持本次选择（手动文字）');
+  clickAct(handlers, 'nav', { 'data-view': 'capture' });   /* 有未保存内容 → 未保存对话框 */
+  dlgClick(handlers, 1);                                   /* 放弃修改并离开 → 新添加流程 */
+  ok(inCtx(sandbox, 'work() !== null && work().inputMode') === 'file' && inCtx(sandbox, 'work().items.length') === 0, '新添加流程重置默认文件（空批次）');
+
+  /* 全部主题列表层级：字号 / 缩进只在 .topic-sec 作用域内；h1 仍最大；不越过到全部资料 / 主题详情 */
+  const sz = (re) => Number((re.exec(CSS) || [])[1]) || 0;
+  const sH1 = sz(/h1\{font-size:(\d+)px/);
+  const sGroup = sz(/\.topic-sec-head h2\{[^}]*font-size:(\d+)px/);
+  const sRow = sz(/\.topic-sec \.row-title strong\{font-size:(\d+)px/);
+  const sMeta = sz(/\.topic-sec \.row-meta\{font-size:(\d+)px/);
+  ok(sGroup === 18 && /\.topic-sec-head h2\{[^}]*font-weight:600/.test(CSS), '分组标题 18px/600（未分组章节同规则）');
+  ok(sRow === 16 && /\.topic-sec \.row-title strong\{font-size:16px;font-weight:600\}/.test(CSS), '主题名 16px/600 且作用域限定 .topic-sec');
+  ok(sMeta === 13 && /\.topic-sec \.row-meta\{font-size:13px;font-weight:400;color:var\(--text-3\)\}/.test(CSS), '说明 13px / 常规 / 较浅 且作用域限定 .topic-sec');
+  ok(sH1 > sGroup && sGroup > sRow && sRow > sMeta, '层级：h1 ' + sH1 + ' > 分组 ' + sGroup + ' > 主题名 ' + sRow + ' > 说明 ' + sMeta);
+  ok(/\.topic-sec \.rows \.row\{padding-left:30px\}/.test(CSS) && CSS.indexOf('.choose-grid') < 0, '主题行相对分组缩进约 20px（30px 内边距 − 10px 负外边距）；旧三栏同排样式已移除');
+  const m600 = CSS.indexOf('@media(max-width:600px){');
+  const m480 = CSS.indexOf('@media(max-width:480px){');
+  ok(m600 >= 0 && m480 > m600 && CSS.slice(m600, m480).indexOf('.topic-sec .rows .row{padding-left:22px}') >= 0, '窄屏（≤600px，含 320/390）缩进收窄为 12px');
+  ok(CSS.indexOf('.mode-card[hidden]{display:none}') >= 0, '单卡片样式：非当前方式 hidden 即不显示');
+  ok(/\.row-title strong\{font-size:15px;font-weight:550;color:var\(--text-1\)/.test(CSS), '全局行规则保持原样（全部资料 / 主题详情不受影响）');
+  ok(IDX.indexOf('style.css?v=20261012-input-switch') >= 0 && IDX.indexOf('app.js?v=20261012-input-switch') >= 0, 'index.html 资源版本 = 20261012-input-switch');
+}
+
 console.log(fails ? ('\n冒烟检查未通过：' + fails + ' 项') : '\n冒烟检查全部通过');
 process.exit(fails ? 1 : 0);

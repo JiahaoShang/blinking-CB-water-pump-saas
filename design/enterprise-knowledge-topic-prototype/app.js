@@ -782,7 +782,9 @@ function newWorkItem(o) {
   return it;
 }
 function startCapture(prefillTopicId) {
-  state.work = { step: 1, items: [], usage: 'internal', aiOn: false, expiry: '', assocConfirmed: false, prefillTopic: prefillTopicId || '', committed: false };
+  /* inputMode = 第 1 步当前显示的输入方式（file / url / text）：每次只显示一个输入卡片，默认文件；
+     存在工作副本上 → 返回第 1 步保持本次选择，只有新添加流程才重置为文件 */
+  state.work = { step: 1, items: [], usage: 'internal', aiOn: false, expiry: '', assocConfirmed: false, prefillTopic: prefillTopicId || '', committed: false, inputMode: 'file' };
   state.workDirty = false;
   state.backStack = [];
   state.route = { name: 'capture', id: null, step: 1 };
@@ -820,19 +822,34 @@ function captureHTML() {
   else h += captureStep3HTML();
   return h;
 }
+/* 第 1 步的输入方式：file / url / text。每次只显示一个输入卡片（其余带 hidden），
+   默认文件；三个切换按钮在卡片下方（aria-pressed 表达当前方式）。 */
+function inputMode() { const w = work(); return (w && w.inputMode) || 'file'; }
+function inputModeCardHTML(mode, cur, body) {
+  return '<div class="drop mode-card" data-mode-card="' + mode + '"' + (mode === cur ? '' : ' hidden') + '>' + body + '</div>';
+}
+function inputSwitchHTML(cur) {
+  const btn = (m, label) => '<button class="switch-btn' + (m === cur ? ' on' : '') + '" type="button" data-act="c-input-mode" data-mode="' + m + '" aria-pressed="' + (m === cur ? 'true' : 'false') + '">' + label + '</button>';
+  return '<div class="input-switch" role="group" aria-label="资料输入方式">' + btn('file', '文件') + btn('url', '网页地址') + btn('text', '手动文字') + '</div>';
+}
 function captureStep1HTML() {
   const w = work();
   let h = '<div class="toolbar"><div><h1>第 1 步：添加资料</h1><p class="step-sub">把资料加进来：文件、网页地址或手动文字都可以。</p></div></div>';
   if (w.prefillTopic) { const t = topicById(w.prefillTopic); if (t) h += '<div class="info-note"><svg class="ic"><use href="#i-book"/></svg><span>本批会优先建议关联到「' + esc(t.name) + '」，确认后在检查步骤仍可调整。</span></div>'; }
-  h += '<div class="card"><div class="choose-grid">' +
-    '<div class="drop"><svg class="ic big"><use href="#i-upload"/></svg><strong>选择文件（可多选）</strong><p>PDF、DOCX、图片、视频等都可以；只登记名称与大小，不上传。</p>' +
-    '<input type="file" id="file-input" class="sr-input" multiple aria-label="选择文件">' +
-    '<div class="actions"><button class="button" type="button" data-act="pick-file">选择文件</button></div></div>' +
-    '<div class="drop"><svg class="ic big"><use href="#i-globe"/></svg><strong>登记网页地址</strong><p>登记在线文章或产品页的链接。</p>' +
-    '<div class="inline-row"><input id="c-url" placeholder="https://…" aria-label="网页地址"><button class="button secondary" type="button" data-act="c-add-url">登记地址</button></div></div>' +
-    '<div class="drop"><svg class="ic big"><use href="#i-pen"/></svg><strong>手动文字</strong><p>直接写正文；来源标注为「人工撰写」。</p>' +
-    '<div class="actions"><button class="button secondary" type="button" data-act="c-add-text">添加手动文字</button></div></div>' +
-    '</div></div>';
+  /* 每次只显示一个资料输入卡片；切换区（三个按钮）在卡片下方 */
+  const cur = inputMode();
+  h += '<div class="card"><div class="input-modes">' +
+    inputModeCardHTML('file', cur,
+      '<svg class="ic big"><use href="#i-upload"/></svg><strong>选择文件（可多选）</strong><p>PDF、DOCX、图片、视频等都可以；只登记名称与大小，不上传。</p>' +
+      '<input type="file" id="file-input" class="sr-input" multiple aria-label="选择文件">' +
+      '<div class="actions"><button class="button" type="button" data-act="pick-file">选择文件</button></div>') +
+    inputModeCardHTML('url', cur,
+      '<svg class="ic big"><use href="#i-globe"/></svg><strong>登记网页地址</strong><p>登记在线文章或产品页的链接。</p>' +
+      '<div class="inline-row"><input id="c-url" placeholder="https://…" aria-label="网页地址"><button class="button secondary" type="button" data-act="c-add-url">登记地址</button></div>') +
+    inputModeCardHTML('text', cur,
+      '<svg class="ic big"><use href="#i-pen"/></svg><strong>手动文字</strong><p>直接写正文；来源标注为「人工撰写」。</p>' +
+      '<div class="actions"><button class="button secondary" type="button" data-act="c-add-text">添加手动文字</button></div>') +
+    '</div>' + inputSwitchHTML(cur) + '</div>';
   h += '<details class="scenario-box"><summary>载入混合示例<small>不用准备文件也能走通</small></summary><p class="sc-note">载入一组示例资料（PDF、DOCX、图片、视频、网页）；这只是演示数据，不代表真实识别。</p><div class="actions"><button class="button secondary" type="button" data-act="c-load-sample">载入混合示例（演示）</button></div></details>';
   h += '<div class="card"><h2>本批资料<small class="muted"> ' + w.items.length + ' 件</small></h2>';
   if (w.items.length) {
@@ -1647,6 +1664,23 @@ function captureClick(act, el) {
   const w = work();
   switch (act) {
     case 'pick-file': { const fi = qs('#file-input'); if (fi) fi.click(); return; }
+    case 'c-input-mode': {
+      /* 切换第 1 步的输入方式：只换显示哪一个卡片（就地更新，不整页重渲染）——
+         已添加列表 / 工作批次、预选主题、列表里未提交的编辑内容都不受影响 */
+      const m = el.getAttribute('data-mode');
+      if (!w || (m !== 'file' && m !== 'url' && m !== 'text')) return;
+      w.inputMode = m;
+      ['file', 'url', 'text'].forEach((k) => {
+        const card = qs('[data-mode-card="' + k + '"]');
+        if (card) card.hidden = (k !== m);
+        const btn = qs('[data-act="c-input-mode"][data-mode="' + k + '"]');
+        if (btn) {
+          btn.setAttribute('aria-pressed', k === m ? 'true' : 'false');
+          if (btn.classList) btn.classList.toggle('on', k === m);
+        }
+      });
+      return;
+    }
     case 'c-add-url': {
       const inp = qs('#c-url'); const url = inp ? inp.value.trim() : '';
       if (!url || !/^https?:\/\//.test(url)) { toast('请输入以 http(s):// 开头的网页地址。', true); return; }

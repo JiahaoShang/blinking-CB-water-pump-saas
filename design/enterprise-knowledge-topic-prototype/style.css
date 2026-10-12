@@ -262,9 +262,16 @@ details:is(.opt-box,.opt-details,.scenario-box,.more-wrap)>summary .ic{color:var
 /* ── 主题列表页 ── */
 .topic-sec{margin:0 0 6px}
 .topic-sec-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 10px 2px;margin:0 -10px}
-.topic-sec-head h2{display:flex;align-items:center;gap:7px;margin:0;font-size:14.5px}
+/* 分组标题 18px/600（高于主题名；h1 页面标题 24px 仍最大）。未分组章节同一套语义 */
+.topic-sec-head h2{display:flex;align-items:center;gap:7px;margin:0;font-size:18px;font-weight:600}
 .topic-sec-head h2 .ic{color:var(--text-3)}
 .topic-count{font-size:12.5px;color:var(--text-3)}
+/* 全部主题列表层级（仅本页，作用域 .topic-sec）：主题名 16px/600 > 说明 13px/常规/较浅；
+   主题行相对分组区块缩进约 20px（行左内边距 30px − 行负外边距 10px），
+   说明（相关资料 / 更新日期）与主题名左侧对齐；不影响「全部资料」列表与主题详情排版 */
+.topic-sec .rows .row{padding-left:30px}
+.topic-sec .row-title strong{font-size:16px;font-weight:600}
+.topic-sec .row-meta{font-size:13px;font-weight:400;color:var(--text-3)}
 .mng-controls{display:inline-flex;gap:6px;margin-left:auto}
 .move-select{width:auto;min-width:130px;height:32px;font-size:13px;padding:0 28px 0 9px}
 .danger-link{color:var(--danger-text)}
@@ -405,7 +412,14 @@ table.fields td .muted{display:block;margin-top:2px}
 .scenario-inline .sc-note b{color:var(--text-1)}
 
 /* ── 添加资料：选择区与批次条目 ── */
-.choose-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+/* 第 1 步：单一资料输入卡片（每次只显示一种方式；另外两种带 hidden，display:none）。
+   切换区 = 卡片下方三个切换按钮（aria-pressed 表达当前方式），原地切换、不重渲染列表 */
+.mode-card[hidden]{display:none}
+.input-switch{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;padding-top:13px;border-top:1px solid var(--border-subtle)}
+.switch-btn{height:34px;padding:0 14px;border:1px solid var(--border-strong);border-radius:var(--r-md);
+  background:var(--surface);color:var(--text-2);font-size:13.5px;font-weight:500}
+.switch-btn:hover{background:var(--surface-2);color:var(--text-1)}
+.switch-btn.on{background:var(--accent-soft);border-color:var(--accent-border);color:#3A2FBF;font-weight:600}
 .drop{border:1.5px dashed var(--border-strong);border-radius:var(--r-lg);background:var(--surface);padding:18px 16px;text-align:left}
 .drop strong{display:block;font-size:15px;margin-bottom:6px}
 .drop p{font-size:13px;color:var(--text-3);line-height:1.65;margin:0 0 12px}
@@ -519,7 +533,6 @@ table.fields td .muted{display:block;margin-top:2px}
 /* ── 响应式：1440 与 390/320 均须可用 ── */
 @media(max-width:1080px){
   .compare-row{grid-template-columns:minmax(0,1fr)}
-  .choose-grid{grid-template-columns:minmax(0,1fr)}
 }
 @media(max-width:900px){
   .console{grid-template-columns:minmax(0,1fr)}
@@ -551,6 +564,8 @@ table.fields td .muted{display:block;margin-top:2px}
   .preview-note .rn-body{left:18px;right:18px;width:auto}
   .item-head{gap:7px}
   .item-name-input{max-width:none}
+  /* 窄屏（390/320）：主题行缩进收窄（20px → 12px），长名称不横向溢出 */
+  .topic-sec .rows .row{padding-left:22px}
 }
 @media(max-width:480px){
   .steps{gap:8px}
