@@ -303,7 +303,20 @@ def parse_float(value: str | None) -> float | None:
 class Database(BusinessChannels, EnterpriseKnowledge, EnterpriseKnowledgePhase2):
     def __init__(self, path: str | os.PathLike[str], *, initialize: bool = True):
         self.path = str(path)
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        db_file = Path(self.path)
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        if not db_file.exists():
+            # 业务库含连接配置与客户隐私：新库先以 0600 落盘（显式属主读写，不随 umask 放宽）。
+            # 既有库打开时不改权限：不修改现有业务数据（原目录权限由 T4 部署复核时统一处理）。
+            try:
+                fd = os.open(db_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                fd = None
+            if fd is not None:
+                try:
+                    os.fchmod(fd, 0o600)
+                finally:
+                    os.close(fd)
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
@@ -3195,10 +3208,10 @@ class Database(BusinessChannels, EnterpriseKnowledge, EnterpriseKnowledgePhase2)
         storage_path = None
         status = "registered"
         if content:
-            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            ensure_private_dir(UPLOAD_DIR)
             safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", Path(filename).name).strip(".") or "source.bin"
             target = UPLOAD_DIR / f"{source_id}-{safe_name}"
-            target.write_bytes(content)
+            write_private_bytes(target, content)
             storage_path = str(target.relative_to(ROOT))
             status = "stored"
         self.conn.execute(
@@ -6579,14 +6592,55 @@ def _whatsapp_personal_is_self_chat(from_jid: str, to_jid: str) -> bool:
     return from_jid == to_jid or to_jid in self_ids
 
 
+def _append_private_log(path, line: str) -> None:
+    """追加写诊断/审计日志：新文件 0600、旧文件收紧到 0600（不随进程 umask 变成其他本地用户可读）。
+
+    经 os.fdopen 二进制文件对象写入：单次 os.write 可能短写（返回值不可忽略），文件对象
+    负责把整行写完整；closefd=False 使句柄仍由本函数统一关闭（权限保持 0600）。
+    """
+    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "ab", closefd=False) as handle:
+            handle.write(line.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def write_private_bytes(path, data: bytes) -> None:
+    """写入私有原件/资料：显式 0600，不随进程 umask 变成其他本地用户可读。
+
+    经 os.fdopen 二进制文件对象写入：单次 os.write 可能短写（返回值不可忽略），文件对象
+    负责把数据写完整；closefd=False 使句柄仍由本函数统一关闭（权限保持 0600）。
+    """
+    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb", closefd=False) as handle:
+            handle.write(data)
+    finally:
+        os.close(fd)
+
+
+def ensure_private_dir(path) -> Path:
+    """私有目录（原件/知识导入）：新建时收紧为 0700；已存在的目录保持原权限不动。
+
+    既有部署目录的权限复核属 T4 范畴；这里只保证本次新建的目录不随 umask 放宽。
+    """
+    target = Path(path)
+    if target.is_dir():
+        return target
+    target.mkdir(parents=True, exist_ok=True)
+    os.chmod(target, 0o700)
+    return target
+
+
 def _whatsapp_personal_debug(summary: dict) -> None:
     """诊断日志（WHATSAPP_PERSONAL_DEBUG=1 时启用）：逐条记录入站事件摘要与处理结果。"""
     if os.environ.get("WHATSAPP_PERSONAL_DEBUG", "").strip() != "1":
         return
     try:
-        path = ROOT / "data" / "whatsapp_personal_events.log"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(summary, ensure_ascii=False) + "\n")
+        _append_private_log(ROOT / "data" / "whatsapp_personal_events.log", json.dumps(summary, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
@@ -6980,6 +7034,51 @@ def _mark_outbound_failed(db: Database, message_id: str, error: str) -> tuple[bo
     return False, error
 
 
+# 出站总线「实际投递前」复核（T1 第二轮最小修复）：
+# 消息来源 → 发送所需模块（与该来源页面入口的模块授权一致）。
+OUTBOUND_SOURCE_MODULES = {
+    "staff-reply": "inbox",
+    "rfq-link": "inbox",
+    "lead-reply": "sales",
+    "human-engineer": "tasks",
+}
+
+
+def outbound_required_module(source: str) -> str:
+    """按消息来源给出发送所需模块；未知来源返回空串（不做模块复核，只复核对象权限）。"""
+    source = (source or "").strip()
+    if source.startswith("engineer-followup:"):
+        return "tasks"
+    return OUTBOUND_SOURCE_MODULES.get(source, "")
+
+
+def outbound_actor_block_reason(db: Database, tenant_id: str, message: sqlite3.Row, conversation: sqlite3.Row) -> str:
+    """实际投递前的发送人复核：当前仍须具备发送所需模块与对象权限；不通过则返回阻止原因。
+
+    - 无 actor_email 的消息（AI 自动答复等系统发送）不做人工权限复核；
+    - 管理员按全模块口径放行（管理员重试/转交的既有业务规则不变）；
+    - 员工需同时满足：来源模块仍在授权内 + can_send_conversation（连接负责人/成员或被授权对象）。
+      停用（active=0）、撤模块、撤连接授权之后，排队中的消息不得再送达外部渠道。
+    """
+    actor_email = (message["actor_email"] or "").strip()
+    if not actor_email:
+        return ""
+    actor = db.conn.execute(
+        "SELECT id, role FROM users WHERE tenant_id=? AND email=? AND active=1",
+        (tenant_id, actor_email),
+    ).fetchone()
+    if not actor:
+        return "发送人已停用或不在此企业，消息未发出"
+    if actor["role"] == "admin":
+        return ""
+    required = outbound_required_module(message["source"] or "")
+    if required and required not in db.get_user_modules(actor["id"]):
+        return f"发送人已无「{MODULE_LABELS.get(required, required)}」模块授权，消息未发出"
+    if not db.can_send_conversation(tenant_id, conversation["id"], actor["id"]):
+        return "没有此账号的发送授权"
+    return ""
+
+
 def dispatch_outbound(db: Database, tenant_id: str, message_id: str) -> tuple[bool, str]:
     """出站总线投递（发送与重试共用）：queued/failed → sent / failed。
 
@@ -7014,10 +7113,10 @@ def dispatch_outbound(db: Database, tenant_id: str, message_id: str) -> tuple[bo
         config = json.loads(account["config_json"] or "{}")
     except json.JSONDecodeError:
         config = {}
-    if account_id and message['actor_email']:
-        actor = db.conn.execute('SELECT id FROM users WHERE tenant_id=? AND email=? AND active=1', (tenant_id, message['actor_email'])).fetchone()
-        if not actor or not db.can_send_conversation(tenant_id, conversation['id'], actor['id']):
-            return _mark_outbound_failed(db, message_id, '没有此账号的发送授权')
+    # 实际投递前复核发送人权限：模块被撤/成员被停用/连接授权被移除后，排队消息不得送出。
+    block_reason = outbound_actor_block_reason(db, tenant_id, message, conversation)
+    if block_reason:
+        return _mark_outbound_failed(db, message_id, block_reason)
     try:
         external_id = send_channel_text(channel, config, identity["external_user_id"], channel_outbound_text(message))
     except ChannelSendError as error:
@@ -8011,6 +8110,50 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
             self.send_header("Set-Cookie", cookie)
         self.end_headers()
 
+    def request_scheme(self) -> str:
+        """请求的外部实际协议：反代经 X-Forwarded-Proto 告知（本地直连默认 http）。"""
+        return (self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower() or "http")
+
+    def cookie_security_suffix(self) -> str:
+        """https 访问时给会话 Cookie 追加 Secure（本地 http 开发不受影响）。"""
+        return "; Secure" if self.request_scheme() == "https" else ""
+
+    def origin_matches_request_host(self, origin: str) -> bool:
+        """Origin 是否与本次请求同源：协议、主机、有效端口三项都按浏览器同源口径比较。
+
+        - 协议以实际访问协议为准（反代经 X-Forwarded-Proto 声明 https；本地直连为 http）；
+        - 主机只认请求自身的 Host 头：X-Forwarded-Host 等转发头可被客户端伪造，不作授权依据；
+          反向代理必须保留外部 Host、覆盖外来转发头（见 T1 审查与 T4 部署手册）。
+        """
+        parsed = urlparse(origin or "")
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        scheme = self.request_scheme()
+        if parsed.scheme != scheme:
+            return False
+        request_host = urlparse("//" + self.headers.get("Host", "").strip())
+        if (request_host.hostname or "").lower() != parsed.hostname.lower():
+            return False
+        try:
+            origin_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            request_port = request_host.port or (443 if scheme == "https" else 80)
+        except ValueError:
+            return False
+        return origin_port == request_port
+
+    def same_origin_browser_post(self) -> bool:
+        """浏览器跨站 POST 的第二道闸（第一道是会话 Cookie 的 SameSite=Lax）。
+
+        - 带 Origin：必须与请求同源（协议/主机/有效端口），否则拒绝；
+        - 无 Origin：浏览器 fetch/表单在跨站时仍会带 Sec-Fetch-Site: cross-site → 拒绝；
+          部署脚本/命令行（两者都没有）保持既有行为。
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return self.headers.get("Sec-Fetch-Site", "").strip().lower() != "cross-site"
+        return self.origin_matches_request_host(origin)
+
+
     def cookie_value(self, name: str) -> str | None:
         raw = self.headers.get("Cookie", "")
         for part in raw.split(";"):
@@ -8146,7 +8289,8 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
             self.send_json({"error": "site_not_found"}, 404)
             return None
         origin = self.headers.get("Origin")
-        same_host_page = origin and urlparse(origin).netloc == self.headers.get("Host") and urlparse(origin).scheme in {"http", "https"}
+        # 登记企业网站的 Origin 白名单按登记值精确匹配；平台自身页面按「协议/主机/有效端口」判同源。
+        same_host_page = bool(origin) and self.origin_matches_request_host(origin)
         if origin and origin != site["allowed_origin"] and not same_host_page:
             self.send_json({"error": "origin_not_allowed"}, 403)
             return None
@@ -8274,6 +8418,11 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
             self.redirect("/admin")
             return
         next_path = query.get("next", ["/admin/sales"])[0]
+        # 演示账号与口令只在演示模式（start_demo.py 专用开关）下展示：普通部署的登录页不得公开任何演示凭据。
+        demo_hint = (
+            "本地演示环境由 `python3 tools/demo/start_demo.py` 创建（文档化的演示账号 demo-admin / demo-sales / demo-engineer，密码与账号相同，仅限本地演示）。"
+            if self.demo_tools else ""
+        )
         # 报错方式（复刻设计稿）：表单汇总错误条 —— 顶部红条 + 图钉图标，字段照常保留。
         error_html = f"<div class='form-alert' role='alert'><div><b>无法登录。</b>{esc(error)}，请检查后重试。</div></div>" if error else ""
         body = f"""
@@ -8284,7 +8433,7 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
 <p class='auth-sub'>登录后只能访问当前账号所属企业的数据。买方公开页面不需要后台账号。</p>
 {error_html}
 <form method='post' action='/login'><input type='hidden' name='next' value='{esc(next_path)}'><label>邮箱</label><input name='email' type='email' autocomplete='username' required placeholder='name@company.example'><label>密码</label><input name='password' type='password' autocomplete='current-password' required><p class='auth-submit'><button class='wide'>登录</button></p></form>
-<p class='footer-note'>新部署的数据库不预置任何账号：请先用 `python3 tools/create_admin.py` 创建管理员。本地演示环境由 `python3 tools/demo/start_demo.py` 创建（文档化的演示账号 demo-admin / demo-sales / demo-engineer，密码与账号相同，仅限本地演示）。</p>
+<p class='footer-note'>新部署的数据库不预置任何账号：请先用 `python3 tools/create_admin.py` 创建管理员。{demo_hint}</p>
 </section>
 """
         self.send_html(auth_layout("企业后台登录", body), 200)
@@ -8302,11 +8451,11 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
             # 默认落点自适应（V1-01 模块授权制）：没有「销售工作台」模块的员工落到概览，避免登录即见 403
             next_path = "/admin"
         session_id = self.db.create_session(user)
-        self.redirect(next_path, f"cb_session={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200")
+        self.redirect(next_path, f"cb_session={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200" + self.cookie_security_suffix())
 
     def logout(self) -> None:
         self.db.delete_session(self.cookie_value("cb_session"))
-        self.redirect("/login", "cb_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+        self.redirect("/login", "cb_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" + self.cookie_security_suffix())
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -8528,7 +8677,7 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
             token = self.db.issue_buyer_access(self.tenant_id, conversation_id)
             self.redirect(
                 f"/inquiry/{conversation_id}?lang={query.get('lang', ['en'])[0]}",
-                f"cb_buyer_{conversation_id}={token}; Path=/inquiry/{conversation_id}; HttpOnly; SameSite=Lax",
+                f"cb_buyer_{conversation_id}={token}; Path=/inquiry/{conversation_id}; HttpOnly; SameSite=Lax" + self.cookie_security_suffix(),
             )
             return
         match = re.fullmatch(r"/admin/products/([a-f0-9]+)/?", path)
@@ -8597,6 +8746,12 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
+        if path == "/login" or path == "/logout" or path.startswith("/admin/") or path.startswith("/inquiry/"):
+            # 会话 Cookie 路由的跨站 POST 闸门：浏览器请求一律带 Origin，跨站即拒绝；
+            # 不带 Origin 的非浏览器调用（部署脚本/命令行）保持既有行为。
+            if not self.same_origin_browser_post():
+                self.send_html(layout("请求被拒绝", "<div class='error'>请求来源校验未通过：该操作仅接受本站页面提交。</div>"), 403)
+                return
         if path == "/api/v1/buyer/conversations":
             payload = self.read_json()
             if payload is None:
@@ -8617,14 +8772,13 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
             return
         if path == "/api/v1/buyer/handoff/exchange":
             # 跨站会话交接：产品页（平台自身来源）用一次性交接码换取同一会话的新凭据。
-            # 只在平台页面来源上受理——请求带 Origin 且与请求 Host 不同源时直接拒绝，
-            # 且本端点永不返回跨域放行头；交接码本身是唯一秘密，长期会话凭据不进 URL。
+            # 只在平台页面来源上受理——请求带 Origin 且与请求「协议/主机/有效端口」不同源时直接拒绝
+            # （拒绝不消费交接码），且本端点永不返回跨域放行头；交接码本身是唯一秘密。
             payload = self.read_json()
             if payload is None:
                 return
             origin = self.headers.get("Origin")
-            same_host_page = bool(origin) and urlparse(origin).netloc == self.headers.get("Host") and urlparse(origin).scheme in {"http", "https"}
-            if origin and not same_host_page:
+            if origin and not self.origin_matches_request_host(origin):
                 self.send_json({"error": "origin_not_allowed"}, 403)
                 return
             site = self.db.get_buyer_site(self.headers.get("X-Site-Key", "").strip())
@@ -9720,8 +9874,7 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
                         "ua": str(self.headers.get("User-Agent", ""))[:160],
                         "referer": str(self.headers.get("Referer", ""))[:120],
                     }, ensure_ascii=False)
-                    with open(ROOT / "data" / "whatsapp_personal_start_audit.log", "a", encoding="utf-8") as audit_fh:
-                        audit_fh.write(audit_line + "\n")
+                    _append_private_log(ROOT / "data" / "whatsapp_personal_start_audit.log", audit_line + "\n")
                 except Exception:
                     pass
                 # 扫码绑定区「启动 / 重置会话并取码」：按状态自愈（启动/重启/重建），前端随后轮询状态。

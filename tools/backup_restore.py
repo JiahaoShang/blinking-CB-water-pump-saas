@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -13,6 +14,13 @@ from pathlib import Path
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def restrict_permissions(root: Path) -> None:
+    """备份/恢复产物只允许属主访问：目录 0700、文件 0600，不随进程 umask 放宽。"""
+    os.chmod(root, 0o700)
+    for path in root.rglob("*"):
+        os.chmod(path, 0o700 if path.is_dir() else 0o600)
 
 
 def check_source_files(database: Path, uploads: Path) -> int:
@@ -47,6 +55,8 @@ def backup(database: Path, uploads: Path, destination: Path) -> None:
         files = {str(path.relative_to(bundle)): digest(path) for path in bundle.rglob("*") if path.is_file()}
         manifest = {"created_at": datetime.now(timezone.utc).isoformat(), "files": files}
         (bundle / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 备份含业务库与全部原件：先把整棵产物收紧到属主可读，再移出临时目录。
+        restrict_permissions(bundle)
         bundle.rename(destination)
 
 
@@ -62,6 +72,7 @@ def restore_and_verify(bundle: Path, destination: Path) -> tuple[int, int]:
         if path.resolve().is_relative_to(bundle.resolve()) is False or not path.is_file() or digest(path) != expected:
             raise ValueError(f"备份文件校验失败: {name}")
     shutil.copytree(bundle, destination)
+    restrict_permissions(destination)
     with sqlite3.connect(str(destination / "app.db")) as conn:
         if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise ValueError("恢复数据库完整性检查失败")

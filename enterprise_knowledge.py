@@ -846,14 +846,14 @@ class EnterpriseKnowledge:
         生产沿用既有私有上传目录（data/uploads）；测试/隔离环境可通过实例属性
         knowledge_storage_root 或环境变量 B2B_KB_STORAGE_ROOT 指向临时目录
         （HTTP 处理会按请求重建 Database 实例，环境变量在两种路径下都生效）。
+        目录为本次新建时收紧为 0700；已存在的目录保持原权限不动（T4 复核既有目录）。
         """
         root = getattr(self, "knowledge_storage_root", None) or os.environ.get("B2B_KB_STORAGE_ROOT")
         if root is None:
             from app import UPLOAD_DIR
             root = UPLOAD_DIR
-        target = Path(root)
-        target.mkdir(parents=True, exist_ok=True)
-        return target
+        from app import ensure_private_dir
+        return ensure_private_dir(Path(root))
 
     @staticmethod
     def _decode_knowledge_text(data: bytes) -> str:
@@ -919,7 +919,8 @@ class EnterpriseKnowledge:
         source_id = secrets.token_hex(12)
         safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", Path(name).name).strip(".") or "source.bin"
         target = storage_dir / f"kb-{source_id}-{safe_name}"
-        target.write_bytes(payload)
+        from app import write_private_bytes
+        write_private_bytes(target, payload)
         try:
             location = (source_location or "").strip() or f"导入自文件：{Path(name).name}"
             self.conn.execute(

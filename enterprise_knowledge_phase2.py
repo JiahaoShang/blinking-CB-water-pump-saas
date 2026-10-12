@@ -1546,10 +1546,12 @@ class EnterpriseKnowledgePhase2:
     # ══════════════════════════════════════════════════════════════════════
 
     def _kb2_storage_dir(self) -> Path:
-        """批次原件的私有目录（token 命名；测试可注入 knowledge_storage_root 隔离）。"""
-        root = self._knowledge_storage_dir() / "phase2"
-        root.mkdir(parents=True, exist_ok=True)
-        return root
+        """批次原件的私有目录（token 命名；测试可注入 knowledge_storage_root 隔离）。
+
+        目录为本次新建时收紧为 0700；已存在的目录保持原权限不动（T4 复核既有目录）。
+        """
+        from app import ensure_private_dir
+        return ensure_private_dir(self._knowledge_storage_dir() / "phase2")
 
     def _kb2_read_source_bytes(self, source) -> bytes:
         if not source["storage_path"]:
@@ -1627,7 +1629,8 @@ class EnterpriseKnowledgePhase2:
                 if entry["kind"] == "file":
                     extension = Path(entry["filename"]).suffix.lower()
                     target = self._kb2_storage_dir() / f"kb2-{secrets.token_hex(16)}{extension}"
-                    target.write_bytes(entry["data"])
+                    from app import write_private_bytes
+                    write_private_bytes(target, entry["data"])
                     written.append(target)
                     self.conn.execute(
                         "INSERT INTO kb2_sources(id, tenant_id, batch_id, kind, filename, title, format, size, sha256, storage_path, source_location, payload_text, status, created_by, created_at, updated_at) "
@@ -3649,7 +3652,8 @@ class EnterpriseKnowledgePhase2:
             (batch_id, tenant_id, editor["email"], timestamp, timestamp),
         )
         target = self._kb2_storage_dir() / f"kb2-{secrets.token_hex(16)}{extension}"
-        target.write_bytes(payload)
+        from app import write_private_bytes
+        write_private_bytes(target, payload)
         try:
             self.conn.execute(
                 "INSERT INTO kb2_sources(id, tenant_id, batch_id, kind, filename, title, format, size, sha256, "

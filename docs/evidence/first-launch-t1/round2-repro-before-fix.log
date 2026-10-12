@@ -1,0 +1,216 @@
+# T1 第二轮失败复现（修复前基线）
+# 时间: 2026-10-13 02:33:17 +0800
+# 基线构建: git archive HEAD(6a97cc7) + docs/evidence/first-launch-t1/t1-changes.diff（第一轮修复）
+#           + 本轮 test_first_launch_t1_security.py（新增第二轮用例）
+# 校验: app.py / tools/backup_restore.py 与工作树 cmp 一致 = 第二轮修复前状态
+# 隔离: 临时目录测试；无 DIFY/模型/渠道真实凭据（env -u 逐个剔除）；假密钥；本地发送替身 patch(app.send_channel_text)
+# 命令: python3 -m unittest -v test_first_launch_t1_security（完整文件 41 项）
+
+test_demo_mode_login_page_keeps_documented_demo_accounts (test_first_launch_t1_security.T1DemoModeLoginPageTests) ... ok
+test_admin_can_open_module_pages (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_admin_write_post_allows_same_origin_and_no_origin (test_first_launch_t1_security.T1HttpSecurityTests)
+同源 Origin 与不带 Origin 的非浏览器调用保持既有行为（不误杀）。 ... ok
+test_admin_write_post_rejects_cross_site_origin (test_first_launch_t1_security.T1HttpSecurityTests)
+带会话的跨站 POST（浏览器会带 Origin）不得产生任何写入。 ... ok
+test_anonymous_admin_surface_requires_login (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_backup_output_permissions_are_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+备份产物（数据库+原件）不得随 umask 变成其他本地用户可读。 ... ok
+test_buyer_api_requires_site_key_and_bearer (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_buyer_api_same_host_page_scheme_consistency (test_first_launch_t1_security.T1HttpSecurityTests)
+买方 API：登记企业网站 Origin 白名单照常受理；平台同主机页面按协议/端口判定。 ... FAIL
+test_buyer_cookie_is_secure_behind_https_proxy (test_first_launch_t1_security.T1HttpSecurityTests)
+反代声明 https 时买方会话 Cookie 必须带 Secure。 ... ok
+test_buyer_inquiry_detail_requires_cookie (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_cross_tenant_objects_are_invisible (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_customer_transfer_grants_view_not_send (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_deactivated_member_session_rejected_immediately (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_debug_log_file_permissions_are_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+诊断日志含买方消息摘要，落盘权限不得随 umask 放宽。 ... ok
+test_demo_seed_endpoints_disabled_without_demo_mode (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_dispatch_admin_and_retry_paths_unchanged (test_first_launch_t1_security.T1HttpSecurityTests)
+管理员（非连接负责人）发送与失败重试保持既有业务规则（本轮不收紧管理员路径）。 ... ok
+test_dispatch_blocks_deactivated_sender_and_revoked_member (test_first_launch_t1_security.T1HttpSecurityTests)
+停用与连接撤权即时生效：投递前复核不通过则不调用发送器（锁定既有口径）。 ... ok
+test_dispatch_rechecks_module_for_each_staff_send_source (test_first_launch_t1_security.T1HttpSecurityTests)
+覆盖各发送来源（inbox/tasks/sales）：模块在位可投递；撤销后同一条消息不得再投递。 ... test_dispatch_rechecks_module_grant_after_revoke (test_first_launch_t1_security.T1HttpSecurityTests)
+已复现缺口：员工全部模块被清空后，排队消息仍被投递（发送器被调用）。 ... FAIL
+test_dispatch_system_messages_without_actor_still_send (test_first_launch_t1_security.T1HttpSecurityTests)
+无 actor_email 的系统消息（如 AI 应答）不参与人工权限复核（正常渠道来源保持可用）。 ... ok
+test_fresh_database_has_no_default_accounts (test_first_launch_t1_security.T1HttpSecurityTests)
+普通新库不预置账号：演示口令不可登录（根因侧的边界验证）。 ... ok
+test_handoff_code_is_single_use_and_bound (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_handoff_exchange_scheme_mismatch_is_not_accepted (test_first_launch_t1_security.T1HttpSecurityTests)
+交接换取的同源判定与后台同口径：http 请求携带 https 同主机 Origin 必须拒绝，且不消费交接码。 ... FAIL
+test_inquiry_message_post_rejects_cross_site_origin (test_first_launch_t1_security.T1HttpSecurityTests)
+买方旧询价页：跨站提交不得写入消息。 ... ok
+test_login_page_hides_demo_credentials_in_normal_deployment (test_first_launch_t1_security.T1HttpSecurityTests)
+普通部署（demo_tools 关闭）登录页不得公开任何演示账号与口令。 ... ok
+test_login_post_rejects_cross_site_origin (test_first_launch_t1_security.T1HttpSecurityTests)
+登录 CSRF：跨站登录请求不得发放会话。 ... ok
+test_missing_origin_cross_site_fetch_metadata_is_rejected (test_first_launch_t1_security.T1HttpSecurityTests)
+无 Origin 但浏览器声明 Sec-Fetch-Site: cross-site：照拒；无该头的 CLI 调用不受影响。 ... FAIL
+test_model_custom_key_not_echoed_and_secret_files_private (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_module_revocation_effective_immediately (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_new_application_database_is_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+新建业务库（含连接配置与客户隐私）默认 0600；既有库在打开时不改权限（不修改现有数据）。 ... FAIL
+test_new_knowledge_files_are_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+企业知识两批导入的原件：新文件 0600、新建目录 0700（私有资料写点同口径）。 ... FAIL
+test_new_upload_files_are_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+产品来源原件：新写入文件 0600、新建私有目录 0700（umask=022 下也收紧）。 ... FAIL
+test_reference_client_public_and_no_public_file_direct_links (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_restore_check_output_permissions_are_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+隔离恢复产物同样只允许属主访问。 ... ok
+test_same_origin_gate_compares_effective_port (test_first_launch_t1_security.T1HttpSecurityTests)
+有效端口参与比较：缺省端口按协议归一（https:443），端口不同即跨源。 ... FAIL
+test_same_origin_gate_does_not_trust_forwarded_host (test_first_launch_t1_security.T1HttpSecurityTests)
+伪造 X-Forwarded-Host 不得把外站 Origin 放行：只认请求自身 Host。 ... FAIL
+test_same_origin_gate_requires_matching_scheme (test_first_launch_t1_security.T1HttpSecurityTests)
+协议必须匹配：HTTP 直连请求携带 https Origin 视为跨源；反代声明 https 后同源表单照常可用。 ... FAIL
+test_session_cookie_is_secure_behind_https_proxy (test_first_launch_t1_security.T1HttpSecurityTests)
+反代声明 https（X-Forwarded-Proto）时会话 Cookie 必须带 Secure。 ... ok
+test_session_cookie_stays_usable_on_plain_http_local (test_first_launch_t1_security.T1HttpSecurityTests)
+本地直连 http（无反代声明）保持可用的非 Secure Cookie，避免破坏本地开发。 ... ok
+test_single_module_grant_is_scoped (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_zero_module_employee_denied_every_module_and_admin_area (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+
+======================================================================
+FAIL: test_buyer_api_same_host_page_scheme_consistency (test_first_launch_t1_security.T1HttpSecurityTests)
+买方 API：登记企业网站 Origin 白名单照常受理；平台同主机页面按协议/端口判定。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 402, in test_buyer_api_same_host_page_scheme_consistency
+    self.assertEqual(status2, 403, "协议不符的同主机来源不得当作同源放行")
+AssertionError: 200 != 403 : 协议不符的同主机来源不得当作同源放行
+
+======================================================================
+FAIL: test_dispatch_rechecks_module_for_each_staff_send_source (test_first_launch_t1_security.T1HttpSecurityTests) (source='staff-reply')
+覆盖各发送来源（inbox/tasks/sales）：模块在位可投递；撤销后同一条消息不得再投递。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 784, in test_dispatch_rechecks_module_for_each_staff_send_source
+    self.assertFalse(sent2, f"{source} 在模块撤销后不得投递")
+AssertionError: True is not false : staff-reply 在模块撤销后不得投递
+
+======================================================================
+FAIL: test_dispatch_rechecks_module_for_each_staff_send_source (test_first_launch_t1_security.T1HttpSecurityTests) (source='rfq-link')
+覆盖各发送来源（inbox/tasks/sales）：模块在位可投递；撤销后同一条消息不得再投递。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 784, in test_dispatch_rechecks_module_for_each_staff_send_source
+    self.assertFalse(sent2, f"{source} 在模块撤销后不得投递")
+AssertionError: True is not false : rfq-link 在模块撤销后不得投递
+
+======================================================================
+FAIL: test_dispatch_rechecks_module_for_each_staff_send_source (test_first_launch_t1_security.T1HttpSecurityTests) (source='human-engineer')
+覆盖各发送来源（inbox/tasks/sales）：模块在位可投递；撤销后同一条消息不得再投递。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 784, in test_dispatch_rechecks_module_for_each_staff_send_source
+    self.assertFalse(sent2, f"{source} 在模块撤销后不得投递")
+AssertionError: True is not false : human-engineer 在模块撤销后不得投递
+
+======================================================================
+FAIL: test_dispatch_rechecks_module_for_each_staff_send_source (test_first_launch_t1_security.T1HttpSecurityTests) (source='engineer-followup:t1-task')
+覆盖各发送来源（inbox/tasks/sales）：模块在位可投递；撤销后同一条消息不得再投递。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 784, in test_dispatch_rechecks_module_for_each_staff_send_source
+    self.assertFalse(sent2, f"{source} 在模块撤销后不得投递")
+AssertionError: True is not false : engineer-followup:t1-task 在模块撤销后不得投递
+
+======================================================================
+FAIL: test_dispatch_rechecks_module_for_each_staff_send_source (test_first_launch_t1_security.T1HttpSecurityTests) (source='lead-reply')
+覆盖各发送来源（inbox/tasks/sales）：模块在位可投递；撤销后同一条消息不得再投递。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 784, in test_dispatch_rechecks_module_for_each_staff_send_source
+    self.assertFalse(sent2, f"{source} 在模块撤销后不得投递")
+AssertionError: True is not false : lead-reply 在模块撤销后不得投递
+
+======================================================================
+FAIL: test_dispatch_rechecks_module_grant_after_revoke (test_first_launch_t1_security.T1HttpSecurityTests)
+已复现缺口：员工全部模块被清空后，排队消息仍被投递（发送器被调用）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 748, in test_dispatch_rechecks_module_grant_after_revoke
+    self.assertFalse(sent, "模块被撤销后不得投递")
+AssertionError: True is not false : 模块被撤销后不得投递
+
+======================================================================
+FAIL: test_handoff_exchange_scheme_mismatch_is_not_accepted (test_first_launch_t1_security.T1HttpSecurityTests)
+交接换取的同源判定与后台同口径：http 请求携带 https 同主机 Origin 必须拒绝，且不消费交接码。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 373, in test_handoff_exchange_scheme_mismatch_is_not_accepted
+    self.assertEqual(status2, 403, "协议不符的同主机来源不得换取凭据")
+AssertionError: 200 != 403 : 协议不符的同主机来源不得换取凭据
+
+======================================================================
+FAIL: test_missing_origin_cross_site_fetch_metadata_is_rejected (test_first_launch_t1_security.T1HttpSecurityTests)
+无 Origin 但浏览器声明 Sec-Fetch-Site: cross-site：照拒；无该头的 CLI 调用不受影响。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 337, in test_missing_origin_cross_site_fetch_metadata_is_rejected
+    self.assertEqual(status, 403, "跨站 Fetch 元数据不得产生写入")
+AssertionError: 303 != 403 : 跨站 Fetch 元数据不得产生写入
+
+======================================================================
+FAIL: test_new_application_database_is_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+新建业务库（含连接配置与客户隐私）默认 0600；既有库在打开时不改权限（不修改现有数据）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 487, in test_new_application_database_is_owner_only
+    self.assertEqual(stat.S_IMODE(fresh_path.stat().st_mode), 0o600, "新业务库必须只允许属主读写")
+AssertionError: 420 != 384 : 新业务库必须只允许属主读写
+
+======================================================================
+FAIL: test_new_knowledge_files_are_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+企业知识两批导入的原件：新文件 0600、新建目录 0700（私有资料写点同口径）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 535, in test_new_knowledge_files_are_owner_only
+    self.assertEqual(stat.S_IMODE(Path(kb_row["storage_path"]).stat().st_mode), 0o600, "知识原件必须只允许属主读写")
+AssertionError: 420 != 384 : 知识原件必须只允许属主读写
+
+======================================================================
+FAIL: test_new_upload_files_are_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+产品来源原件：新写入文件 0600、新建私有目录 0700（umask=022 下也收紧）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 514, in test_new_upload_files_are_owner_only
+    self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600, "新写入的原件必须只允许属主读写")
+AssertionError: 420 != 384 : 新写入的原件必须只允许属主读写
+
+======================================================================
+FAIL: test_same_origin_gate_compares_effective_port (test_first_launch_t1_security.T1HttpSecurityTests)
+有效端口参与比较：缺省端口按协议归一（https:443），端口不同即跨源。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 319, in test_same_origin_gate_compares_effective_port
+    self.assertIn(status, (302, 303), "Host 显式 443 与缺省端口应等价")
+AssertionError: 403 not found in (302, 303) : Host 显式 443 与缺省端口应等价
+
+======================================================================
+FAIL: test_same_origin_gate_does_not_trust_forwarded_host (test_first_launch_t1_security.T1HttpSecurityTests)
+伪造 X-Forwarded-Host 不得把外站 Origin 放行：只认请求自身 Host。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 293, in test_same_origin_gate_does_not_trust_forwarded_host
+    self.assertEqual(status, 403, "转发 Host 不得作为来源判定依据")
+AssertionError: 303 != 403 : 转发 Host 不得作为来源判定依据
+
+======================================================================
+FAIL: test_same_origin_gate_requires_matching_scheme (test_first_launch_t1_security.T1HttpSecurityTests)
+协议必须匹配：HTTP 直连请求携带 https Origin 视为跨源；反代声明 https 后同源表单照常可用。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t1-round2-baseline/test_first_launch_t1_security.py", line 303, in test_same_origin_gate_requires_matching_scheme
+    self.assertEqual(status, 403, "https Origin 落在 http 请求上必须被拒绝")
+AssertionError: 303 != 403 : https Origin 落在 http 请求上必须被拒绝
+
+----------------------------------------------------------------------
+Ran 41 tests in 2.429s
+
+FAILED (failures=15)
+
+exit=1

@@ -1,0 +1,79 @@
+# T1 第二轮修复后运行（工作树：第一轮+第二轮最小修复）
+# 时间: 2026-10-13 02:38:15 +0800
+# 命令: python3 -m unittest -v test_first_launch_t1_security（完整文件 41 项）
+# 隔离: 临时目录/临时库；无 DIFY/模型/渠道真实凭据（env -u 逐个剔除）；假密钥；本地发送替身
+
+test_demo_mode_login_page_keeps_documented_demo_accounts (test_first_launch_t1_security.T1DemoModeLoginPageTests) ... ok
+test_admin_can_open_module_pages (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_admin_write_post_allows_same_origin_and_no_origin (test_first_launch_t1_security.T1HttpSecurityTests)
+同源 Origin 与不带 Origin 的非浏览器调用保持既有行为（不误杀）。 ... ok
+test_admin_write_post_rejects_cross_site_origin (test_first_launch_t1_security.T1HttpSecurityTests)
+带会话的跨站 POST（浏览器会带 Origin）不得产生任何写入。 ... ok
+test_anonymous_admin_surface_requires_login (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_backup_output_permissions_are_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+备份产物（数据库+原件）不得随 umask 变成其他本地用户可读。 ... ok
+test_buyer_api_requires_site_key_and_bearer (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_buyer_api_same_host_page_scheme_consistency (test_first_launch_t1_security.T1HttpSecurityTests)
+买方 API：登记企业网站 Origin 白名单照常受理；平台同主机页面按协议/端口判定。 ... ok
+test_buyer_cookie_is_secure_behind_https_proxy (test_first_launch_t1_security.T1HttpSecurityTests)
+反代声明 https 时买方会话 Cookie 必须带 Secure。 ... ok
+test_buyer_inquiry_detail_requires_cookie (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_cross_tenant_objects_are_invisible (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_customer_transfer_grants_view_not_send (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_deactivated_member_session_rejected_immediately (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_debug_log_file_permissions_are_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+诊断日志含买方消息摘要，落盘权限不得随 umask 放宽。 ... ok
+test_demo_seed_endpoints_disabled_without_demo_mode (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_dispatch_admin_and_retry_paths_unchanged (test_first_launch_t1_security.T1HttpSecurityTests)
+管理员（非连接负责人）发送与失败重试保持既有业务规则（本轮不收紧管理员路径）。 ... ok
+test_dispatch_blocks_deactivated_sender_and_revoked_member (test_first_launch_t1_security.T1HttpSecurityTests)
+停用与连接撤权即时生效：投递前复核不通过则不调用发送器（锁定既有口径）。 ... ok
+test_dispatch_rechecks_module_for_each_staff_send_source (test_first_launch_t1_security.T1HttpSecurityTests)
+覆盖各发送来源（inbox/tasks/sales）：模块在位可投递；撤销后同一条消息不得再投递。 ... ok
+test_dispatch_rechecks_module_grant_after_revoke (test_first_launch_t1_security.T1HttpSecurityTests)
+已复现缺口：员工全部模块被清空后，排队消息仍被投递（发送器被调用）。 ... ok
+test_dispatch_system_messages_without_actor_still_send (test_first_launch_t1_security.T1HttpSecurityTests)
+无 actor_email 的系统消息（如 AI 应答）不参与人工权限复核（正常渠道来源保持可用）。 ... ok
+test_fresh_database_has_no_default_accounts (test_first_launch_t1_security.T1HttpSecurityTests)
+普通新库不预置账号：演示口令不可登录（根因侧的边界验证）。 ... ok
+test_handoff_code_is_single_use_and_bound (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_handoff_exchange_scheme_mismatch_is_not_accepted (test_first_launch_t1_security.T1HttpSecurityTests)
+交接换取的同源判定与后台同口径：http 请求携带 https 同主机 Origin 必须拒绝，且不消费交接码。 ... ok
+test_inquiry_message_post_rejects_cross_site_origin (test_first_launch_t1_security.T1HttpSecurityTests)
+买方旧询价页：跨站提交不得写入消息。 ... ok
+test_login_page_hides_demo_credentials_in_normal_deployment (test_first_launch_t1_security.T1HttpSecurityTests)
+普通部署（demo_tools 关闭）登录页不得公开任何演示账号与口令。 ... ok
+test_login_post_rejects_cross_site_origin (test_first_launch_t1_security.T1HttpSecurityTests)
+登录 CSRF：跨站登录请求不得发放会话。 ... ok
+test_missing_origin_cross_site_fetch_metadata_is_rejected (test_first_launch_t1_security.T1HttpSecurityTests)
+无 Origin 但浏览器声明 Sec-Fetch-Site: cross-site：照拒；无该头的 CLI 调用不受影响。 ... ok
+test_model_custom_key_not_echoed_and_secret_files_private (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_module_revocation_effective_immediately (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_new_application_database_is_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+新建业务库（含连接配置与客户隐私）默认 0600；既有库在打开时不改权限（不修改现有数据）。 ... ok
+test_new_knowledge_files_are_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+企业知识两批导入的原件：新文件 0600、新建目录 0700（私有资料写点同口径）。 ... ok
+test_new_upload_files_are_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+产品来源原件：新写入文件 0600、新建私有目录 0700（umask=022 下也收紧）。 ... ok
+test_reference_client_public_and_no_public_file_direct_links (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_restore_check_output_permissions_are_owner_only (test_first_launch_t1_security.T1HttpSecurityTests)
+隔离恢复产物同样只允许属主访问。 ... ok
+test_same_origin_gate_compares_effective_port (test_first_launch_t1_security.T1HttpSecurityTests)
+有效端口参与比较：缺省端口按协议归一（https:443），端口不同即跨源。 ... ok
+test_same_origin_gate_does_not_trust_forwarded_host (test_first_launch_t1_security.T1HttpSecurityTests)
+伪造 X-Forwarded-Host 不得把外站 Origin 放行：只认请求自身 Host。 ... ok
+test_same_origin_gate_requires_matching_scheme (test_first_launch_t1_security.T1HttpSecurityTests)
+协议必须匹配：HTTP 直连请求携带 https Origin 视为跨源；反代声明 https 后同源表单照常可用。 ... ok
+test_session_cookie_is_secure_behind_https_proxy (test_first_launch_t1_security.T1HttpSecurityTests)
+反代声明 https（X-Forwarded-Proto）时会话 Cookie 必须带 Secure。 ... ok
+test_session_cookie_stays_usable_on_plain_http_local (test_first_launch_t1_security.T1HttpSecurityTests)
+本地直连 http（无反代声明）保持可用的非 Secure Cookie，避免破坏本地开发。 ... ok
+test_single_module_grant_is_scoped (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+test_zero_module_employee_denied_every_module_and_admin_area (test_first_launch_t1_security.T1HttpSecurityTests) ... ok
+
+----------------------------------------------------------------------
+Ran 41 tests in 2.501s
+
+OK
+
+exit=0
