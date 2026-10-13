@@ -1,0 +1,117 @@
+{
+  "date": "2026-10-13",
+  "baseline": "020cd7f",
+  "source_directory": "/Users/jiahaoshang/Desktop/广汽三品牌物料_2026-10-10",
+  "method": "local read-only filesystem enumeration and CSV row/nature counts; no originals copied; no external verification",
+  "file_count": 1564,
+  "total_bytes": 4066182884,
+  "extensions": {
+    ".md": 44,
+    ".pdf": 112,
+    ".json": 48,
+    ".csv": 14,
+    ".png": 472,
+    ".jpg": 848,
+    ".jpeg": 26
+  },
+  "empty_files": 0,
+  "reference_hashes": [
+    {
+      "file": "00_说明_README.md",
+      "sha256": "429d48d5823bda1f5cace2d0db4ed0d4f9ae7853a75621c89596e72ca48af069"
+    },
+    {
+      "file": "企业图谱测试数据/00_说明.md",
+      "sha256": "841e32125c5a964f8c761062b65f54175cb80dc1433430cf6dc3c747fdf4624b"
+    },
+    {
+      "file": "企业图谱测试数据/06_合成数据/README_合成数据说明.md",
+      "sha256": "ac826df3c077f6d68bb4fffcc429d28faf29f7704f665a9ebbf57a1afdb30c38"
+    },
+    {
+      "file": "4S店运营资料/00_说明.md",
+      "sha256": "6e57462e5f68146b356a3336682379c6e81fa61fb8a0b3483e1dd676ea12e9e5"
+    },
+    {
+      "file": "资料清单.csv",
+      "sha256": "d1602d151f2ab28c173d1b009c24fb03999d32cc340646f926105203d34b1f2a"
+    }
+  ],
+  "synthetic_csv": [
+    {
+      "file": "01_组织架构.csv",
+      "rows": 26,
+      "sha256": "d20086833668ecdbe0182414c504b2b716f9cafe523525b5e1135cf192431dba",
+      "nature_counts": null
+    },
+    {
+      "file": "02_岗位与编制.csv",
+      "rows": 48,
+      "sha256": "2f286a37d70730881cc600d9aabb0a364e3ebc3b5d88a199612c713db215cbe6",
+      "nature_counts": null
+    },
+    {
+      "file": "03_员工名单(合成).csv",
+      "rows": 94,
+      "sha256": "5049d86447de473d16bf50662d4536f20d9f827a83c11f5e5e7c071913375342",
+      "nature_counts": {
+        "合成": 94
+      }
+    },
+    {
+      "file": "04_客户档案(合成).csv",
+      "rows": 400,
+      "sha256": "85e427d59694ada42c446d65b5932de47fdd4c63eff41beaf728263f7bbc26bd",
+      "nature_counts": {
+        "合成": 400
+      }
+    },
+    {
+      "file": "05_销售线索(合成).csv",
+      "rows": 600,
+      "sha256": "fba897d62a3749784c639a9a6351df029f887136284dd449298d73afefa70002",
+      "nature_counts": {
+        "合成": 600
+      }
+    },
+    {
+      "file": "06_订单与交车(合成).csv",
+      "rows": 132,
+      "sha256": "660c66bf8501529a501e394350152ccebd09ce661ded563628845e8223118f61",
+      "nature_counts": {
+        "合成": 132
+      }
+    },
+    {
+      "file": "07_维修工单(合成).csv",
+      "rows": 480,
+      "sha256": "a5b666b8b1c10f59da6ef451cd9f3f5defda5fb10b31fe0088cccad5257cc6be",
+      "nature_counts": {
+        "合成": 480
+      }
+    },
+    {
+      "file": "08_车辆库存(合成).csv",
+      "rows": 84,
+      "sha256": "808e3437dca572d8f88d338f22cdb11024a5076a1b96efef2ef73536ba45313d",
+      "nature_counts": {
+        "合成": 84
+      }
+    },
+    {
+      "file": "09_配件目录与库存(合成).csv",
+      "rows": 220,
+      "sha256": "2e1df4495376f2570e66865d482bdb305a46ae7a1fda9b1fd0497122f2b5580b",
+      "nature_counts": {
+        "合成(单价为市场参考,非官方报价)": 220
+      }
+    }
+  ],
+  "limits": [
+    "No technical fact or live price verification",
+    "No authorization approval inferred",
+    "No application import or UI acceptance",
+    "No restoration evidence",
+    "No original source authenticity verification"
+  ]
+}

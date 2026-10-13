@@ -1,0 +1,489 @@
+{
+  "method": "local JSON parse, variant labels, table colspan width check; no manufacturer-live validation",
+  "files": [
+    {
+      "file": "广汽传祺/2025款传祺GS8/参数配置表/配置数据(官方接口_518).json",
+      "sha256": "16bbbbe6f7a719067d21b16d771454b64e25aa21c2648d8a067c715fb70c03d7",
+      "variant_count": 2,
+      "variants": [
+        "2025款 领航 两驱 豪华版(5座)",
+        "2024款 领航 两驱 豪华智联"
+      ],
+      "field_rows": 212,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/2025款向往M8乾崑/参数配置表/配置数据(官方接口_902).json",
+      "sha256": "781d1768b767bced912c833dc522d40c57873e8c6af73368ec4589f83f3da02d",
+      "variant_count": 4,
+      "variants": [
+        "2025款 向往M8乾崑 Ultra 头等舱",
+        "2025款 向往M8乾崑 Max 奢享舱",
+        "2025款 向往M8乾崑 Pro 舒享舱",
+        "2025款 向往M8 鸿蒙座舱版"
+      ],
+      "field_rows": 768,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/2026款传祺GS3影速/参数配置表/配置数据(官方接口_647).json",
+      "sha256": "22b520a5bfc3f94c4efa42670cc130cbbcc92815c442ba2406c5932e7019aaa7",
+      "variant_count": 3,
+      "variants": [
+        "2026款 劲智版",
+        " 2026款 劲享版",
+        "2026款 劲享版-平步青云"
+      ],
+      "field_rows": 354,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/2026款传祺M8 2.0T/参数配置表/配置数据(官方接口_757).json",
+      "sha256": "7e00cd228103c7c8c890b92bee7d79417253fc757ae9494ddf8fe36c56f768bd",
+      "variant_count": 1,
+      "variants": [
+        "2026款 传祺 M8 2.0T尊享 "
+      ],
+      "field_rows": 96,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/2026款传祺M8 HEV/参数配置表/配置数据(官方接口_715).json",
+      "sha256": "4d58c98ecb9b89cac144294b62ce75fc0d9faa7abc8f1bf2e732d27e384fbea1",
+      "variant_count": 2,
+      "variants": [
+        "2026款 M8 HEV 至尊",
+        "2026款 M8 HEV 尊贵 "
+      ],
+      "field_rows": 250,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/2026款向往M8乾崑/参数配置表/配置数据(官方接口_867).json",
+      "sha256": "e0a9f4cf3a743ebab7208538666fdb305b3968c2cf618240cfbcf4537efcc25b",
+      "variant_count": 2,
+      "variants": [
+        "2026款 向往M8乾崑 Ultra 头等舱",
+        "2026款 向往M8乾崑 MAX 奢享舱"
+      ],
+      "field_rows": 384,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/2027款传祺向往S7 PHEV/参数配置表/配置数据(官方接口_892).json",
+      "sha256": "a1035d35e91da5dd984c5eda021b5cdb6f997c4cb82b349f64cd06ea0c3bc211",
+      "variant_count": 4,
+      "variants": [
+        "S7 Pro 版",
+        "S7 Pro 激光雷达版",
+        "S7 Max 激光雷达版",
+        "S7 Max 激光雷达（升级版）"
+      ],
+      "field_rows": 736,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/传祺E8/参数配置表/配置数据(官方接口_811).json",
+      "sha256": "bea36d76bc76ccd3817a657c40db02ea6033b210647335c4d14d5458bb07b7d4",
+      "variant_count": 3,
+      "variants": [
+        "传祺E8 龙腾 光辉+\n",
+        "传祺E8 MAX+",
+        "传祺E8 荣耀\n"
+      ],
+      "field_rows": 441,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/传祺GS4 MAX/参数配置表/配置数据(官方接口_367).json",
+      "sha256": "c710ded12755077866b54caff9637f80e9afa7faca5ef36fa8ac74ab9a2e3f25",
+      "variant_count": 1,
+      "variants": [
+        "传祺GS4 MAX 1.5T 旗舰版"
+      ],
+      "field_rows": 154,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/传祺M6 MAX/参数配置表/配置数据(官方接口_798).json",
+      "sha256": "90e74bcaf763adf167900cd7ac60114d7d2552cb61815cf393a6de9bc4ee70c4",
+      "variant_count": 3,
+      "variants": [
+        "2026款传祺M6 MAX 尊荣版",
+        "2026款传祺M6 MAX 豪华版",
+        "2026款传祺M6 MAX 精英版"
+      ],
+      "field_rows": 357,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/传祺M6 PRO/参数配置表/配置数据(官方接口_502).json",
+      "sha256": "00e01cceec997f3b9e8a864551d18126148d54b0f6dd191abfdee0c16b9d00cf",
+      "variant_count": 1,
+      "variants": [
+        "传祺M6 PRO 270T WDCT 豪华"
+      ],
+      "field_rows": 129,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/传祺M8大师/参数配置表/配置数据(官方接口_389).json",
+      "sha256": "0342530cee39625f9c57c7e6cb0dbdf2425ff2f5fe725e66c388d6498658a95d",
+      "variant_count": 1,
+      "variants": [
+        "传祺M8大师 超级混动"
+      ],
+      "field_rows": 122,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/传祺M8宗师_燃油版/参数配置表/配置数据(官方接口_483).json",
+      "sha256": "476ba574aafbd524bc933f536fdfe7367505562efc7b641b951173d58d5f5b61",
+      "variant_count": 3,
+      "variants": [
+        "2024款传祺M8宗师 至尊版",
+        "2024款传祺M8宗师 科技关爱版",
+        "燃油 400T AT 先锋版"
+      ],
+      "field_rows": 474,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/传祺向往M8 PHEV L/参数配置表/配置数据(官方接口_836).json",
+      "sha256": "840383d48e87267dc4437a6c1a332f4294521cb05f550b304667f76cfa1e20fe",
+      "variant_count": 3,
+      "variants": [
+        "向往M8 PHEV L 四驱 Ultra",
+        "向往M8 PHEV L 四驱 Max",
+        "向往M8 PHEV L Pro "
+      ],
+      "field_rows": 549,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/传祺向往M8宗师/参数配置表/配置数据(官方接口_634).json",
+      "sha256": "88bbef025729b6f6c53d2c01a3a39ad70a57c1906181f8ecd323309d100a7731",
+      "variant_count": 2,
+      "variants": [
+        "传祺 向往M8 宗师 激光雷达版",
+        "传祺 向往M8 宗师 尊享版"
+      ],
+      "field_rows": 360,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/传祺向往S9乾崑/参数配置表/配置数据(官方接口_866).json",
+      "sha256": "bac5846e4b39dc8c738c43d2afe2a62c6fd33ccd51bf8a02d622c4eb3a8c7ed9",
+      "variant_count": 4,
+      "variants": [
+        "向往S9 乾崑 Max (5座)",
+        "向往S9 乾崑 Ultra (5座)",
+        "向往S9 乾崑 Max (选装6座)",
+        "向往S9 乾崑 Ultra (选装6座)"
+      ],
+      "field_rows": 932,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/传祺影豹/参数配置表/配置数据(官方接口_577).json",
+      "sha256": "84883e9c2872a12fa2eb0a9601a744f6e7004d47a9113f969fc58204d622b241",
+      "variant_count": 4,
+      "variants": [
+        "影豹R MAX",
+        "影豹R PRO",
+        "影豹R-Style ",
+        "影豹R-Style劲享版"
+      ],
+      "field_rows": 468,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/传祺新能源E9/参数配置表/配置数据(官方接口_599).json",
+      "sha256": "95e2b8f7fdbb01755e16e7e57c20aecc8d918ffbc8f75fd6ef458778aa09bb70",
+      "variant_count": 2,
+      "variants": [
+        "E9 超级快充 宗师",
+        "E9 超级快充 冠军"
+      ],
+      "field_rows": 388,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/传祺新能源ES9/参数配置表/配置数据(官方接口_587).json",
+      "sha256": "f55450a8b06441fe05902ca7abc7be71dc3b5ff55e45a5964b17e8857932d5b1",
+      "variant_count": 1,
+      "variants": [
+        "传祺新能源 ES9  PRO+"
+      ],
+      "field_rows": 149,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/全新一代向往E8 PHEV/参数配置表/配置数据(官方接口_895).json",
+      "sha256": "b0622c163a4e59a0951d14fad32592a47e17c03e46fe11a03eb96f07220eb44f",
+      "variant_count": 4,
+      "variants": [
+        "向往E8 Ultra版",
+        "向往E8 Max激光雷达版",
+        "向往E8 Max版",
+        "向往E8 Pro版"
+      ],
+      "field_rows": 680,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/第五代传祺GS4/参数配置表/配置数据(官方接口_864).json",
+      "sha256": "1f3711a9b8cb46370eaa5e3d69507f780cbe54b9d439308d9d23aac27b97363e",
+      "variant_count": 3,
+      "variants": [
+        "第五代GS4 1.5T Max版",
+        "第五代GS4 1.5T Pro版",
+        "第五代GS4 1.5T 标准版"
+      ],
+      "field_rows": 417,
+      "column_errors": []
+    },
+    {
+      "file": "广汽传祺/越7/参数配置表/配置数据(官方接口_919).json",
+      "sha256": "f1c9f0ff64494459dc9446ee854cb172bf010e0dcffab844a0c1b8bbbb0740d0",
+      "variant_count": 4,
+      "variants": [
+        "越7 四驱Ultra",
+        "越7 四驱Max",
+        "越7 两驱Max",
+        "越7 两驱Pro"
+      ],
+      "field_rows": 876,
+      "column_errors": []
+    },
+    {
+      "file": "广汽埃安/2027款 AION i60/参数配置表/配置数据(官方接口_72).json",
+      "sha256": "c2f43eb806eef413480f0115374affeb5b76848d833a18088024ef7d4c4bf1e8",
+      "variant_count": 6,
+      "variants": [
+        "520 宁德版",
+        "520 宁德激光版",
+        "700 长续航版",
+        "700 激光雷达版",
+        "1738 超级增程版",
+        "1738 激光雷达版"
+      ],
+      "field_rows": 189,
+      "column_errors": []
+    },
+    {
+      "file": "广汽埃安/AION LX Plus/参数配置表/配置数据(官方接口_39).json",
+      "sha256": "20c7711b71f8bbe18234cd3c6c60285eb5a758db02e3cfa3c7ae905cf9e56a83",
+      "variant_count": 4,
+      "variants": [
+        "80 智尊版",
+        "80D 旗舰版",
+        "80D Max版",
+        "千里版"
+      ],
+      "field_rows": 99,
+      "column_errors": []
+    },
+    {
+      "file": "广汽埃安/AION N60/参数配置表/配置数据(官方接口_70).json",
+      "sha256": "c745d18eed5e9e2614cf8d4d745f1b034ca6ed9a2abd19c07e38b7b7f88ac9cb",
+      "variant_count": 3,
+      "variants": [
+        "410 激光雷达Ultra",
+        "510 激光雷达Ultra",
+        "610 激光雷达Ultra"
+      ],
+      "field_rows": 178,
+      "column_errors": []
+    },
+    {
+      "file": "广汽埃安/AION RT/参数配置表/配置数据(官方接口_58).json",
+      "sha256": "48441e46d09a0e58fc5809ce25ce1c9ae81d5ecc5115e054bc747cdacb4b947a",
+      "variant_count": 6,
+      "variants": [
+        "550 智享版",
+        "605 智享版",
+        "605 智豪版",
+        "710 智豪版",
+        "710 智尊版",
+        "RT super BaaS方案"
+      ],
+      "field_rows": 132,
+      "column_errors": []
+    },
+    {
+      "file": "广汽埃安/AION S MAX/参数配置表/配置数据(官方接口_56).json",
+      "sha256": "83c7a6cd4933f69e2ec0a4178dbdb3ad51bf5b6ab3f6c4d6d33f0a4e56af5821",
+      "variant_count": 8,
+      "variants": [
+        "2025款 70 星意版",
+        "70 星耀版",
+        "70 行政版",
+        "70 星辰版",
+        "80 星耀版",
+        "80 星辰版",
+        "80 行政版",
+        "80 星瀚版"
+      ],
+      "field_rows": 86,
+      "column_errors": []
+    },
+    {
+      "file": "广汽埃安/AION S Plus/参数配置表/配置数据(官方接口_38).json",
+      "sha256": "ba27c9b0fbebcd34d695310674a3831fe65e6577115935384b949f4676baba63",
+      "variant_count": 2,
+      "variants": [
+        "舒享版",
+        "豪华版"
+      ],
+      "field_rows": 82,
+      "column_errors": []
+    },
+    {
+      "file": "广汽埃安/AION UT/参数配置表/配置数据(官方接口_62).json",
+      "sha256": "f3af4f11e79133b27e9f0bb142aa4cd21c44932e5823b29c5d57b1186b9c1ed3",
+      "variant_count": 1,
+      "variants": [
+        "530 宁德版"
+      ],
+      "field_rows": 87,
+      "column_errors": []
+    },
+    {
+      "file": "广汽埃安/AION Y Plus/参数配置表/配置数据(官方接口_47).json",
+      "sha256": "8aaca1388cb7f414a9699a83292c1ece0709a39b6ea528460ecd80d9b3953602",
+      "variant_count": 1,
+      "variants": [
+        "2026款 510智享版"
+      ],
+      "field_rows": 88,
+      "column_errors": []
+    },
+    {
+      "file": "广汽埃安/AION i60/参数配置表/配置数据(官方接口_68).json",
+      "sha256": "71e70ada851397ba130446095aab199cfed3bd29bab71d227866248e6b8631a2",
+      "variant_count": 10,
+      "variants": [
+        "530 标准版",
+        "530 宁德标准版",
+        "530 宁德进阶版",
+        "530 进阶版",
+        "530 出行版",
+        "650 标准版",
+        "650 进阶版",
+        "210 马到成功版",
+        "210 标准版",
+        "210 进阶版"
+      ],
+      "field_rows": 182,
+      "column_errors": []
+    },
+    {
+      "file": "广汽埃安/埃安UT super/参数配置表/配置数据(官方接口_69).json",
+      "sha256": "4fa310453e5167afaf9590a38de401bf3d5a2903c79fa805a727d703436685e3",
+      "variant_count": 2,
+      "variants": [
+        "UTsport版 BaaS方案",
+        "UT super BaaS方案"
+      ],
+      "field_rows": 87,
+      "column_errors": []
+    },
+    {
+      "file": "广汽埃安/霸王龙/参数配置表/配置数据(官方接口_57).json",
+      "sha256": "73fc0947e6987fada8431538b5078bd5e53541631ee1557ba276585218a1cbdb",
+      "variant_count": 6,
+      "variants": [
+        "520 智豪版",
+        "520 智尊版",
+        "650 智豪版",
+        "650 智尊版",
+        "650 畅行版",
+        "650 行政版"
+      ],
+      "field_rows": 162,
+      "column_errors": []
+    },
+    {
+      "file": "广汽昊铂/昊铂A800/参数配置表/配置数据(官方接口_55).json",
+      "sha256": "d0ae921586d76c3c5119e92affab2766f36bbf2d1db28afb6b95648391e736ea",
+      "variant_count": 4,
+      "variants": [
+        "智能豪华版",
+        "智慧豪华版",
+        "智慧尊贵版",
+        "智慧旗舰版"
+      ],
+      "field_rows": 100,
+      "column_errors": []
+    },
+    {
+      "file": "广汽昊铂/昊铂GT/参数配置表/配置数据(官方接口_44).json",
+      "sha256": "936fff00cd0055631c87fcb38439c42abd1aaf81ee2b557c573648cfb661ebb9",
+      "variant_count": 5,
+      "variants": [
+        "2026款 攀登版",
+        "2025款 630 Max版",
+        "2025款 710 Max版",
+        "2025款 560 Lite版",
+        "2025款 630 Lite版"
+      ],
+      "field_rows": 108,
+      "column_errors": []
+    },
+    {
+      "file": "广汽昊铂/昊铂HL/参数配置表/配置数据(官方接口_51).json",
+      "sha256": "53453d9b55f0472507b7e5e5769a04e58b12038f09ac4b0f4d37397cad6db714",
+      "variant_count": 7,
+      "variants": [
+        "750 Max五座激光雷达版",
+        "750 Max六座激光雷达版",
+        "700 Ultra六座四驱激光雷达版",
+        "350 Pro五座激光雷达版",
+        "350 Max五座激光雷达版",
+        "350 Pro六座激光雷达版",
+        "350 Max六座激光雷达版"
+      ],
+      "field_rows": 187,
+      "column_errors": []
+    },
+    {
+      "file": "广汽昊铂/昊铂HT/参数配置表/配置数据(官方接口_50).json",
+      "sha256": "2e608e53dc8230b2de40777b54a95a55b81088a3f26a4d02ce33944e03f79821",
+      "variant_count": 4,
+      "variants": [
+        "2025款 670 Pro版",
+        "2025款 670 Max版",
+        "2025款 825 Pro版",
+        "2025款 825 Max版"
+      ],
+      "field_rows": 100,
+      "column_errors": []
+    },
+    {
+      "file": "广汽昊铂/昊铂S600/参数配置表/配置数据(官方接口_56).json",
+      "sha256": "50b5ce0fd799190fe004dc51939d6bd5949624bc3042fe349a6257c3b220a650",
+      "variant_count": 4,
+      "variants": [
+        "660 Max",
+        "660 Max+",
+        "230 Max",
+        "215 四驱Ultra+"
+      ],
+      "field_rows": 169,
+      "column_errors": []
+    },
+    {
+      "file": "广汽昊铂/昊铂SSR/参数配置表/配置数据(官方接口_46).json",
+      "sha256": "7079fb988cfd660f8cbca4cc669e525accbbb8c9e0b1454897c9da945baa2969",
+      "variant_count": 3,
+      "variants": [
+        "昊铂SSR",
+        "昊铂SSR Sprint 极速版",
+        "昊铂SSR Ultimate赛道版"
+      ],
+      "field_rows": 121,
+      "column_errors": []
+    }
+  ]
+}
