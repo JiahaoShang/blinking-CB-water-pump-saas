@@ -1,0 +1,5 @@
+{
+  "status": "Success",
+  "exit_code": 0,
+  "output": "{\"additional_historic_redactions\": 2}\ncallback_http 200\ncallback_http 200\n{\"callback_token_in_log_after_reload\": false}\n"
+}

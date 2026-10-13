@@ -1,0 +1,7 @@
+{
+  "InvocationStatus": "Success",
+  "ExitCode": 0,
+  "StartTime": "2026-10-13T16:48:27Z",
+  "FinishedTime": "2026-10-13T16:48:27Z",
+  "output": "{\"version\": \"2026.9.2\", \"tier\": \"CORE\", \"engine\": \"NOWEB\"}\n{\"registry_mode\": \"0o640\", \"bridge_key_present_in_container_log\": false}\n{\"application_registry_readable\": true}\nrunning b2b-enterprise-0037655901d87781abc9b11b\n"
+}

@@ -1,0 +1,5 @@
+{
+  "status": "Success",
+  "exit_code": 0,
+  "output": "企业桥就绪：tenant=pilot-t4 container=b2b-enterprise-0037655901d87781abc9b11b api_base=http://127.0.0.1:32769 image=devlikeapro/waha@sha256:be61f8cd7774ab22bd1b755cbc539f98d71d81d5ca83555fdddfa4fddd7924e1 action=running；注册表已更新\nHTTPS登录 200\n"
+}

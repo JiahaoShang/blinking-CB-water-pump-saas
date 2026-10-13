@@ -1,0 +1,50 @@
+test_check_registered_cli_output_contract (test_channel_runtime.EnterpriseBridgeToolTests) ... ok
+test_check_registered_fails_closed_on_foreign_mount_or_label_or_inspect_error (test_channel_runtime.EnterpriseBridgeToolTests) ... ok
+test_check_registered_reports_verified_states (test_channel_runtime.EnterpriseBridgeToolTests) ... ok
+test_creates_isolated_container_env_file_and_registry (test_channel_runtime.EnterpriseBridgeToolTests) ... FAIL
+test_list_registered_returns_managed_names (test_channel_runtime.EnterpriseBridgeToolTests) ... ok
+test_new_container_publishes_fixed_host_port_and_registry_reflects_it (test_channel_runtime.EnterpriseBridgeToolTests)
+修复回归锁：新容器固定发布数字宿主端口（旧的 127.0.0.1::3000 动态映射停启会重分配）。 ... FAIL
+test_rebuild_from_restored_registry_updates_random_address (test_channel_runtime.EnterpriseBridgeToolTests) ... FAIL
+test_refuses_foreign_container_with_same_name (test_channel_runtime.EnterpriseBridgeToolTests) ... ok
+test_refuses_unknown_tenant_or_missing_database (test_channel_runtime.EnterpriseBridgeToolTests) ... ok
+test_second_run_is_idempotent_and_refreshes_address (test_channel_runtime.EnterpriseBridgeToolTests) ... ok
+test_registry_file_present_but_not_configured_keeps_existing_modes (test_channel_runtime.PersonalBridgeLegacyModeTests) ... ok
+test_fail_closed_when_registry_file_missing (test_channel_runtime.PersonalBridgeRegistryModeTests) ... ok
+test_fail_closed_without_valid_tenant_mapping (test_channel_runtime.PersonalBridgeRegistryModeTests) ... ok
+test_resolves_current_tenant_entry_without_docker (test_channel_runtime.PersonalBridgeRegistryModeTests) ... ok
+test_isolated_container_config_and_secret_permissions (test_channel_runtime.RuntimeCheck) ... ok
+
+======================================================================
+FAIL: test_creates_isolated_container_env_file_and_registry (test_channel_runtime.EnterpriseBridgeToolTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 177, in test_creates_isolated_container_env_file_and_registry
+    fixed_port = self.published_port(fake)
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 170, in published_port
+    self.assertIsNotNone(match, f'发布映射必须为固定数字回环端口（收到：{mapping!r}）')
+AssertionError: unexpectedly None : 发布映射必须为固定数字回环端口（收到：'127.0.0.1::3000'）
+
+======================================================================
+FAIL: test_new_container_publishes_fixed_host_port_and_registry_reflects_it (test_channel_runtime.EnterpriseBridgeToolTests)
+修复回归锁：新容器固定发布数字宿主端口（旧的 127.0.0.1::3000 动态映射停启会重分配）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 227, in test_new_container_publishes_fixed_host_port_and_registry_reflects_it
+    self.assertIsNotNone(match, f'必须固定发布数字宿主端口（收到：{mapping!r}）')
+AssertionError: unexpectedly None : 必须固定发布数字宿主端口（收到：'127.0.0.1::3000'）
+
+======================================================================
+FAIL: test_rebuild_from_restored_registry_updates_random_address (test_channel_runtime.EnterpriseBridgeToolTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 275, in test_rebuild_from_restored_registry_updates_random_address
+    rebuild_port = self.published_port(fake)  # 重建时重新随机选取并固定发布
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 170, in published_port
+    self.assertIsNotNone(match, f'发布映射必须为固定数字回环端口（收到：{mapping!r}）')
+AssertionError: unexpectedly None : 发布映射必须为固定数字回环端口（收到：'127.0.0.1::3000'）
+
+----------------------------------------------------------------------
+Ran 15 tests in 0.053s
+
+FAILED (failures=3)
