@@ -1,0 +1,53 @@
+FF.FF
+======================================================================
+FAIL: test_environment_model_cannot_override (__main__.PolicyTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/b2b-independent-flash-policy.py", line 26, in test_environment_model_cannot_override
+    self.assertEqual(c.model,'deepseek-flash');self.assert_low(self.request(c))
+AssertionError: 'deepseek-v4-pro' != 'deepseek-flash'
+- deepseek-v4-pro
++ deepseek-flash
+
+
+======================================================================
+FAIL: test_official_custom_endpoint_also_forced_low (__main__.PolicyTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/b2b-independent-flash-policy.py", line 29, in test_official_custom_endpoint_also_forced_low
+    c.model='deepseek-v4-pro';self.assert_low(self.request(c))
+  File "/tmp/b2b-independent-flash-policy.py", line 21, in assert_low
+    self.assertEqual(b['model'],'deepseek-flash');self.assertEqual(b.get('thinking'),{'type':'enabled'});self.assertEqual(b.get('reasoning_effort'),'low')
+AssertionError: 'deepseek-v4-pro' != 'deepseek-flash'
+- deepseek-v4-pro
++ deepseek-flash
+
+
+======================================================================
+FAIL: test_platform_constructed_and_mutated_config_cannot_change_model (__main__.PolicyTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/b2b-independent-flash-policy.py", line 23, in test_platform_constructed_and_mutated_config_cannot_change_model
+    c=AIConfig(mode='deepseek',model='deepseek-v4-pro',api_key='fake');c.model='deepseek-v4-pro';self.assert_low(self.request(c))
+  File "/tmp/b2b-independent-flash-policy.py", line 21, in assert_low
+    self.assertEqual(b['model'],'deepseek-flash');self.assertEqual(b.get('thinking'),{'type':'enabled'});self.assertEqual(b.get('reasoning_effort'),'low')
+AssertionError: 'deepseek-v4-pro' != 'deepseek-flash'
+- deepseek-v4-pro
++ deepseek-flash
+
+
+======================================================================
+FAIL: test_saved_and_old_official_custom_public_config_is_flash (__main__.PolicyTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/b2b-independent-flash-policy.py", line 36, in test_saved_and_old_official_custom_public_config_is_flash
+    self.assertEqual(m.public('a')['model'],'deepseek-flash')
+AssertionError: 'deepseek-v4-pro' != 'deepseek-flash'
+- deepseek-v4-pro
++ deepseek-flash
+
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.004s
+
+FAILED (failures=4)

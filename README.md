@@ -50,7 +50,8 @@ python3 app.py --host 127.0.0.1 --port 8000 --db data/app.db
 # 也可用 --ai-mode deepseek 覆盖本次启动；start_demo.py 同样读取这些环境变量
 ```
 
-- 可选配置：`DEEPSEEK_MODEL`（默认 `deepseek-flash`）、`DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`，仅测试/代理场景覆盖）、`DEEPSEEK_TIMEOUT_SECONDS`（默认 20，上限 120）、`DEEPSEEK_MAX_TOKENS`（默认 512，上限 8192）。密钥只经 `DEEPSEEK_API_KEY` 环境变量读取；`.env` 已在 `.gitignore` 中。
+- **官方通道固定参数（2026-10-13 用户明确）**：平台 DeepSeek 与企业自定义指向官方 `api.deepseek.com` 时，请求固定 `model=deepseek-flash`、`thinking={"type":"enabled"}`（思考开启，不关闭）、`reasoning_effort="low"`（官方支持 low/high/max，默认档为 high）；思考模式忽略 `temperature`，官方通道不再发送该参数。环境变量、直接构造、运行期修改与旧企业配置都不能切换模型或关闭/调整思考；公开状态与调用日志的模型与实际请求一致。企业自定义指向其他第三方兼容端点时保留原协议，不注入 DeepSeek 专用字段。未显式设置输出上限时，官方通道默认 1024 tokens（真实低思考在 512 下会 `finish_reason=length` 截断，2026-10-13），第三方兼容端点默认沿用 512；显式 `DEEPSEEK_MAX_TOKENS` 与直接参数一律尊重，不静默忽略费用上限；思考强度保持 low，不自动升档。历史纠正：此前实现的「显式关闭思考模式」（`thinking disabled`，自 `8368d0a` 起）系对需求的误解，本项按用户明确要求改为思考开启、强度 low。
+- 可选配置：`DEEPSEEK_MODEL`（仅兼容读取：官方通道读取与保存时规范化为 `deepseek-flash`，不能经环境变量切换）、`DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`，仅测试/代理场景覆盖）、`DEEPSEEK_TIMEOUT_SECONDS`（默认 20，上限 120）、`DEEPSEEK_MAX_TOKENS`（显式输出上限，1–8192；未设置时按通道取默认——官方通道 1024、第三方端点 512）。密钥只经 `DEEPSEEK_API_KEY` 环境变量读取；`.env` 已在 `.gitignore` 中。
 - `AI_MODE=deepseek` 而未设置 `DEEPSEEK_API_KEY` 时应用会**明确拒绝启动**，不会落回规则结果（避免把未联调误认为已联调）。模型故障时买方只看到统一的「暂不可用、消息已保存、可重试」提示；内部状态（可重试/需配置/需排查）记录在管理概览「模型接入」卡片与 `ai_call_log` 表（只含提供方、模型、状态、耗时、用量，不含密钥与买家消息）。
 - **真实账户联调（未验证，待配置者本机执行）**：在配置 Key 后运行 `python3 tools/pilot_checks/check_deepseek_live.py`，输出只含状态/耗时/用量。该步骤属于[试点就绪核对表](docs/试点就绪核对表.md)第 6 项；在此之前，代码适配由本地模拟服务测试覆盖，**不等于**真实 DeepSeek 账户联调完成。
 - 自动测试不需要真实 Key，也不要为跑测试设置 `AI_MODE=deepseek`；模型边界行为由本地 HTTP 模拟服务测试（`test_ai_deepseek.py`）覆盖。

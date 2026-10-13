@@ -8,7 +8,10 @@ from pathlib import Path
 import socket
 import tempfile
 from urllib.parse import urlsplit
-from ai_client import AIConfig, AIService, AIConfigurationError, MODE_DEEPSEEK
+from ai_client import (
+    AIConfig, AIService, AIConfigurationError, MODE_DEEPSEEK,
+    DEEPSEEK_DEFAULT_MODEL, is_official_deepseek_endpoint,
+)
 
 
 def validate_endpoint(value):
@@ -39,6 +42,10 @@ class EnterpriseModels:
                 value = json.load(f)
             if not all(isinstance(value.get(k), str) and value[k] for k in ('base_url', 'model', 'api_key')):
                 raise ValueError('invalid stored config')
+            if is_official_deepseek_endpoint(value['base_url']):
+                # 官方端点固定 deepseek-flash：旧配置（如存有 deepseek-chat）读取时规范化；
+                # 不改写原文件、不动密钥（用户 2026-10-13 明确）。
+                value['model'] = DEEPSEEK_DEFAULT_MODEL
             return value
         except FileNotFoundError:
             return None
@@ -57,6 +64,9 @@ class EnterpriseModels:
         return AIService(AIConfig(mode=MODE_DEEPSEEK, provider='custom', **value))
 
     def save(self, tenant, base_url, model, api_key):
+        if is_official_deepseek_endpoint(base_url):
+            # 官方配置持久保存为规范值：官方端点固定 deepseek-flash。
+            model = DEEPSEEK_DEFAULT_MODEL
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.root, 0o700)
         fd, name = tempfile.mkstemp(dir=self.root)
@@ -99,7 +109,7 @@ def settings_page(handler, query):
 <form method='post' action='/admin/preferences/model/connect'>
 <label for="model-base-url">API 地址</label><input id="model-base-url" name='base_url' type='url' required placeholder='https://api.deepseek.com' value='{esc(current.get('base_url', ''))}'>
 <p class='muted'>支持 OpenAI Chat Completions 兼容接口，填写基础地址（通常以 /v1 结尾），不包含 /chat/completions。模型需支持 JSON 输出。</p>
-<label for="model-name">模型名称</label><input id="model-name" name='model' required maxlength='200' placeholder='deepseek-chat' value='{esc(current.get('model', ''))}'>
+<label for="model-name">模型名称</label><input id="model-name" name='model' required maxlength='200' placeholder='deepseek-flash' value='{esc(current.get('model', ''))}'>
 <label for="model-api-key">API 密钥</label><input id="model-api-key" name='api_key' type='password' required autocomplete='new-password' maxlength='4096' placeholder='输入密钥，保存后不再显示'>
 <p><button>测试连接并启用</button></p><p class='muted'>测试会发起一次小型模型请求，可能产生供应商费用。</p></form></div></details>"""
     body = f"<div class='page-header'><h1>设置</h1><p class='muted'>企业统一的模型服务设置</p></div>" + (f"<p role='status'>{esc(notice)}</p>" if notice else '') + f"<section class='card'><h2>{svg_icon('sliders')} 模型服务</h2>{status}{control}</section>"

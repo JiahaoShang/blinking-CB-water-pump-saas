@@ -146,8 +146,11 @@ class DeepSeekBoundaryTests(unittest.TestCase):
         self.mock = MockDeepSeekServer(scripts)
         return self.mock
 
-    def start_app(self, mock, timeout_seconds=5.0):
-        self.server = make_server(self.db_path, port=0, ai_config=ai_config_for(mock, timeout_seconds=timeout_seconds))
+    def start_app(self, mock, timeout_seconds=5.0, ai_config=None):
+        self.server = make_server(
+            self.db_path, port=0,
+            ai_config=ai_config if ai_config is not None else ai_config_for(mock, timeout_seconds=timeout_seconds),
+        )
         db = self.server.RequestHandlerClass.db
         db.seed_demo_users()
         db.register_buyer_site("demo-tenant", "site-a", ORIGIN)
@@ -295,13 +298,15 @@ class DeepSeekBoundaryTests(unittest.TestCase):
         for key in ("flow", "head", "media"):
             self.assertEqual(values[key]["state"], "candidate", "模型输出只能是候选，不能创造确认状态")
             self.assertEqual(values[key]["source"], "model_candidate")
-        # 上游请求符合 DeepSeek Chat Completions 协议约定
+        # 上游请求符合 DeepSeek Chat Completions 协议约定；官方通道固定参数（2026-10-13 用户明确）
         sent = mock.requests[0]
         self.assertEqual(sent["path"], "/chat/completions")
         self.assertEqual(sent["headers"].get("Authorization"), f"Bearer {FAKE_KEY}")
         self.assertEqual(sent["body"]["model"], "deepseek-flash")
         self.assertEqual(sent["body"]["response_format"], {"type": "json_object"})
-        self.assertEqual(sent["body"]["thinking"], {"type": "disabled"})
+        self.assertEqual(sent["body"]["thinking"], {"type": "enabled"})
+        self.assertEqual(sent["body"]["reasoning_effort"], "low")
+        self.assertNotIn("temperature", sent["body"], "思考模式忽略 temperature：官方通道不发送")
         self.assertEqual(sent["body"]["stream"], False)
         self.assertEqual(sent["body"]["max_tokens"], 512)
         self.assertIn(text, sent["body"]["messages"][1]["content"])
@@ -319,6 +324,106 @@ class DeepSeekBoundaryTests(unittest.TestCase):
         serialized = self.ai_rows_json()
         self.assertNotIn(FAKE_KEY, serialized)
         self.assertNotIn("plant room", serialized)
+
+    # ---- 官方通道固定参数：思考开启、强度 low（2026-10-13 用户明确；不关闭思考）----------
+
+    def test_official_channel_params_force_flash_enabled_low_against_bypass_paths(self):
+        """环境变量、直接构造与运行期修改都不能把官方通道切到其他模型或关闭/调整思考。"""
+        mock = self.start_mock([
+            extraction_success({"flow": {"value": "50", "unit": "m³/h"}}),
+            extraction_success({"flow": {"value": "50", "unit": "m³/h"}}),
+            extraction_success({"flow": {"value": "50", "unit": "m³/h"}}),
+        ])
+        env_config = AIConfig.from_env({
+            "AI_MODE": "deepseek",
+            "DEEPSEEK_API_KEY": FAKE_KEY,
+            "DEEPSEEK_BASE_URL": mock.base_url,
+            "DEEPSEEK_MODEL": "deepseek-v4-pro",
+        })
+        self.assertEqual(env_config.model, "deepseek-flash", "环境变量不得切换官方通道模型")
+        direct_config = AIConfig(mode="deepseek", api_key=FAKE_KEY, base_url=mock.base_url, model="deepseek-v4-pro")
+        self.assertEqual(direct_config.model, "deepseek-flash", "直接构造不得切换官方通道模型")
+        mutated_config = AIConfig(mode="deepseek", api_key=FAKE_KEY, base_url=mock.base_url)
+        mutated_config.model = "deepseek-v4-pro"
+        self.assertEqual(mutated_config.model, "deepseek-flash", "运行期修改不得切换官方通道模型")
+        for config in (env_config, direct_config, mutated_config):
+            ai_client.AIService(config).extract_requirements("flow 50")
+        self.assertEqual(len(mock.requests), 3)
+        for request in mock.requests:
+            body = request["body"]
+            self.assertEqual(body["model"], "deepseek-flash")
+            self.assertEqual(body["thinking"], {"type": "enabled"}, "官方通道不关闭思考")
+            self.assertEqual(body["reasoning_effort"], "low")
+            self.assertNotIn("temperature", body)
+
+    def test_max_tokens_official_default_1024_and_explicit_limits_respected(self):
+        """官方默认 1024（低思考真实 512 截断后适配）；显式参数与环境上限一律尊重，不静默忽略。"""
+        mock = self.start_mock([
+            extraction_success({"flow": {"value": "50", "unit": "m³/h"}}),
+            extraction_success({"flow": {"value": "50", "unit": "m³/h"}}),
+            extraction_success({"flow": {"value": "50", "unit": "m³/h"}}),
+        ])
+        default_config = AIConfig(mode="deepseek", api_key=FAKE_KEY, base_url=mock.base_url)
+        explicit_config = AIConfig(mode="deepseek", api_key=FAKE_KEY, base_url=mock.base_url, max_tokens=512)
+        env_config = AIConfig.from_env({
+            "AI_MODE": "deepseek",
+            "DEEPSEEK_API_KEY": FAKE_KEY,
+            "DEEPSEEK_BASE_URL": mock.base_url,
+            "DEEPSEEK_MAX_TOKENS": "256",
+        })
+        for config in (default_config, explicit_config, env_config):
+            ai_client.AIService(config).extract_requirements("flow 50")
+        self.assertEqual(len(mock.requests), 3)
+        self.assertEqual(mock.requests[0]["body"]["max_tokens"], 1024, "官方通道未显式设置时默认 1024")
+        self.assertEqual(mock.requests[1]["body"]["max_tokens"], 512, "显式 max_tokens=512 必须被尊重")
+        self.assertEqual(mock.requests[2]["body"]["max_tokens"], 256, "环境变量显式上限必须被尊重")
+
+    def test_app_log_and_status_show_forced_model_despite_config_override(self):
+        """公开状态（设置页）与调用日志的 model 必须与实际请求一致：都显示 deepseek-flash。"""
+        mock = self.start_mock([extraction_success({"flow": {"value": "50", "unit": "m³/h"}})])
+        self.start_app(mock, ai_config=AIConfig(
+            mode="deepseek", api_key=FAKE_KEY, base_url=mock.base_url, model="deepseek-v4-pro"))
+        conversation_id, headers = self.open_conversation()
+        path = f"/api/v1/buyer/conversations/{conversation_id}"
+        status, _, _ = self.send_message(path, headers, "flow 50", key="forced-1")
+        self.assertEqual(status, 201)
+        self.assertEqual(mock.requests[0]["body"]["model"], "deepseek-flash")
+        rows = self.ai_rows()
+        self.assertEqual((rows[0]["provider"], rows[0]["model"]), ("deepseek", "deepseek-flash"))
+        cookie = self.login_admin()
+        status, page = self.admin_get("/admin/preferences", cookie)
+        self.assertEqual(status, 200)
+        self.assertIn("模型 deepseek-flash", page)
+        self.assertNotIn("deepseek-v4-pro", page)
+
+    def test_truncated_length_response_is_failure_and_reasoning_content_stays_out(self):
+        """finish_reason=length 不得当作成功答案；reasoning_content 不进页面响应、日志或后续请求。"""
+        reasoning_marker = "internal-reasoning-marker-7f31"
+        ok = chat_completion(json.dumps({"values": {"flow": {"value": "50", "unit": "m³/h"}}}))
+        ok["json"]["choices"][0]["message"]["reasoning_content"] = reasoning_marker
+        truncated = chat_completion(json.dumps({"values": {"flow": {"value": "50", "unit": "m³/h"}}}))
+        truncated["json"]["choices"][0]["finish_reason"] = "length"
+        truncated["json"]["choices"][0]["message"]["reasoning_content"] = reasoning_marker
+        mock = self.start_mock([truncated, ok])
+        self.start_app(mock)
+        conversation_id, headers = self.open_conversation()
+        path = f"/api/v1/buyer/conversations/{conversation_id}"
+        status, _, failed = self.send_message(path, headers, "flow 50", key="len-1")
+        self.assertEqual(status, 503)
+        self.assertEqual(failed["error"], "extraction_unavailable")
+        self.assertNotIn(reasoning_marker, json.dumps(failed, ensure_ascii=False))
+        self.assertIsNone(self.server.RequestHandlerClass.db.get_latest_revision("demo-tenant", conversation_id),
+                          "截断不得当作成功：不产生需求草稿")
+        status, _, body = self.send_message(path, headers, "flow 50 again", key="len-2")
+        self.assertEqual(status, 201)
+        self.assertEqual(body["requirement_draft"]["values"]["flow"]["value"], "50")
+        leaked = json.dumps(body, ensure_ascii=False) + self.ai_rows_json()
+        self.assertNotIn(reasoning_marker, leaked, "reasoning_content 不得进入页面响应或调用日志")
+        self.assertEqual([(row["task"], row["status"]) for row in self.ai_rows()],
+                         [("requirement_extraction", "invalid_output"), ("requirement_extraction", "ok")])
+        for request in mock.requests:
+            self.assertEqual([m["role"] for m in request["body"]["messages"]], ["system", "user"],
+                             "后续请求不得携带 reasoning_content 或历史助手消息")
 
     def test_extraction_drops_invalid_units_unknown_fields_and_ambiguous_values(self):
         mock = self.start_mock([extraction_success({

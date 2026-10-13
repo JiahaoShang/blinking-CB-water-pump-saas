@@ -25,6 +25,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 MODE_RULES = "rules"
 MODE_DEEPSEEK = "deepseek"
@@ -35,11 +36,22 @@ DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
 DEEPSEEK_DEFAULT_TIMEOUT_SECONDS = 20.0
 DEEPSEEK_TIMEOUT_LIMIT_SECONDS = 120.0
+# 输出上限默认（未显式设置时按实际通道取值）：官方通道 1024（2026-10-13 真实调用证据：低思考
+# 在 512 下会 finish_reason=length 截断）；第三方兼容端点沿用原 512。显式 max_tokens 与
+# DEEPSEEK_MAX_TOKENS 一律尊重，不静默改写（费用上限不会被忽略）。
 DEEPSEEK_DEFAULT_MAX_TOKENS = 512
+DEEPSEEK_OFFICIAL_DEFAULT_MAX_TOKENS = 1024
 DEEPSEEK_MAX_TOKENS_LIMIT = 8192
 DEEPSEEK_CHAT_PATH = "/chat/completions"
 # 送给模型的买方文本上限（控制输入规模；超出部分截断）。
 DEEPSEEK_MAX_INPUT_CHARS = 4000
+# 官方 DeepSeek 通道（平台 deepseek，或企业自定义指向官方端点）的固定请求参数。
+# 用户 2026-10-13 明确：模型固定 deepseek-flash、思考保持开启（不关闭）、推理强度 low
+# （官方支持 low/high/max，默认档为 high）；环境变量、直接构造、运行期修改与旧企业配置
+# 都只能得到这一组值，不能切到其他模型或关闭/调整思考。
+DEEPSEEK_OFFICIAL_HOST = "api.deepseek.com"
+DEEPSEEK_THINKING_TYPE = "enabled"
+DEEPSEEK_REASONING_EFFORT = "low"
 
 # 内部状态分类：ok 表示成功；其余为失败分类，action 给出处理建议。
 STATUS_OK = "ok"
@@ -120,6 +132,19 @@ def classify_http_status(code: int) -> str:
     return STATUS_HTTP_ERROR
 
 
+def is_official_deepseek_endpoint(base_url: str) -> bool:
+    """base_url 是否指向官方 DeepSeek API 端点（api.deepseek.com）。
+
+    企业自定义只有在指向官方端点时才套用平台同一组固定参数（模型 flash、思考开启、
+    强度 low）；其他第三方 OpenAI 兼容端点保留原协议，不注入 DeepSeek 专用字段。
+    """
+    try:
+        host = urlsplit(str(base_url or "")).hostname or ""
+    except ValueError:
+        return False
+    return host.lower() == DEEPSEEK_OFFICIAL_HOST
+
+
 class AIConfig:
     """一次运行期的 AI 配置。默认 rules；deepseek 需要显式密钥（只经环境变量读取）。"""
 
@@ -131,15 +156,31 @@ class AIConfig:
         base_url: str = DEEPSEEK_DEFAULT_BASE_URL,
         api_key: str = "",
         timeout_seconds: float = DEEPSEEK_DEFAULT_TIMEOUT_SECONDS,
-        max_tokens: int = DEEPSEEK_DEFAULT_MAX_TOKENS,
+        max_tokens: int | None = None,
     ):
         self.mode = mode
         self.provider = provider
-        self.model = model
         self.base_url = base_url
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
         self.max_tokens = max_tokens
+        self._model = model
+
+    @property
+    def uses_official_deepseek(self) -> bool:
+        """请求是否走官方 DeepSeek 通道：平台 deepseek 模式，或企业自定义指向官方端点。"""
+        return self.provider == PROVIDER_DEEPSEEK or is_official_deepseek_endpoint(self.base_url)
+
+    @property
+    def model(self) -> str:
+        """官方通道读取即固定 deepseek-flash（环境变量/直接构造/运行期修改都不能切换）。"""
+        if self.uses_official_deepseek:
+            return DEEPSEEK_DEFAULT_MODEL
+        return self._model
+
+    @model.setter
+    def model(self, value: str) -> None:
+        self._model = value
 
     def __repr__(self) -> str:  # 防止密钥随 repr 进入日志或测试输出
         return (
@@ -172,6 +213,8 @@ class AIConfig:
             raise AIConfigurationError("DEEPSEEK_BASE_URL 需要是合法的 http(s) 地址（仅测试/代理场景覆盖默认值）。")
         config.base_url = base_url.rstrip("/")
 
+        # DEEPSEEK_MODEL 仅保留兼容读取：官方通道读取模型时固定为 deepseek-flash，
+        # 环境变量不能切换到其他模型（用户 2026-10-13 明确）。
         model = str(env.get("DEEPSEEK_MODEL", "") or "").strip()
         config.model = model or DEEPSEEK_DEFAULT_MODEL
 
@@ -459,9 +502,13 @@ def _parse_completion(payload: dict) -> tuple[dict, int | None, int | None]:
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         raise AIUnavailableError(STATUS_INVALID_OUTPUT, "响应缺少 choices")
     choice = choices[0]
-    if choice.get("finish_reason") != "stop":
-        raise AIUnavailableError(STATUS_INVALID_OUTPUT, f"响应未正常结束（{choice.get('finish_reason')!r}）")
+    finish_reason = choice.get("finish_reason")
+    if finish_reason != "stop":
+        # 截断（length）等非正常结束不得当作成功答案：按输出不可用（可重试）处理。
+        detail = "输出被 max_tokens 截断" if finish_reason == "length" else f"结束原因 {finish_reason!r}"
+        raise AIUnavailableError(STATUS_INVALID_OUTPUT, f"响应未正常结束（{detail}）")
     message = choice.get("message")
+    # 只读取最终 content；思考模式的 reasoning_content 不进入业务值、日志或后续请求。
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str) or not content.strip():
         raise AIUnavailableError(STATUS_INVALID_OUTPUT, "响应内容为空")
@@ -487,7 +534,8 @@ class DeepSeekChatClient:
     """最小 DeepSeek Chat Completions 客户端（标准库 urllib，无第三方依赖）。
 
     端点与请求字段以官方文档为准：POST {base_url}/chat/completions，
-    Bearer 鉴权；显式关闭思考模式并限制输出长度，保证延迟与费用有界。
+    Bearer 鉴权；官方通道固定请求参数（deepseek-flash、思考开启、强度 low）并限制
+    输出长度，保证延迟与费用有界。
     """
 
     def __init__(self, config: AIConfig):
@@ -502,21 +550,29 @@ class DeepSeekChatClient:
 
     def call_json(self, system_prompt: str, user_content: str) -> tuple[dict, dict]:
         """调用一次并返回 (模型 JSON dict, meta)。meta 含 duration_ms/http_status/tokens。"""
+        official = self.config.uses_official_deepseek
+        max_tokens = self.config.max_tokens
+        if max_tokens is None:
+            # 未显式设置时按实际通道取默认：官方 1024（低思考 512 会真实截断），第三方沿用 512。
+            max_tokens = DEEPSEEK_OFFICIAL_DEFAULT_MAX_TOKENS if official else DEEPSEEK_DEFAULT_MAX_TOKENS
         body = {
             "model": self.config.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            # 提取与字段定位都不需要深度思考：显式关闭，并限制输出长度与随机性。
-            "thinking": {"type": "disabled"},
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens,
             "response_format": {"type": "json_object"},
             "stream": False,
-            "temperature": 0.2,
         }
-        if self.config.provider == "custom":
-            body.pop("thinking", None)
+        if official:
+            # 官方通道固定参数（用户 2026-10-13 明确）：思考保持开启、强度 low（官方默认 high）。
+            # 思考模式忽略 temperature/presence_penalty/frequency_penalty，因此不再发送 temperature。
+            body["thinking"] = {"type": DEEPSEEK_THINKING_TYPE}
+            body["reasoning_effort"] = DEEPSEEK_REASONING_EFFORT
+        else:
+            # 第三方 OpenAI 兼容端点保留原协议：不注入 DeepSeek 专用字段，保留原有温度设置。
+            body["temperature"] = 0.2
         request = urllib.request.Request(
             self._endpoint(),
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),

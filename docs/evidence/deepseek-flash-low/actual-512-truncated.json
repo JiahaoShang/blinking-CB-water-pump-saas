@@ -1,0 +1,14 @@
+{
+  "status": "invalid_output",
+  "failure_detail": "\u54cd\u5e94\u672a\u6b63\u5e38\u7ed3\u675f\uff08\u8f93\u51fa\u88ab max_tokens \u622a\u65ad\uff09",
+  "outgoing_parameters": {
+    "model": "deepseek-flash",
+    "thinking": {
+      "type": "enabled"
+    },
+    "reasoning_effort": "low",
+    "max_tokens": 512
+  },
+  "duration_ms": 3342,
+  "actual_product_code": true
+}

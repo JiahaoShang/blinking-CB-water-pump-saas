@@ -1,0 +1,19 @@
+{
+  "status": "ok",
+  "candidate_count": 4,
+  "outgoing_parameters": {
+    "model": "deepseek-flash",
+    "thinking": {
+      "type": "enabled"
+    },
+    "reasoning_effort": "low",
+    "max_tokens": 512
+  },
+  "meta": {
+    "duration_ms": 2905,
+    "http_status": 200,
+    "prompt_tokens": 395,
+    "completion_tokens": 493
+  },
+  "scope": "Independent supplier protocol probe; not verification of unrevised production code"
+}
