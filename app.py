@@ -4716,6 +4716,12 @@ def answer_question_prefer_dify(
     if outcome["status"] == "grounded":
         # 知识版本不写入 answers.product_version_id（该列是产品版本外键）；引用自带精确版本。
         return "grounded", outcome["answer"], None, None, outcome["citations"], "", "knowledge"
+    if outcome["status"] == "error":
+        # 实际模型故障（超时/限流/输出不可解析）向上抛出，交给调用方既有失败路径：
+        # 网页 503 保留问题可重试、旧询价页 answer_unavailable、渠道异常入口 500。
+        # 不得回落到第一段兜底结果——否则会被落成答案，同幂等键重试命中假答案而不再调用模型。
+        # 失败日志已在 answer_knowledge_question 内记录，这里不重复记。
+        raise AIUnavailableError(outcome["error_kind"])
     return status, answer_text, answer_product_id, version_id, citations, reason, "local"
 
 

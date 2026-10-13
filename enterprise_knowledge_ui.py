@@ -1213,9 +1213,16 @@ class KnowledgeUI:
         status = result.get("status")
         if status == "grounded":
             citation = (result.get("citations") or [{}])[0]
-            if citation.get("kind") == "product_field":
+            kind = citation.get("kind")
+            if kind == "product_field":
                 link = f"/admin/knowledge/product/{esc(citation.get('product_id'))}"
                 source_line = f"产品字段 · 出处：{esc(citation.get('filename') or '')}"
+            elif kind == "topic":
+                link = f"/admin/knowledge/topic/{esc(citation.get('topic_id'))}"
+                source_line = "主题段落"
+            elif kind == "item_field":
+                link = f"/admin/knowledge/item/{esc(citation.get('item_id'))}"
+                source_line = f"资料字段 · {esc(citation.get('label') or '')}"
             else:
                 link = f"/admin/knowledge/item/{esc(citation.get('item_id'))}"
                 source_line = f"知识条目 · {esc(citation.get('form_label') or '')}"

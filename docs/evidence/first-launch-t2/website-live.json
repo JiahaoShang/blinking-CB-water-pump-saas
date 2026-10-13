@@ -1,0 +1,63 @@
+{
+  "results": [
+    {
+      "stage": "platform",
+      "http_status": 201,
+      "answer": "The test pump warranty lasts 18 months.",
+      "citations": [
+        {
+          "kind": "topic",
+          "title": "T2 HTTP synthetic warranty",
+          "version": "主题 v1",
+          "version_id": "81e8b7c02a848192a1065fd2",
+          "topic_id": "88a8ee229ba8c0f6391e551c",
+          "paragraph_id": "p1",
+          "quote": "The test pump warranty lasts 18 months.",
+          "filename": "T2 HTTP synthetic warranty",
+          "location": "主题 · v1 · 第 1 段",
+          "published_at": "2026-10-13T04:32:56+00:00"
+        }
+      ]
+    },
+    {
+      "stage": "custom",
+      "http_status": 201,
+      "answer": "The test pump warranty lasts 18 months.",
+      "citations": [
+        {
+          "kind": "topic",
+          "title": "T2 HTTP synthetic warranty",
+          "version": "主题 v1",
+          "version_id": "81e8b7c02a848192a1065fd2",
+          "topic_id": "88a8ee229ba8c0f6391e551c",
+          "paragraph_id": "p1",
+          "quote": "The test pump warranty lasts 18 months.",
+          "filename": "T2 HTTP synthetic warranty",
+          "location": "主题 · v1 · 第 1 段",
+          "published_at": "2026-10-13T04:32:56+00:00"
+        }
+      ]
+    }
+  ],
+  "calls": [
+    {
+      "task": "knowledge_evidence_selection",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "status": "ok",
+      "duration_ms": 879,
+      "prompt_tokens": 257,
+      "completion_tokens": 7
+    },
+    {
+      "task": "knowledge_evidence_selection",
+      "provider": "custom",
+      "model": "deepseek-flash",
+      "status": "ok",
+      "duration_ms": 913,
+      "prompt_tokens": 282,
+      "completion_tokens": 42
+    }
+  ],
+  "passed": true
+}

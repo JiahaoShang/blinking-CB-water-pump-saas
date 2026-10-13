@@ -1,0 +1,50 @@
+{
+  "results": [
+    {
+      "tenant": "demo-tenant",
+      "case": "topic_unified_entry",
+      "status": "grounded",
+      "answer": "The test pump warranty lasts 18 months.",
+      "citations": [
+        {
+          "kind": "topic",
+          "title": "T2 synthetic warranty",
+          "version": "主题 v1",
+          "version_id": "79f2a32a3686349bec0de74a",
+          "topic_id": "ee03b146c02abe41a4a7ee5a",
+          "paragraph_id": "p1",
+          "quote": "The test pump warranty lasts 18 months.",
+          "filename": "T2 synthetic warranty",
+          "location": "主题 · v1 · 第 1 段",
+          "published_at": "2026-10-13T04:26:15+00:00"
+        }
+      ]
+    },
+    {
+      "tenant": "t2-company-b",
+      "case": "topic_unified_entry",
+      "status": "grounded",
+      "answer": "The test pump warranty lasts 31 months.",
+      "citations": [
+        {
+          "kind": "topic",
+          "title": "T2 synthetic warranty",
+          "version": "主题 v1",
+          "version_id": "e1261ce4bf57324c38ef3e40",
+          "topic_id": "e6e178f1ddff9d5e1509d74b",
+          "paragraph_id": "p1",
+          "quote": "The test pump warranty lasts 31 months.",
+          "filename": "T2 synthetic warranty",
+          "location": "主题 · v1 · 第 1 段",
+          "published_at": "2026-10-13T04:26:16+00:00"
+        }
+      ]
+    },
+    {
+      "case": "missing_fact",
+      "status": "no_evidence",
+      "citations": []
+    }
+  ],
+  "passed": true
+}

@@ -1,0 +1,56 @@
+{
+  "check": "first-launch-t2-prep-metadata",
+  "date": "2026-10-13",
+  "executor": "Hermes（本任务仅 T2 准备：方案 + 联调脚本 + 干跑校验；未做真实模型调用）",
+  "baseline": {
+    "worktree": "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台",
+    "branch": "feat/mvp-foundation",
+    "head": "6638ba2944f2cdb94488189366998e8469840c20",
+    "product_file_sha256": {
+      "app.py": "739918aa121e8f064ed96afd3fadd4f732b45375075be922796f665d11121a1a",
+      "ai_client.py": "2a916683691ddd642dec65227e44e9a22cd03ca4e43f6e94dd4572fb498a2b24",
+      "model_settings.py": "1b88de21ee5037f95cda4a802b1fd26b014272b6c1f02dce99747b796c2b9427",
+      "enterprise_knowledge.py": "b8ced155af5e708db5c9b0e45067ab6662ed4aa87b09c18797cada55c70730be",
+      "enterprise_knowledge_phase2.py": "3e17130c80d94a3728b654c0754ee4507f721cc8973783cf07897ad6bcf0ca2f",
+      "enterprise_knowledge_ui.py": "f5a943a848cc6fc14e3c59455cdab0488e3cf15a1e81fe3848634c8f779b184f"
+    }
+  },
+  "artifacts_written_by_this_task": [
+    "docs/首次上线-T2执行方案.md",
+    "tools/pilot_checks/check_first_launch_t2.py",
+    "docs/evidence/first-launch-t2/dry-run-temp-copy.log",
+    "docs/evidence/first-launch-t2/negative-paths.log",
+    "docs/evidence/first-launch-t2/t2-prep-metadata.json"
+  ],
+  "script_sha256": "73495275cde43bbbac4b85de16f4c25da896c71beb98f236180badca4ee3843e",
+  "validation": {
+    "copy": "/tmp/b2b-t2-copy-20261013-123008",
+    "copy_excluded": [
+      ".git",
+      "data",
+      ".venv-knowledge",
+      "__pycache__"
+    ],
+    "interpreter": "3.9.6 (.venv-knowledge)",
+    "dry_run": {
+      "command": "python3 tools/pilot_checks/check_first_launch_t2.py",
+      "result": "PASS 30 / FAIL 0 / REVIEW 0",
+      "exit_code": 0,
+      "real_model_calls": 0
+    },
+    "negative_paths": {
+      "result": "6 组均为退出码 2 / 预检 FAIL，未发起外部调用"
+    },
+    "existing_pilot_regression": {
+      "command": "python3 -m unittest -v test_pilot_checks",
+      "result": "Ran 6 tests, OK"
+    },
+    "hygiene": "运行后副本仍无 data/.git/venv；工作树 data/ 未修改（脚本前后比对通过）"
+  },
+  "boundaries": [
+    "未进行任何外部模型调用；未读取任何密钥文件；未发送外部消息。",
+    "未修改产品代码或 UI；未提交/推送/重置。",
+    "evidence 目录内非本任务列出的产物属并行独立复现/修复任务，本任务未触碰。",
+    "本结果为操作方自测证据，不构成独立验收。"
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "results": [
+    {
+      "platform": "Telegram",
+      "AI_default_off": true,
+      "confirmation_required": true,
+      "action": "answered",
+      "answer": "T2 warranty\nThe test pump warranty lasts 18 months.",
+      "citations": [
+        {
+          "kind": "knowledge",
+          "title": "T2 warranty",
+          "form_label": "文章",
+          "version": "v1",
+          "version_id": "755d66000d407e730ae3a842",
+          "item_id": "81f117759f6b5785eb696153",
+          "quote": "T2 warranty\nThe test pump warranty lasts 18 months.",
+          "filename": "T2 warranty",
+          "location": "知识条目 · v1（文章）",
+          "published_at": "2026-10-13T04:35:14+00:00"
+        }
+      ],
+      "external_delivery": "not_attempted_blocked"
+    },
+    {
+      "platform": "WhatsApp",
+      "AI_default_off": true,
+      "confirmation_required": true,
+      "action": "answered",
+      "answer": "T2 warranty\nThe test pump warranty lasts 18 months.",
+      "citations": [
+        {
+          "kind": "knowledge",
+          "title": "T2 warranty",
+          "form_label": "文章",
+          "version": "v1",
+          "version_id": "755d66000d407e730ae3a842",
+          "item_id": "81f117759f6b5785eb696153",
+          "quote": "T2 warranty\nThe test pump warranty lasts 18 months.",
+          "filename": "T2 warranty",
+          "location": "知识条目 · v1（文章）",
+          "published_at": "2026-10-13T04:35:14+00:00"
+        }
+      ],
+      "external_delivery": "not_attempted_blocked"
+    }
+  ],
+  "calls": [
+    {
+      "task": "knowledge_evidence_selection",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "status": "ok",
+      "duration_ms": 819,
+      "prompt_tokens": 248,
+      "completion_tokens": 7
+    },
+    {
+      "task": "knowledge_evidence_selection",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "status": "ok",
+      "duration_ms": 940,
+      "prompt_tokens": 248,
+      "completion_tokens": 7
+    }
+  ],
+  "passed": true
+}

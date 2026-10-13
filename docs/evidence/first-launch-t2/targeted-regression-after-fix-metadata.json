@@ -1,0 +1,41 @@
+{
+  "label": "targeted-regression-after-fix",
+  "python": "3.9.6 (default, May 22 2026, 11:13:45) \n[Clang 21.0.0 (clang-2100.1.1.101)]",
+  "interpreter": "/Library/Developer/CommandLineTools/usr/bin/python3",
+  "source": "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台",
+  "isolated_copy": "/Users/jiahaoshang/.hermes/cache/scratch/b2b-t2-targeted-whss1rdp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/python3 -m unittest -v test_knowledge_phase2_ai_gates test_enterprise_knowledge_task4 test_enterprise_knowledge_final_fixes test_dify_qa test_langbot_bridge test_system_acceptance test_buyer_api",
+  "targets": [
+    "test_knowledge_phase2_ai_gates",
+    "test_enterprise_knowledge_task4",
+    "test_enterprise_knowledge_final_fixes",
+    "test_dify_qa",
+    "test_langbot_bridge",
+    "test_system_acceptance",
+    "test_buyer_api"
+  ],
+  "excluded": [
+    ".git",
+    "data",
+    ".venv*",
+    "__pycache__",
+    ".DS_Store"
+  ],
+  "env_scrubbed_prefixes": [
+    "DIFY_",
+    "DEEPSEEK_",
+    "OPENAI_",
+    "LANGBOT_",
+    "WHATSAPP_",
+    "META_",
+    "TELEGRAM_",
+    "TWILIO_",
+    "B2B_KB_STORAGE_ROOT"
+  ],
+  "tracked_sha256": {
+    "app.py": "62ebbc621511ca6a3678a00f387c2a6384557e07692b439de15493cc33263b49",
+    "enterprise_knowledge_ui.py": "23cd4e4936c86882d69388e91cd12b11962240ac702448c848bc786a465532c5",
+    "test_first_launch_t2.py": "d60487e8619ac108af4f3d48bcdb64ecca248992213fb19880c24c07ca5e9cec"
+  },
+  "exit_code": 0
+}

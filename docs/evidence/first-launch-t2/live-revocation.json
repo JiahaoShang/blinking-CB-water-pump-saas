@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "case": "real_inflight_revocation",
+  "status": "no_evidence",
+  "reason": "选定证据在生成期间已失效：该知识已停用、撤销授权、到期或被新版本替换（生成期间发生变化）",
+  "citations": [],
+  "events": {
+    "started_at": 0.413983333,
+    "revoked_at": 0.5699695,
+    "returned_at": 1.185306875
+  },
+  "calls": [
+    {
+      "status": "ok",
+      "duration_ms": 771,
+      "prompt_tokens": 252,
+      "completion_tokens": 7
+    }
+  ]
+}

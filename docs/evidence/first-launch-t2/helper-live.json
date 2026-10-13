@@ -1,0 +1,82 @@
+{
+  "check": "first-launch-t2",
+  "mode": "live",
+  "stage": "platform",
+  "started_at": "2026-10-13T04:36:49.960Z",
+  "finished_at": "2026-10-13T04:36:50.999Z",
+  "python": "3.9.6",
+  "cwd": "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台",
+  "script": "tools/pilot_checks/check_first_launch_t2.py",
+  "script_sha256": "73495275cde43bbbac4b85de16f4c25da896c71beb98f236180badca4ee3843e",
+  "guardrails": {
+    "workdir": "/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t2-check-t2yyfi4z",
+    "workdir_is_temp": true,
+    "ai_mode_env": "deepseek",
+    "dify_env_present": [],
+    "network_tripwires_dry_run": []
+  },
+  "budget": {
+    "max_calls": 1,
+    "used_calls": 1,
+    "calls": [
+      {
+        "n": 1,
+        "action": "select_knowledge_evidence",
+        "at": "2026-10-13T04:36:50.315Z"
+      }
+    ]
+  },
+  "steps": [
+    {
+      "section": "live",
+      "name": "预检",
+      "status": "PASS",
+      "detail": "stage=platform · 模型 deepseek-flash · 地址 https://api.deepseek.com · 计划 1 次调用（上限 1）"
+    },
+    {
+      "section": "live",
+      "name": "生成期间撤权",
+      "status": "PASS",
+      "detail": "停用知识条目；复核拒绝输出失效内容"
+    },
+    {
+      "section": "live",
+      "name": "用量汇总",
+      "status": "INFO",
+      "detail": "真实调用 1/1 次 · tokens 450+7（费用以供应商账单为准）"
+    },
+    {
+      "section": "护栏",
+      "name": "仓库 data/ 未被修改",
+      "status": "PASS",
+      "detail": "data/ 不存在（临时副本）"
+    }
+  ],
+  "call_log": [
+    {
+      "task": "knowledge_evidence_selection",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "status": "ok",
+      "action": "none",
+      "http_status": 200,
+      "duration_ms": 680,
+      "prompt_tokens": 450,
+      "completion_tokens": 7,
+      "created_at": "2026-10-13T04:36:50+00:00"
+    }
+  ],
+  "counts": {
+    "PASS": 3,
+    "FAIL": 0,
+    "REVIEW": 0,
+    "INFO": 1,
+    "SKIP": 0
+  },
+  "kept_db": null,
+  "notes": [
+    "本脚本结果为操作方自测证据，不自动构成独立验收；独立复跑后才可用于验收结论。",
+    "live 调用产生供应商费用，以供应商账单为准。",
+    "共享 Dify 对外生成保持关闭；本脚本不使用、不恢复。"
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "label": "repro-before-fix",
+  "python": "3.9.6 (default, May 22 2026, 11:13:45) \n[Clang 21.0.0 (clang-2100.1.1.101)]",
+  "interpreter": "/Library/Developer/CommandLineTools/usr/bin/python3",
+  "source": "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台",
+  "isolated_copy": "/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t2-red-zd5a69fw",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/python3 -m unittest -v test_first_launch_t2",
+  "targets": [
+    "test_first_launch_t2"
+  ],
+  "excluded": [
+    ".git",
+    "data",
+    ".venv*",
+    "__pycache__",
+    ".DS_Store"
+  ],
+  "env_scrubbed_prefixes": [
+    "DIFY_",
+    "DEEPSEEK_",
+    "OPENAI_",
+    "LANGBOT_",
+    "WHATSAPP_",
+    "META_",
+    "TELEGRAM_",
+    "TWILIO_",
+    "B2B_KB_STORAGE_ROOT"
+  ],
+  "tracked_sha256": {
+    "app.py": "739918aa121e8f064ed96afd3fadd4f732b45375075be922796f665d11121a1a",
+    "enterprise_knowledge_ui.py": "f5a943a848cc6fc14e3c59455cdab0488e3cf15a1e81fe3848634c8f779b184f",
+    "test_first_launch_t2.py": "d60487e8619ac108af4f3d48bcdb64ecca248992213fb19880c24c07ca5e9cec"
+  },
+  "exit_code": 1
+}
