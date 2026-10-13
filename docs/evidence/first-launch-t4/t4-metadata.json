@@ -1,0 +1,35 @@
+{
+  "generated_at": "2026-10-13T06:44:46.969484+00:00",
+  "head": "7a7908377830653580342f0482a104537728933a",
+  "python": "3.9.6",
+  "files_sha256": {
+    "app.py": "af2a8fe70d947b6c520b391c299034c139efdfdbc1fc20e57c07bdee4de53798",
+    "enterprise_knowledge.py": "c20650daded8a1e93a6499528746771b81605442c781959fede203ab3e5c43c8",
+    "tools/backup_restore.py": "1d59e7332269d2eda24c1f703b0999e42599252afaf42aa77574652ea8d7881a",
+    "test_first_launch_t4.py": "8f9cc159ccf6d724660af2948cb2620085bdd1e11d67afc1f7e677ec5d2b3744",
+    "tools/pilot_checks/check_first_launch_t4.py": "381978ce9bed5d2e665d6d67da9a7235f5f5940d0ee466d405017f500968afff",
+    "deploy/README.md": "1f3e16911d07c6a06e3e8cffe703841fc3048c1126d03c30e8fa6a425856d883",
+    "deploy/backup_snapshot.sh": "440edf1cb743744399e74c324f3b7848dea3ef65d51b659fb20fcd54b66a8bca",
+    "deploy/b2b.env.example": "41c130fe604db5cda3a3e889d94280ff8b407c8b9c262dfccd5961063cdc2ad3",
+    "deploy/nginx-b2b.conf.example": "04f9fa288bd2df73f5c7cdc85d3f16c3b58b7f10a66a6ed8d6c65074710bb38d",
+    "deploy/systemd/b2b-app.service": "46450a094b482ceacf01c877d0a1c9816895088387b8a0c6aa8c8e7013df1a7f",
+    "deploy/systemd/b2b-backup.service": "5250b192e636fb3408610568a00957d9f5ad4c7a7302eeb311459b841ca4ea18",
+    "deploy/systemd/b2b-backup.timer": "1a9d61dfacec15a29b11d842dda2ab5e397f56cc562875d19e8b2c06f0a91f0c",
+    "README.md": "cb7fc6d8fd8c9e1c2924670f5ae0e4075429fb5993e1b9eca8c92755febce167",
+    "docs/首次上线-T4执行方案.md": "03bc67b2081762aa16c3278bfb1cba2fb24f772f05d519fd9911f542fd3d54fc"
+  },
+  "commands": {
+    "red": "git archive HEAD → 临时副本 + 最终 test_first_launch_t4.py；python3 -m unittest -v test_first_launch_t4（红基线）",
+    "green": "python3 -m unittest -v test_first_launch_t4 test_backup_restore",
+    "targeted_regression": "不含仓库 data/ 的隔离副本（git archive HEAD + 本轮 4 个代码/测试文件）：python3 -m unittest -v <16 个套件，见 targeted-regression.log>",
+    "drill": "python3 tools/pilot_checks/check_first_launch_t4.py --out docs/evidence/first-launch-t4/drill-report.json"
+  },
+  "results": {
+    "red": "Ran 19 tests: 18 红（14 failures + 4 errors），1 通过（恢复目标已存在拒绝——修补前后一致的行为）",
+    "green": "Ran 20 tests: OK",
+    "targeted_regression": "Ran 300 tests in 75.012s: OK (skipped=22)",
+    "drill": "27 PASS / 0 FAIL / 0 REVIEW / 4 INFO；退出码 0"
+  },
+  "isolation": "测试与演练全部写入系统临时目录；仓库 data/ 前后未变（uploads 5148 项、phase2 0 项）；未调用真实模型/外部账号，未读取密钥。",
+  "files_sha256_note": "docs/首次上线-T4执行方案.md 在首次生成后被追加执行结果章节，哈希为追加后重算；其余文件哈希为生成时值。"
+}

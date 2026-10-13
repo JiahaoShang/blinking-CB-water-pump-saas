@@ -1,0 +1,12 @@
+# 每日 03:30 触发备份；Persistent=true 让错过的任务在开机后补跑一次。
+[Unit]
+Description=Daily backup timer for B2B presales platform
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=b2b-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,40 @@
+# B2B 售前平台：首次 HTTPS 引导（HTTP-only，仅用于 certbot webroot 首次签证）。
+# 本文件只在“证书还不存在”的阶段使用，避免给 nginx 配置引用未生成的证书路径；
+# 签证完成后立即换成 deploy/nginx-b2b.conf.example（443 最终配置）。
+# 完整顺序（见 deploy/README.md 第 3 节 ⑨）：
+#   1) 安装本文件为 /etc/nginx/sites-available/b2b.conf 并启用（移除发行版默认站点）；
+#   2) sudo nginx -t && sudo systemctl reload nginx     ← 此时 80 只响应 ACME 校验与 404
+#   3) sudo certbot certonly --webroot -w /var/www/b2b-acme -d pilot.alpsaga.tech ...
+#   4) 用 nginx-b2b.conf.example 替换本文件；sudo nginx -t && sudo systemctl reload nginx
+#
+# 安全口径：不代理应用（不暴露程序）；未知 Host（IP 直连、伪造域名）关闭连接；
+# 访问日志同样不记录 query（b2b_nocreds 格式，且不记 Referer）；错误日志收敛到 crit。
+
+log_format b2b_nocreds '$remote_addr - $remote_user [$time_local] "$request_method $uri $server_protocol" $status $body_bytes_sent "$http_user_agent" $request_time';
+
+# 默认站点：签证阶段也不代理应用；未知 Host 一律关闭连接。
+server {
+    listen 80 default_server;
+    server_name _;
+    access_log off;
+    error_log /var/log/nginx/b2b-error.log crit;
+    return 444;
+}
+
+# 精确域名：仅供 certbot webroot 校验；其余路径一律 404（业务入口在 443 最终配置里）。
+server {
+    listen 80;
+    server_name pilot.alpsaga.tech;
+
+    access_log /var/log/nginx/b2b-access.log b2b_nocreds;
+    error_log  /var/log/nginx/b2b-error.log crit;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/b2b-acme;
+        default_type text/plain;
+    }
+
+    location / {
+        return 404;
+    }
+}

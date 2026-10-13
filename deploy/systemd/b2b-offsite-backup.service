@@ -1,0 +1,16 @@
+# 异地独立备份：停写快照（backup_snapshot.sh）→ 确保应用恢复 → age 公钥加密 →
+# 上传 OSS 私有桶（仅密文与校验文件，拒绝覆盖）→ 云下载到隔离目录复核 sha256。
+# 见 deploy/offsite_backup_oss.sh；产物 root 私有，本地快照与密文保留。
+# 说明：加密上传阶段应用已恢复运行；任何失败都不会把应用留在停止态
+#（快照脚本自带 trap 恢复 + 本链脚本复查兜底）。
+[Unit]
+Description=B2B presales platform offsite backup (OSS encrypted copy)
+After=network-online.target b2b-app.service b2b-backup.service
+# 与 b2b-backup.service 同时被触发（如开机补跑）时先等本机备份完成，避免两个停写窗口重叠。
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/b2b/b2b.env
+ExecStart=/opt/b2b/app/deploy/offsite_backup_oss.sh

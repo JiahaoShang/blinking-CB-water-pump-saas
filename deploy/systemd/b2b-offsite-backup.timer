@@ -1,0 +1,13 @@
+# 每日 04:30 触发异地备份（与本机备份 03:30 错开，避免两个停写窗口重叠）；
+# Persistent=true：错过的任务在开机后补跑一次（此时服务单元 After=b2b-backup.service 会先等本机备份完成）。
+[Unit]
+Description=Daily offsite backup timer for B2B presales platform
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=b2b-offsite-backup.service
+
+[Install]
+WantedBy=timers.target

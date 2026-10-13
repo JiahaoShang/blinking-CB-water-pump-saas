@@ -843,15 +843,16 @@ class EnterpriseKnowledge:
     def _knowledge_storage_dir(self) -> Path:
         """知识导入原件的私有目录。
 
-        生产沿用既有私有上传目录（data/uploads）；测试/隔离环境可通过实例属性
-        knowledge_storage_root 或环境变量 B2B_KB_STORAGE_ROOT 指向临时目录
-        （HTTP 处理会按请求重建 Database 实例，环境变量在两种路径下都生效）。
+        生产沿用既有私有上传目录（data/uploads，可经 B2B_UPLOAD_DIR 配置为持久目录）；
+        测试/隔离环境可通过实例属性 knowledge_storage_root 或环境变量
+        B2B_KB_STORAGE_ROOT 指向临时目录（HTTP 处理会按请求重建 Database 实例，
+        环境变量在两种路径下都生效）。
         目录为本次新建时收紧为 0700；已存在的目录保持原权限不动（T4 复核既有目录）。
         """
         root = getattr(self, "knowledge_storage_root", None) or os.environ.get("B2B_KB_STORAGE_ROOT")
         if root is None:
-            from app import UPLOAD_DIR
-            root = UPLOAD_DIR
+            from app import upload_dir
+            root = upload_dir()
         from app import ensure_private_dir
         return ensure_private_dir(Path(root))
 

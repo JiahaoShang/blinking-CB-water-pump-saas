@@ -1,0 +1,1 @@
+Codex额外独立复现：tools.backup_restore.resolve_stored_file('data/uploads/../outside.txt', uploads)、'../outside.txt'、uploads/'../outside.txt' 三种均返回并可读取目录外文件。literal relative_to未对..做解析后根检查。最小修复拒绝..段并校验最终resolve相对根、保持正常嵌套/临时目录符号前缀兼容。另检查上传根/备份包根symlink（os.walk根默认跟随）是否拒绝。补判别失败测试。不要静默标20测试已足够。实际复现隔离，无真实data。

@@ -1,0 +1,14 @@
+# 每日备份：停写窗口（保存原状态 → 停应用与受管桥 → 快照 → 恢复原本活跃的服务），
+# 见 deploy/backup_snapshot.sh。
+# 说明：备份脚本需要能 stop/start b2b-app，因此本单元以 root 运行；
+# 备份产物为 root 私有（0700/0600）——包内含业务库、原件与密钥，不进 b2b 用户可读范围。
+# 读取与 b2b-app 相同的环境配置（/etc/b2b/b2b.env）：B2B_* 路径、保留天数等设置在此生效。
+[Unit]
+Description=B2B presales platform scheduled backup (quiesce + snapshot)
+After=b2b-app.service
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/b2b/b2b.env
+ExecStart=/opt/b2b/app/deploy/backup_snapshot.sh

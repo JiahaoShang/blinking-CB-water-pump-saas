@@ -1,0 +1,6 @@
+LastModifiedTime                   Size(B)     StorageClass   ETAG                                  ObjectName
+2026-10-13 19:08:29 +0800 CST        19186         Standard   0123456789abcdef0123456789abcdef      oss://mock-bucket/backups/20990101-000000/20261013-190829.export.tar.gz.age
+2026-10-13 19:08:29 +0800 CST        19186         Standard   0123456789abcdef0123456789abcdef      oss://mock-bucket/backups/20990101-000000/20261013-190829.export.tar.gz.age.sha256
+Object Number is: 2
+
+0.013322(s) elapsed

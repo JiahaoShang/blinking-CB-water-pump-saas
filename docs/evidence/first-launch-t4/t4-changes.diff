@@ -1,0 +1,587 @@
+diff --git a/README.md b/README.md
+index 005c3d6..a5c4963 100644
+--- a/README.md
++++ b/README.md
+@@ -30,14 +30,16 @@ python3 tools/create_admin.py --db data/app.db --email you@example.com --name "Y
+ 
+ ## 本地备份与隔离恢复检查
+ 
+-在应用使用本地 SQLite 和 `data/uploads/` 时，可用下列命令制作数据库一致性快照，并将数据库与上传文件恢复到**新的隔离目录**检查。备份与恢复目标须是尚不存在的路径，并放在仓库外或已忽略的 `data/` 内。
++在应用使用本地 SQLite 和上传目录时，可用下列命令制作数据库一致性快照，并把**数据库、全部登记原件（产品来源 / 知识 / 批次，含嵌套目录）、私有企业模型配置与桥登录状态**恢复到**新的隔离目录**检查。备份与恢复目标须是尚不存在的路径，并放在仓库外或已忽略的 `data/` 内。
+ 
+ ```sh
+ python3 tools/backup_restore.py backup --db data/app.db --uploads data/uploads --out data/backup-001
+ python3 tools/backup_restore.py restore-check --bundle data/backup-001 --out data/restore-check-001
+ ```
+ 
+-工具使用 SQLite 在线备份接口，核对文件哈希和恢复后数据库完整性，并报告可恢复的 RFQ 与有文件的资料数量。它是本地演练工具，**不是**自动定时备份、异地保存或真实试点部署方案；首次使用真实资料前，仍须选择托管存储和备份策略，实际演练恢复并记录耗时和最后可恢复记录。
++工具使用 SQLite 在线备份接口取事务一致快照，逐条核验原件存在与 sha256（路径逃逸/符号链接/缺件/篡改一律拒绝），恢复时把绝对原件路径重写到恢复目录、把模型配置目录映射为恢复后库名，并收紧产物权限。**一致性边界**：原件在库快照之后顺序复制，不是原子快照；要得到互相匹配的一整套，请先停止应用与后台 worker（Linux 单机部署的停写流程见 `deploy/backup_snapshot.sh`）。
++
++Linux 单机部署（systemd、反向 HTTPS 代理、每日备份 timer、上传目录持久配置、版本切换与回滚）见 [deploy/README.md](deploy/README.md)；部署时用 `B2B_UPLOAD_DIR` 把原件放到代码目录之外的持久目录，避免切换发布版本丢原件。本工具仍是本机演练/部署基础，**不是**异地备份或托管存储方案；首次使用真实资料前，仍须按 deploy 说明演练恢复并记录耗时和最后可恢复记录。
+ 
+ ## 启用 DeepSeek 模型辅助（可选；默认仍是本地规则）
+ 
+diff --git a/app.py b/app.py
+index 7ce5fa7..7be148c 100644
+--- a/app.py
++++ b/app.py
+@@ -3208,11 +3208,20 @@ class Database(BusinessChannels, EnterpriseKnowledge, EnterpriseKnowledgePhase2)
+         storage_path = None
+         status = "registered"
+         if content:
+-            ensure_private_dir(UPLOAD_DIR)
++            target_dir = upload_dir()
++            ensure_private_dir(target_dir)
+             safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", Path(filename).name).strip(".") or "source.bin"
+-            target = UPLOAD_DIR / f"{source_id}-{safe_name}"
++            target = target_dir / f"{source_id}-{safe_name}"
+             write_private_bytes(target, content)
+-            storage_path = str(target.relative_to(ROOT))
++            # 默认部署保持“相对仓库根”的旧格式；配置持久上传目录（B2B_UPLOAD_DIR）后
++            # 一律存绝对路径——相对路径会随发布版本目录切换指向不存在的新目录。
++            if os.environ.get("B2B_UPLOAD_DIR", "").strip():
++                storage_path = str(target)
++            else:
++                try:
++                    storage_path = str(target.relative_to(ROOT))
++                except ValueError:
++                    storage_path = str(target)
+             status = "stored"
+         self.conn.execute(
+             "INSERT INTO source_documents(id, tenant_id, product_id, filename, file_type, source_location, sha256, storage_path, processing_status, scope, created_at) "
+@@ -3320,7 +3329,7 @@ class Database(BusinessChannels, EnterpriseKnowledge, EnterpriseKnowledgePhase2)
+         ).fetchone()
+         if not source or not source["storage_path"]:
+             raise ValueError("该来源没有已保存文件，无法重新解析")
+-        target = ROOT / source["storage_path"]
++        target = resolve_source_storage_path(source["storage_path"])
+         if not target.is_file():
+             raise ValueError("文件存储不可用，无法重新解析")
+         self._apply_source_extraction(tenant_id, product_id, source_id, target.read_bytes(), source["filename"], actor)
+@@ -6641,6 +6650,36 @@ def ensure_private_dir(path) -> Path:
+     return target
+ 
+ 
++def upload_dir() -> Path:
++    """产品来源原件与知识导入的默认上传目录。
++
++    默认为代码目录内 data/uploads（历史行为，切换发布版本目录会随之更换）；
++    部署时用环境变量 B2B_UPLOAD_DIR 指向持久数据目录，版本切换不再丢原件。
++    知识导入另有测试/隔离专用覆盖变量 B2B_KB_STORAGE_ROOT（优先级更高，
++    见 enterprise_knowledge._knowledge_storage_dir）。
++    """
++    configured = os.environ.get("B2B_UPLOAD_DIR", "").strip()
++    if configured:
++        return Path(configured).expanduser()
++    return UPLOAD_DIR
++
++
++def resolve_source_storage_path(stored) -> Path:
++    """解析 source_documents.storage_path 对应的磁盘位置。
++
++    - 绝对路径（配置 B2B_UPLOAD_DIR 后新写入的格式）原样使用；
++    - 旧「data/uploads/…」相对路径：默认相对仓库根；配置了 B2B_UPLOAD_DIR 时改
++      相对持久上传目录——迁移时把旧原件整目录搬入即可，旧行无需改库。
++    """
++    path = Path(str(stored))
++    if path.is_absolute():
++        return path
++    configured = os.environ.get("B2B_UPLOAD_DIR", "").strip()
++    if configured and path.parts[:2] == ("data", "uploads"):
++        return Path(configured).expanduser() / Path(*path.parts[2:])
++    return ROOT / path
++
++
+ def _whatsapp_personal_debug(summary: dict) -> None:
+     """诊断日志（WHATSAPP_PERSONAL_DEBUG=1 时启用）：逐条记录入站事件摘要与处理结果。"""
+     if os.environ.get("WHATSAPP_PERSONAL_DEBUG", "").strip() != "1":
+@@ -13534,7 +13573,7 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
+         if not source or not source["storage_path"] or source_id not in self.db.public_downloadable_ids(tenant_id, product["id"]):
+             self.send_html(layout("资料不可用", "<div class='error'>该来源资料没有可下载文件、未纳入当前公开版本，或归属已修正待重新发布。</div>"), 404)
+             return
+-        target = ROOT / source["storage_path"]
++        target = resolve_source_storage_path(source["storage_path"])
+         if not target.is_file():
+             self.send_html(layout("资料不可用", "<div class='error'>文件存储不可用，请联系管理员。</div>", public=True), 404)
+             return
+diff --git a/enterprise_knowledge.py b/enterprise_knowledge.py
+index 48f47d1..6ca5737 100644
+--- a/enterprise_knowledge.py
++++ b/enterprise_knowledge.py
+@@ -843,15 +843,16 @@ class EnterpriseKnowledge:
+     def _knowledge_storage_dir(self) -> Path:
+         """知识导入原件的私有目录。
+ 
+-        生产沿用既有私有上传目录（data/uploads）；测试/隔离环境可通过实例属性
+-        knowledge_storage_root 或环境变量 B2B_KB_STORAGE_ROOT 指向临时目录
+-        （HTTP 处理会按请求重建 Database 实例，环境变量在两种路径下都生效）。
++        生产沿用既有私有上传目录（data/uploads，可经 B2B_UPLOAD_DIR 配置为持久目录）；
++        测试/隔离环境可通过实例属性 knowledge_storage_root 或环境变量
++        B2B_KB_STORAGE_ROOT 指向临时目录（HTTP 处理会按请求重建 Database 实例，
++        环境变量在两种路径下都生效）。
+         目录为本次新建时收紧为 0700；已存在的目录保持原权限不动（T4 复核既有目录）。
+         """
+         root = getattr(self, "knowledge_storage_root", None) or os.environ.get("B2B_KB_STORAGE_ROOT")
+         if root is None:
+-            from app import UPLOAD_DIR
+-            root = UPLOAD_DIR
++            from app import upload_dir
++            root = upload_dir()
+         from app import ensure_private_dir
+         return ensure_private_dir(Path(root))
+ 
+diff --git a/tools/backup_restore.py b/tools/backup_restore.py
+index c9d1147..19b0efa 100644
+--- a/tools/backup_restore.py
++++ b/tools/backup_restore.py
+@@ -1,5 +1,26 @@
+ #!/usr/bin/env python3
+-"""Create a consistent SQLite backup and verify it with uploaded source files."""
++"""Create a consistent SQLite backup and verify it with uploaded source files.
++
++覆盖范围（T4 清单实测口径）：
++- 业务数据库 app.db：SQLite 在线备份接口（事务一致快照）；
++- 全部登记原件：source_documents（产品来源）、knowledge_sources（第一批知识）、
++  kb2_sources（第二批批次资料，含 uploads/phase2/ 嵌套目录），逐条核验存在与 sha256；
++- 私有企业模型配置 <db>.model-secrets/（model_settings.EnterpriseModels 读取的目录）；
++- 渠道桥登录状态 <db 父目录>/connection-runtime/（channel_runtime 中个人版桥的会话卷）。
++
++一致性边界（不伪装原子快照）：
++数据库快照是一致的；原件与私有目录在快照之后顺序复制、无全局锁——并发写入
++（正在上传/处理中）时可能出现“库中行与文件不完全匹配”。要得到互相匹配的一整套，
++须先停止应用与渠道桥（停止写入与后台 worker）再运行本工具；
++deploy/backup_snapshot.sh 即该停写流程（systemd stop → 备份 → start）。
++
++恢复：只写入尚不存在的空目录；归档内记录的原件绝对路径会重写为恢复目录
++（旧相对路径 `data/uploads/…` 保持原样，由运行环境的上传目录配置解析）；
++`<db>.model-secrets` 按恢复后的库文件名映射（app.db → app.db.model-secrets）。
++安全校验：路径逃逸、符号链接（原件、归档内均拒绝）、缺件、内容篡改、私有权限（0700/0600）。
++"""
++
++from __future__ import annotations
+ 
+ import argparse
+ import hashlib
+@@ -11,6 +32,8 @@ import tempfile
+ from datetime import datetime, timezone
+ from pathlib import Path
+ 
++SOURCE_TABLES = ("source_documents", "knowledge_sources", "kb2_sources")
++
+ 
+ def digest(path: Path) -> str:
+     return hashlib.sha256(path.read_bytes()).hexdigest()
+@@ -20,84 +43,387 @@ def restrict_permissions(root: Path) -> None:
+     """备份/恢复产物只允许属主访问：目录 0700、文件 0600，不随进程 umask 放宽。"""
+     os.chmod(root, 0o700)
+     for path in root.rglob("*"):
++        if path.is_symlink():
++            raise ValueError(f"产物包含符号链接，拒绝收紧权限: {path}")
+         os.chmod(path, 0o700 if path.is_dir() else 0o600)
+ 
+ 
++def _tables(conn: sqlite3.Connection) -> set[str]:
++    return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
++
++
++def resolve_stored_file(stored, uploads) -> Path:
++    """把数据库记录的 storage_path 解析为 uploads 目录内的路径。
++
++    记录格式（按实际代码）：
++    1. 绝对路径：knowledge_sources / kb2_sources 的常规格式，以及配置了
++       B2B_UPLOAD_DIR 之后 source_documents 的写入格式；必须落在 uploads 根内。
++    2. 旧相对路径 `data/uploads/<…>`：source_documents 的历史格式（相对仓库根），
++       去掉前缀后在 uploads 根内解析。
++    3. 其他相对路径：按 uploads 根解析（保守兼容）。
++    任何一段路径（含文件名本身）是符号链接，或解析后逃逸 uploads 根：拒绝。
++    """
++    text = str(stored)
++    if not text or "\x00" in text:
++        raise ValueError(f"原件存储路径无效: {stored!r}")
++    uploads = Path(uploads)
++    raw = Path(text)
++    if not raw.is_absolute():
++        parts = raw.parts
++        if parts[:2] == ("data", "uploads"):
++            raw = uploads.joinpath(*parts[2:])
++        else:
++            raw = uploads / raw
++    try:
++        rel = raw.relative_to(uploads)
++        walk_base = uploads
++    except ValueError:
++        # 字面形式不在根内：再按解析后比较（临时目录等前缀可能含符号链接），仍须在根内。
++        try:
++            rel = raw.resolve().relative_to(uploads.resolve())
++        except (ValueError, OSError):
++            raise ValueError(f"原件路径逃逸上传目录，拒绝处理: {stored}") from None
++        walk_base = uploads.resolve()
++        raw = walk_base / rel
++    current = walk_base
++    for part in rel.parts:
++        current = current / part
++        if current.is_symlink():
++            raise ValueError(f"原件路径包含符号链接，拒绝处理: {stored}")
++    return raw
++
++
++def _stored_rows(database: Path):
++    """遍历三类表中已登记原件的行；旧库缺表时按实际存在的表核验。"""
++    with sqlite3.connect(str(database)) as conn:
++        present = _tables(conn)
++        for table in SOURCE_TABLES:
++            if table not in present:
++                continue
++            rows = conn.execute(
++                f"SELECT id, storage_path, sha256 FROM {table} WHERE storage_path IS NOT NULL AND storage_path<>''"
++            ).fetchall()
++            for row in rows:
++                yield {"table": table, "id": row[0], "stored": str(row[1]), "sha256": str(row[2] or "")}
++
++
++def _verified_relative_files(database: Path, uploads: Path) -> dict[str, str]:
++    """核验全部登记原件存在且哈希一致；返回 {相对 uploads 根的路径: sha256（可能为空）}。"""
++    uploads = Path(uploads)
++    required: dict[str, str] = {}
++    for row in _stored_rows(database):
++        target = resolve_stored_file(row["stored"], uploads)
++        if not target.is_file():
++            raise ValueError(f"原件缺失或校验失败（{row['table']}）: {row['stored']}")
++        expected = row["sha256"]
++        if expected and digest(target) != expected:
++            raise ValueError(f"原件校验失败（内容与登记不一致，{row['table']}）: {row['stored']}")
++        try:
++            rel = target.relative_to(uploads)
++        except ValueError:
++            rel = target.relative_to(uploads.resolve())
++        rel_text = str(rel)
++        previous = required.get(rel_text)
++        if previous is not None and expected and previous and previous != expected:
++            raise ValueError(f"同一原件路径登记了不同哈希，拒绝处理: {row['stored']}")
++        required[rel_text] = expected
++    return required
++
++
+ def check_source_files(database: Path, uploads: Path) -> int:
++    """核验三类原件表中登记的（含嵌套目录）文件存在与哈希，返回通过核验的条数总和。"""
++    return len(_verified_relative_files(database, uploads))
++
++
++def _sqlite_counts(database: Path) -> dict[str, int]:
+     with sqlite3.connect(str(database)) as conn:
+-        rows = conn.execute("SELECT storage_path, sha256 FROM source_documents WHERE storage_path IS NOT NULL").fetchall()
+-    for storage_path, expected in rows:
+-        path = Path(storage_path)
+-        if path.parts[:2] != ("data", "uploads") or len(path.parts) != 3:
+-            raise ValueError(f"不支持的资料存储路径: {storage_path}")
+-        target = uploads / path.name
+-        if not target.is_file() or (expected and digest(target) != expected):
+-            raise ValueError(f"资料缺失或校验失败: {storage_path}")
+-    return len(rows)
+-
+-
+-def backup(database: Path, uploads: Path, destination: Path) -> None:
++        present = _tables(conn)
++        counts = {}
++        for table in SOURCE_TABLES:
++            counts[table] = (
++                conn.execute(
++                    f"SELECT COUNT(*) FROM {table} WHERE storage_path IS NOT NULL AND storage_path<>''"
++                ).fetchone()[0]
++                if table in present
++                else 0
++            )
++        counts["rfqs"] = conn.execute("SELECT COUNT(*) FROM rfqs").fetchone()[0] if "rfqs" in present else 0
++    return counts
++
++
++def _copy_tree(source: Path, destination: Path) -> None:
++    """复制私有目录树；符号链接与非普通文件一律拒绝（宁可见失败，不做静默跳过）。"""
++    source = Path(source)
++    destination = Path(destination)
++    for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
++        current = Path(dirpath)
++        rel = current.relative_to(source)
++        target_dir = destination / rel
++        target_dir.mkdir(parents=True, exist_ok=True)
++        for name in dirnames + filenames:
++            entry = current / name
++            if entry.is_symlink():
++                raise ValueError(f"目录包含符号链接，拒绝复制: {entry}")
++        for name in filenames:
++            entry = current / name
++            if not entry.is_file():
++                raise ValueError(f"目录包含非普通文件，拒绝复制: {entry}")
++            shutil.copy2(entry, target_dir / name)
++
++
++def _select_aux_dir(explicit, default: Path, label: str):
++    """选择随库的私有目录：显式指定时必须存在；自动探测时存在才纳入。"""
++    target = Path(explicit) if explicit is not None else Path(default)
++    if target.is_symlink():
++        raise ValueError(f"{label}是符号链接，拒绝处理: {target}")
++    if target.exists():
++        if not target.is_dir():
++            raise ValueError(f"{label}存在但不是目录: {target}")
++        return target
++    if explicit is not None:
++        raise ValueError(f"指定的{label}不存在: {target}")
++    return None
++
++
++def backup(
++    database: Path,
++    uploads: Path,
++    destination: Path,
++    *,
++    model_secrets=None,
++    connection_runtime=None,
++) -> int:
++    """制作一致性快照 + 全部登记原件 + 私有模型配置 + 连接运行状态的备份包。
++
++    目录布局：app.db / uploads/ / model-secrets/（可选）/ connection-runtime/（可选）/ manifest.json。
++    停写边界见模块说明；本函数不把“先库后文件”称为原子快照。
++    返回通过核验并复制进包的**去重原件文件数**（登记行数可能更多：多行可指向同一文件）。
++    """
++    database = Path(database)
++    uploads = Path(uploads)
++    destination = Path(destination)
+     if destination.exists():
+         raise ValueError("备份目标已存在")
+     if not database.is_file():
+         raise ValueError("数据库不存在")
++    secrets_dir = _select_aux_dir(model_secrets, Path(str(database) + ".model-secrets"), "模型私有配置目录")
++    runtime_dir = _select_aux_dir(
++        connection_runtime, database.resolve().parent / "connection-runtime", "连接运行状态目录"
++    )
+     destination.parent.mkdir(parents=True, exist_ok=True)
+     with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
+         bundle = Path(temporary) / "bundle"
+         bundle.mkdir()
+         with sqlite3.connect(str(database)) as source, sqlite3.connect(str(bundle / "app.db")) as target:
+             source.backup(target)
+-        if uploads.exists():
+-            shutil.copytree(uploads, bundle / "uploads")
++        # 以一致快照为准核验全部登记原件与真实上传目录的对应关系（在复制前做全量核对）。
++        required = _verified_relative_files(bundle / "app.db", uploads)
++        if uploads.is_dir():
++            _copy_tree(uploads, bundle / "uploads")
+         else:
+             (bundle / "uploads").mkdir()
+-        check_source_files(bundle / "app.db", bundle / "uploads")
++        for rel, expected in required.items():
++            copied = bundle / "uploads" / rel
++            if not copied.is_file():
++                raise ValueError(f"备份复制缺失原件: {rel}")
++            if expected and digest(copied) != expected:
++                raise ValueError(f"备份复制损坏（内容与登记不一致）: {rel}")
++        if secrets_dir is not None:
++            _copy_tree(secrets_dir, bundle / "model-secrets")
++        if runtime_dir is not None:
++            _copy_tree(runtime_dir, bundle / "connection-runtime")
+         files = {str(path.relative_to(bundle)): digest(path) for path in bundle.rglob("*") if path.is_file()}
+-        manifest = {"created_at": datetime.now(timezone.utc).isoformat(), "files": files}
++        counts = _sqlite_counts(bundle / "app.db")
++        manifest = {
++            "created_at": datetime.now(timezone.utc).isoformat(),
++            "format": 2,
++            "files": files,
++            "origin": {
++                "database": str(database),
++                "uploads": str(uploads),
++                "uploads_resolved": str(uploads.resolve()),
++                "model_secrets": str(secrets_dir) if secrets_dir is not None else None,
++                "connection_runtime": str(runtime_dir) if runtime_dir is not None else None,
++            },
++            "counts": counts,
++        }
+         (bundle / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+-        # 备份含业务库与全部原件：先把整棵产物收紧到属主可读，再移出临时目录。
++        # 备份含业务库与全部私有材料：先把整棵产物收紧到属主可读，再移出临时目录。
+         restrict_permissions(bundle)
+         bundle.rename(destination)
++    return len(required)
++
++
++def _reject_symlinks_in_tree(root: Path) -> None:
++    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
++        for name in dirnames + filenames:
++            entry = Path(dirpath) / name
++            if entry.is_symlink():
++                raise ValueError(f"备份包包含符号链接，拒绝恢复: {entry.relative_to(root)}")
++
++
++def _legacy_original_match(uploads_dest: Path, raw: Path, sha256: str) -> Path | None:
++    """旧格式包（无来源路径记录）尽力重建：按文件名 + 哈希唯一匹配恢复目录内原件。"""
++    if not sha256:
++        return None
++    matches = [p for p in uploads_dest.rglob(raw.name) if p.is_file() and digest(p) == sha256]
++    if len(matches) == 1:
++        return matches[0].relative_to(uploads_dest)
++    return None
++
++
++def _remap_absolute_paths(conn: sqlite3.Connection, destination: Path, origin, uploads_dest: Path) -> int:
++    """把恢复库中指向原机的绝对原件路径重写为恢复目录下的对应路径。"""
++    origin = origin if isinstance(origin, dict) else {}
++    bases = [str(origin[key]) for key in ("uploads", "uploads_resolved") if origin.get(key)]
++    uploads_dest = Path(uploads_dest)
++    present = _tables(conn)
++    remapped = 0
++    for table in SOURCE_TABLES:
++        if table not in present:
++            continue
++        rows = conn.execute(
++            f"SELECT id, storage_path, sha256 FROM {table} WHERE storage_path IS NOT NULL AND storage_path<>''"
++        ).fetchall()
++        for row in rows:
++            stored = str(row[1])
++            raw = Path(stored)
++            if not raw.is_absolute():
++                continue  # 旧相对路径保持原样（由运行环境上传目录配置解析）
++            rel = None
++            for base in bases:
++                try:
++                    rel = raw.relative_to(base)
++                    break
++                except ValueError:
++                    pass
++            if rel is None:
++                for base in bases:
++                    try:
++                        rel = raw.resolve().relative_to(Path(base).resolve())
++                        break
++                    except (ValueError, OSError):
++                        pass
++            if rel is None and not bases:
++                rel = _legacy_original_match(uploads_dest, raw, str(row[2] or ""))
++            if rel is None:
++                continue
++            new_path = str(uploads_dest / rel)
++            if new_path != stored:
++                conn.execute(f"UPDATE {table} SET storage_path=? WHERE id=?", (new_path, row[0]))
++                remapped += 1
++    return remapped
+ 
+ 
+ def restore_and_verify(bundle: Path, destination: Path) -> tuple[int, int]:
++    """把备份包恢复到空目录并核验；返回（可恢复的 RFQ 条数，通过核验的原件条数）。
++
++    旧格式包（仅 app.db + uploads/ + manifest.files）仍可恢复：绝对路径按
++    “文件名 + 哈希”唯一匹配尽力重建，无法重建的行会让校验失败（fail-closed）。
++    """
++    bundle = Path(bundle)
++    destination = Path(destination)
+     if destination.exists():
+         raise ValueError("恢复目标已存在，必须使用隔离的空目录")
+-    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+-    actual_files = {str(path.relative_to(bundle)) for path in bundle.rglob("*") if path.is_file() and path.name != "manifest.json"}
+-    if actual_files != set(manifest["files"]):
++    manifest_file = bundle / "manifest.json"
++    if not manifest_file.is_file():
++        raise ValueError("备份包缺少 manifest.json")
++    if not (bundle / "app.db").is_file():
++        raise ValueError("备份包缺少数据库文件")
++    _reject_symlinks_in_tree(bundle)
++    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
++    files = manifest.get("files")
++    if not isinstance(files, dict):
++        raise ValueError("备份清单格式无效")
++    for name, expected in files.items():
++        if not isinstance(name, str) or not isinstance(expected, str) or not name:
++            raise ValueError(f"备份清单包含非法路径项: {name!r}")
++        candidate = Path(name)
++        if candidate.is_absolute() or ".." in candidate.parts:
++            raise ValueError(f"备份清单包含非法路径项: {name!r}")
++    actual_files = {
++        str(path.relative_to(bundle)) for path in bundle.rglob("*") if path.is_file() and path.name != "manifest.json"
++    }
++    if actual_files != set(files):
+         raise ValueError("备份文件清单与实际文件不一致")
+-    for name, expected in manifest["files"].items():
++    for name, expected in files.items():
+         path = bundle / name
+-        if path.resolve().is_relative_to(bundle.resolve()) is False or not path.is_file() or digest(path) != expected:
++        if path.is_symlink() or not path.is_file() or digest(path) != expected:
+             raise ValueError(f"备份文件校验失败: {name}")
+-    shutil.copytree(bundle, destination)
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    destination.mkdir()
++    shutil.copy2(bundle / "app.db", destination / "app.db")
++    if (bundle / "uploads").is_dir():
++        _copy_tree(bundle / "uploads", destination / "uploads")
++    else:
++        (destination / "uploads").mkdir()
++    model_secrets = bundle / "model-secrets"
++    if model_secrets.is_dir():
++        # 目录映射：恢复后库名为 app.db，私有模型配置目录必须同名可查（EnterpriseModels 约定）。
++        _copy_tree(model_secrets, destination / "app.db.model-secrets")
++    elif model_secrets.exists():
++        raise ValueError("备份内的模型私有配置不是目录")
++    runtime = bundle / "connection-runtime"
++    if runtime.is_dir():
++        _copy_tree(runtime, destination / "connection-runtime")
++    elif runtime.exists():
++        raise ValueError("备份内的连接运行状态不是目录")
++    for name in files:
++        first = name.split("/", 1)[0]
++        if first not in {"app.db", "uploads", "model-secrets", "connection-runtime"}:
++            # 旧包若含清单登记的其他顶层文件：按原相对路径保留（不使用旧格式不存在的布局）。
++            target = destination / name
++            target.parent.mkdir(parents=True, exist_ok=True)
++            shutil.copy2(bundle / name, target)
++    shutil.copy2(manifest_file, destination / "manifest.json")
+     restrict_permissions(destination)
+     with sqlite3.connect(str(destination / "app.db")) as conn:
+         if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+             raise ValueError("恢复数据库完整性检查失败")
+         records = conn.execute("SELECT COUNT(*) FROM rfqs").fetchone()[0]
++        _remap_absolute_paths(conn, destination, manifest.get("origin"), destination / "uploads")
++        conn.commit()
+     sources = check_source_files(destination / "app.db", destination / "uploads")
+     return records, sources
+ 
+ 
+ def main() -> None:
+-    parser = argparse.ArgumentParser(description=__doc__)
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+     sub = parser.add_subparsers(dest="action", required=True)
+     create = sub.add_parser("backup")
+     create.add_argument("--db", type=Path, required=True)
+     create.add_argument("--uploads", type=Path, required=True)
+     create.add_argument("--out", type=Path, required=True)
++    create.add_argument("--secrets", type=Path, default=None, help="私有模型配置目录（默认 <db>.model-secrets，存在才纳入）")
++    create.add_argument("--runtime", type=Path, default=None, help="连接运行状态目录（默认 <db 父目录>/connection-runtime，存在才纳入）")
+     recover = sub.add_parser("restore-check")
+     recover.add_argument("--bundle", type=Path, required=True)
+     recover.add_argument("--out", type=Path, required=True)
+     args = parser.parse_args()
+     if args.action == "backup":
+-        backup(args.db, args.uploads, args.out)
++        verified = backup(args.db, args.uploads, args.out, model_secrets=args.secrets, connection_runtime=args.runtime)
++        counts = _sqlite_counts(args.out / "app.db")
++        secrets_note = "模型配置有" if (args.out / "model-secrets").is_dir() else "模型配置无"
++        runtime_note = "连接运行状态有" if (args.out / "connection-runtime").is_dir() else "连接运行状态无"
+         print(f"备份完成: {args.out}")
++        print(
++            f"覆盖：RFQ {counts['rfqs']} 条；原件已核验 {verified} 个文件"
++            f"（登记行：产品 {counts['source_documents']} / 知识 {counts['knowledge_sources']} / 批次 {counts['kb2_sources']}）；"
++            f"{secrets_note}；{runtime_note}"
++        )
++        print("一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。")
+     else:
+         records, sources = restore_and_verify(args.bundle, args.out)
+-        print(f"隔离恢复完成: RFQ {records} 条；有文件的资料 {sources} 份；路径 {args.out}")
++        counts = _sqlite_counts(args.out / "app.db")
++        print(
++            f"隔离恢复完成: RFQ {records} 条；原件校验 {sources} 个文件"
++            f"（登记行：产品 {counts['source_documents']} / 知识 {counts['knowledge_sources']} / 批次 {counts['kb2_sources']}）；"
++            f"路径 {args.out}"
++        )
++        if (args.out / "app.db.model-secrets").is_dir():
++            print("私有模型配置已按恢复后库名映射（app.db.model-secrets）。")
++        if (args.out / "connection-runtime").is_dir():
++            print("连接运行状态已恢复到恢复目录（connection-runtime）。")
+ 
+ 
+ if __name__ == "__main__":

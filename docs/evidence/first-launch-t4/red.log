@@ -1,0 +1,184 @@
+test_backup_accepts_nested_phase2_relative_source_path (test_first_launch_t4.BackupCoverageTests)
+T0 登记的旧边界：source_documents 中 data/uploads/phase2/... 嵌套相对路径必须被受理。 ... ERROR
+test_backup_fails_when_kb2_original_missing (test_first_launch_t4.BackupCoverageTests) ... FAIL
+test_backup_fails_when_knowledge_original_escapes_uploads (test_first_launch_t4.BackupCoverageTests) ... FAIL
+test_backup_fails_when_knowledge_original_is_symlink (test_first_launch_t4.BackupCoverageTests) ... FAIL
+test_backup_fails_when_knowledge_original_missing (test_first_launch_t4.BackupCoverageTests) ... FAIL
+test_backup_fails_when_knowledge_original_tampered (test_first_launch_t4.BackupCoverageTests) ... FAIL
+test_backup_fails_when_source_document_is_symlink (test_first_launch_t4.BackupCoverageTests) ... FAIL
+test_cli_backup_and_restore_roundtrip (test_first_launch_t4.CliRoundtripTests) ... FAIL
+test_connection_runtime_included_and_restored (test_first_launch_t4.PersistentStateCoverageTests) ... FAIL
+test_model_secrets_included_and_remapped_on_restore (test_first_launch_t4.PersistentStateCoverageTests) ... FAIL
+test_roundtrip_counts_cover_all_source_tables (test_first_launch_t4.PersistentStateCoverageTests) ... FAIL
+test_restore_accepts_legacy_bundle_layout (test_first_launch_t4.RestoreMappingTests)
+旧格式包（无 origin 记录）：按文件名 + 哈希尽力重建知识原件映射。 ... FAIL
+test_restore_refuses_existing_destination (test_first_launch_t4.RestoreMappingTests) ... ok
+test_restore_rejects_bundle_containing_symlink (test_first_launch_t4.RestoreMappingTests) ... FAIL
+test_restore_remaps_absolute_paths_and_keeps_legacy_relative (test_first_launch_t4.RestoreMappingTests) ... ERROR
+test_configured_upload_dir_receives_new_source_files (test_first_launch_t4.UploadDirConfigTests) ... FAIL
+test_knowledge_import_lands_in_configured_upload_dir (test_first_launch_t4.UploadDirConfigTests) ... FAIL
+test_legacy_relative_path_resolves_to_configured_upload_dir (test_first_launch_t4.UploadDirConfigTests) ... ERROR
+test_resolve_stored_file_rejects_escape_and_symlink (test_first_launch_t4.UploadDirConfigTests) ... ERROR
+
+======================================================================
+ERROR: test_backup_accepts_nested_phase2_relative_source_path (test_first_launch_t4.BackupCoverageTests)
+T0 登记的旧边界：source_documents 中 data/uploads/phase2/... 嵌套相对路径必须被受理。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 171, in test_backup_accepts_nested_phase2_relative_source_path
+    bundle = self._backup()
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 103, in _backup
+    backup(self.db_path, self.uploads, out)
+  File "/private/tmp/t4-red-final/tools/backup_restore.py", line 54, in backup
+    check_source_files(bundle / "app.db", bundle / "uploads")
+  File "/private/tmp/t4-red-final/tools/backup_restore.py", line 32, in check_source_files
+    raise ValueError(f"不支持的资料存储路径: {storage_path}")
+ValueError: 不支持的资料存储路径: data/uploads/phase2/nested.txt
+
+======================================================================
+ERROR: test_restore_remaps_absolute_paths_and_keeps_legacy_relative (test_first_launch_t4.RestoreMappingTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 253, in test_restore_remaps_absolute_paths_and_keeps_legacy_relative
+    bundle = self._backup()
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 103, in _backup
+    backup(self.db_path, self.uploads, out)
+  File "/private/tmp/t4-red-final/tools/backup_restore.py", line 54, in backup
+    check_source_files(bundle / "app.db", bundle / "uploads")
+  File "/private/tmp/t4-red-final/tools/backup_restore.py", line 32, in check_source_files
+    raise ValueError(f"不支持的资料存储路径: {storage_path}")
+ValueError: 不支持的资料存储路径: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-test-ezmcwkhh/data/uploads/abs.bin
+
+======================================================================
+ERROR: test_legacy_relative_path_resolves_to_configured_upload_dir (test_first_launch_t4.UploadDirConfigTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 340, in test_legacy_relative_path_resolves_to_configured_upload_dir
+    from app import resolve_source_storage_path
+ImportError: cannot import name 'resolve_source_storage_path' from 'app' (/private/tmp/t4-red-final/app.py)
+
+======================================================================
+ERROR: test_resolve_stored_file_rejects_escape_and_symlink (test_first_launch_t4.UploadDirConfigTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 360, in test_resolve_stored_file_rejects_escape_and_symlink
+    from tools.backup_restore import resolve_stored_file
+ImportError: cannot import name 'resolve_stored_file' from 'tools.backup_restore' (/private/tmp/t4-red-final/tools/backup_restore.py)
+
+======================================================================
+FAIL: test_backup_fails_when_kb2_original_missing (test_first_launch_t4.BackupCoverageTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 120, in test_backup_fails_when_kb2_original_missing
+    self._backup()
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_backup_fails_when_knowledge_original_escapes_uploads (test_first_launch_t4.BackupCoverageTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 138, in test_backup_fails_when_knowledge_original_escapes_uploads
+    self._backup()
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_backup_fails_when_knowledge_original_is_symlink (test_first_launch_t4.BackupCoverageTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 158, in test_backup_fails_when_knowledge_original_is_symlink
+    self._backup()
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_backup_fails_when_knowledge_original_missing (test_first_launch_t4.BackupCoverageTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 114, in test_backup_fails_when_knowledge_original_missing
+    self._backup()
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_backup_fails_when_knowledge_original_tampered (test_first_launch_t4.BackupCoverageTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 126, in test_backup_fails_when_knowledge_original_tampered
+    self._backup()
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_backup_fails_when_source_document_is_symlink (test_first_launch_t4.BackupCoverageTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 148, in test_backup_fails_when_source_document_is_symlink
+    self._backup()
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_cli_backup_and_restore_roundtrip (test_first_launch_t4.CliRoundtripTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 389, in test_cli_backup_and_restore_roundtrip
+    self.assertTrue(Path(source_row["storage_path"]).is_absolute(), msg="配置持久目录后来源原件应登记绝对路径")
+AssertionError: False is not true : 配置持久目录后来源原件应登记绝对路径
+
+======================================================================
+FAIL: test_connection_runtime_included_and_restored (test_first_launch_t4.PersistentStateCoverageTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 209, in test_connection_runtime_included_and_restored
+    self.assertTrue((bundle / "connection-runtime").is_dir())
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_model_secrets_included_and_remapped_on_restore (test_first_launch_t4.PersistentStateCoverageTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 190, in test_model_secrets_included_and_remapped_on_restore
+    self.assertTrue((bundle / "model-secrets").is_dir())
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_roundtrip_counts_cover_all_source_tables (test_first_launch_t4.PersistentStateCoverageTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 227, in test_roundtrip_counts_cover_all_source_tables
+    self.assertEqual(sources, 3)
+AssertionError: 1 != 3
+
+======================================================================
+FAIL: test_restore_accepts_legacy_bundle_layout (test_first_launch_t4.RestoreMappingTests)
+旧格式包（无 origin 记录）：按文件名 + 哈希尽力重建知识原件映射。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 289, in test_restore_accepts_legacy_bundle_layout
+    self.assertEqual(sources, 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_restore_rejects_bundle_containing_symlink (test_first_launch_t4.RestoreMappingTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 311, in test_restore_rejects_bundle_containing_symlink
+    restore_and_verify(bundle, self.root / "restored-symlink")
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_configured_upload_dir_receives_new_source_files (test_first_launch_t4.UploadDirConfigTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 332, in test_configured_upload_dir_receives_new_source_files
+    self.assertTrue(stored.is_absolute(), msg=f"配置持久目录后应为绝对路径: {stored}")
+AssertionError: False is not true : 配置持久目录后应为绝对路径: data/uploads/aa5452b6a4adff0def9124d5-env.bin
+
+======================================================================
+FAIL: test_knowledge_import_lands_in_configured_upload_dir (test_first_launch_t4.UploadDirConfigTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/tmp/t4-red-final/test_first_launch_t4.py", line 356, in test_knowledge_import_lands_in_configured_upload_dir
+    self.assertEqual(stored.parent, persist)
+AssertionError: Posix[27 chars]hfx0q33pjwx_jc4v3nm0000gn/T/t4-test-_2og1naj/data/uploads') != Posix[27 chars]hfx0q33pjwx_jc4v3nm0000gn/T/t4-test-_2og1naj/persist3/uploads')
+
+----------------------------------------------------------------------
+Ran 19 tests in 2.142s
+
+FAILED (failures=14, errors=4)

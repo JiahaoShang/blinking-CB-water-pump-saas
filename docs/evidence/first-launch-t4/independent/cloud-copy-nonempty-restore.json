@@ -1,0 +1,12 @@
+{
+  "result": "PASS",
+  "rfqs": 0,
+  "verified_original_files": 1,
+  "counts": {
+    "knowledge_items": 2,
+    "kb2_sources": 2,
+    "knowledge_sources": 2
+  },
+  "ops_config_present": true,
+  "elapsed_seconds": 0.013
+}

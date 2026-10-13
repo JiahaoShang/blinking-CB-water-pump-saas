@@ -3208,11 +3208,20 @@ class Database(BusinessChannels, EnterpriseKnowledge, EnterpriseKnowledgePhase2)
         storage_path = None
         status = "registered"
         if content:
-            ensure_private_dir(UPLOAD_DIR)
+            target_dir = upload_dir()
+            ensure_private_dir(target_dir)
             safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", Path(filename).name).strip(".") or "source.bin"
-            target = UPLOAD_DIR / f"{source_id}-{safe_name}"
+            target = target_dir / f"{source_id}-{safe_name}"
             write_private_bytes(target, content)
-            storage_path = str(target.relative_to(ROOT))
+            # 默认部署保持“相对仓库根”的旧格式；配置持久上传目录（B2B_UPLOAD_DIR）后
+            # 一律存绝对路径——相对路径会随发布版本目录切换指向不存在的新目录。
+            if os.environ.get("B2B_UPLOAD_DIR", "").strip():
+                storage_path = str(target)
+            else:
+                try:
+                    storage_path = str(target.relative_to(ROOT))
+                except ValueError:
+                    storage_path = str(target)
             status = "stored"
         self.conn.execute(
             "INSERT INTO source_documents(id, tenant_id, product_id, filename, file_type, source_location, sha256, storage_path, processing_status, scope, created_at) "
@@ -3320,7 +3329,7 @@ class Database(BusinessChannels, EnterpriseKnowledge, EnterpriseKnowledgePhase2)
         ).fetchone()
         if not source or not source["storage_path"]:
             raise ValueError("该来源没有已保存文件，无法重新解析")
-        target = ROOT / source["storage_path"]
+        target = resolve_source_storage_path(source["storage_path"])
         if not target.is_file():
             raise ValueError("文件存储不可用，无法重新解析")
         self._apply_source_extraction(tenant_id, product_id, source_id, target.read_bytes(), source["filename"], actor)
@@ -6639,6 +6648,36 @@ def ensure_private_dir(path) -> Path:
     target.mkdir(parents=True, exist_ok=True)
     os.chmod(target, 0o700)
     return target
+
+
+def upload_dir() -> Path:
+    """产品来源原件与知识导入的默认上传目录。
+
+    默认为代码目录内 data/uploads（历史行为，切换发布版本目录会随之更换）；
+    部署时用环境变量 B2B_UPLOAD_DIR 指向持久数据目录，版本切换不再丢原件。
+    知识导入另有测试/隔离专用覆盖变量 B2B_KB_STORAGE_ROOT（优先级更高，
+    见 enterprise_knowledge._knowledge_storage_dir）。
+    """
+    configured = os.environ.get("B2B_UPLOAD_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return UPLOAD_DIR
+
+
+def resolve_source_storage_path(stored) -> Path:
+    """解析 source_documents.storage_path 对应的磁盘位置。
+
+    - 绝对路径（配置 B2B_UPLOAD_DIR 后新写入的格式）原样使用；
+    - 旧「data/uploads/…」相对路径：默认相对仓库根；配置了 B2B_UPLOAD_DIR 时改
+      相对持久上传目录——迁移时把旧原件整目录搬入即可，旧行无需改库。
+    """
+    path = Path(str(stored))
+    if path.is_absolute():
+        return path
+    configured = os.environ.get("B2B_UPLOAD_DIR", "").strip()
+    if configured and path.parts[:2] == ("data", "uploads"):
+        return Path(configured).expanduser() / Path(*path.parts[2:])
+    return ROOT / path
 
 
 def _whatsapp_personal_debug(summary: dict) -> None:
@@ -13534,7 +13573,7 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
         if not source or not source["storage_path"] or source_id not in self.db.public_downloadable_ids(tenant_id, product["id"]):
             self.send_html(layout("资料不可用", "<div class='error'>该来源资料没有可下载文件、未纳入当前公开版本，或归属已修正待重新发布。</div>"), 404)
             return
-        target = ROOT / source["storage_path"]
+        target = resolve_source_storage_path(source["storage_path"])
         if not target.is_file():
             self.send_html(layout("资料不可用", "<div class='error'>文件存储不可用，请联系管理员。</div>", public=True), 404)
             return

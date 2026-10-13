@@ -1,0 +1,32 @@
+{
+  "generated_at": "2026-10-13T08:17:29.151425+00:00",
+  "head": "7a7908377830653580342f0482a104537728933a",
+  "python": "3.9.6",
+  "round": "T4 修复轮复核与复跑（制作方口径；不构成独立验收）",
+  "files_sha256": {
+    "tools/backup_restore.py": "cb11343c1537f08bec0510e214b54ac3571ad290f18cff307235dbd2c305a21c",
+    "test_first_launch_t4.py": "f3aff5b1ab4b12eeae4334c95fbb379894fe0705ac4706be678c53b8329b61e0",
+    "test_first_launch_t4_deploy.py": "d27178236a2b477c6f1965d02225c32215fdbaf55f34b44fbd232a8678e46e62",
+    "deploy/make_release.py": "9c3ac0ace48e43c478f875a2fd8201b58a52c84f3f62e9ecab01fa91fee7b63c",
+    "tools/pilot_checks/check_first_launch_t4.py": "6cab7acfe2891fdf45576ba955be30f1da2e66630c4cbad73ba081fb14a27ee0",
+    "docs/evidence/first-launch-t4/verify-round-probe.py": "4d9fb8ccb43c7cda81ddc031540fc62ec13520752e1434aa3c95f7977f666f86",
+    "docs/evidence/first-launch-t4/verify-round-package-audit.py": "c9067ff55486a705af6729d06cfb8e99121d384b13be0cede7394d8d3b1ddc08"
+  },
+  "files_sha256_note": "前五项为修复轮记录文件；与 fix-round-metadata.json 逐一比对: {\"tools/backup_restore.py\": true, \"test_first_launch_t4.py\": true, \"test_first_launch_t4_deploy.py\": true, \"deploy/make_release.py\": true, \"tools/pilot_checks/check_first_launch_t4.py\": true}（全部一致则复核轮未改动代码/测试）。后两项为本轮新增探针/审计脚本。",
+  "commands": {
+    "probe": "PYTHONDONTWRITEBYTECODE=1 python3 docs/evidence/first-launch-t4/verify-round-probe.py",
+    "focused": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_first_launch_t4 test_first_launch_t4_deploy test_backup_restore",
+    "targeted_regression": "隔离副本（rsync 排除 data/、.git、dist/）：python3 -m unittest -v 17 套件（清单见 verify-round-targeted-regression.log 首部）",
+    "drill": "python3 tools/pilot_checks/check_first_launch_t4.py --out docs/evidence/first-launch-t4/verify-round-drill-report.json",
+    "package_audit": "PYTHONDONTWRITEBYTECODE=1 python3 docs/evidence/first-launch-t4/verify-round-package-audit.py"
+  },
+  "results": {
+    "probe": "PASS 22 / FAIL 0（三种 .. 形态全拒；修复前逻辑逐字复演可读根外文件；symlink 根拒绝；嵌套与符号链接前缀兼容；受理路径 resolve 均在根内）",
+    "focused": "Ran 49: OK",
+    "targeted_regression": "Ran 329 in 79.8s: OK (skipped=22，既有条件跳过)",
+    "drill": "28 PASS / 0 FAIL / 0 REVIEW / 4 INFO；退出码 0",
+    "package_audit": "PASS 32 / FAIL 0（真实仓库打包审计 + 伪造污染源拒绝演示）"
+  },
+  "isolation": "全部使用系统临时目录与临时库；仓库 data/ 复核期间未写入（uploads 5147 文件、phase2 0，与复核前一致）；未调用真实模型、未连外部账号、未读取密钥；未提交/未推送；复核轮只新增 docs/evidence/first-launch-t4/verify-round-* 证据文件与《开发状态与变更记录》复核条目。",
+  "status": "制作方复核通过；独立验收未通过/未执行；服务器端 Linux 验收未执行（待 Workbench，按 deploy/README.md 第 3 节）。不将本轮结果标注为独立验收。"
+}

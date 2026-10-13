@@ -30,14 +30,16 @@ python3 tools/create_admin.py --db data/app.db --email you@example.com --name "Y
 
 ## 本地备份与隔离恢复检查
 
-在应用使用本地 SQLite 和 `data/uploads/` 时，可用下列命令制作数据库一致性快照，并将数据库与上传文件恢复到**新的隔离目录**检查。备份与恢复目标须是尚不存在的路径，并放在仓库外或已忽略的 `data/` 内。
+在应用使用本地 SQLite 和上传目录时，可用下列命令制作数据库一致性快照，并把**数据库、全部登记原件（产品来源 / 知识 / 批次，含嵌套目录）、私有企业模型配置、桥登录状态与受限运维配置（`--ops-config`，如 /etc/b2b/b2b.env）**恢复到**新的隔离目录**检查。备份与恢复目标须是尚不存在的路径，并放在仓库外或已忽略的 `data/` 内。
 
 ```sh
 python3 tools/backup_restore.py backup --db data/app.db --uploads data/uploads --out data/backup-001
 python3 tools/backup_restore.py restore-check --bundle data/backup-001 --out data/restore-check-001
 ```
 
-工具使用 SQLite 在线备份接口，核对文件哈希和恢复后数据库完整性，并报告可恢复的 RFQ 与有文件的资料数量。它是本地演练工具，**不是**自动定时备份、异地保存或真实试点部署方案；首次使用真实资料前，仍须选择托管存储和备份策略，实际演练恢复并记录耗时和最后可恢复记录。
+工具使用 SQLite 在线备份接口取事务一致快照，逐条核验原件存在与 sha256（路径逃逸/符号链接/缺件/篡改一律拒绝），恢复时把绝对原件路径重写到恢复目录、把模型配置目录映射为恢复后库名，并收紧产物权限。**一致性边界**：原件在库快照之后顺序复制，不是原子快照；要得到互相匹配的一整套，请先停止应用与后台 worker（Linux 单机部署的停写流程见 `deploy/backup_snapshot.sh`）。
+
+Linux 单机部署（systemd、反向 HTTPS 代理、每日备份 timer、上传目录持久配置、版本切换与回滚、发布包工具）见 [deploy/README.md](deploy/README.md)；部署时用 `B2B_UPLOAD_DIR` 把原件放到代码目录之外的持久目录，避免切换发布版本丢原件。本工具仍是本机演练/部署基础，**不是**异地备份或托管存储方案；跨机备份必须先加密再上传（阿里云 OSS 私有桶 + age 客户端加密的自动链见 [deploy/README.md](deploy/README.md) 第 11 节；R2 方案保留为备选 [deploy/offsite-backup-r2-plan.md](deploy/offsite-backup-r2-plan.md)）；首次使用真实资料前，仍须按 deploy 说明演练恢复并记录耗时和最后可恢复记录。
 
 ## 启用 DeepSeek 模型辅助（可选；默认仍是本地规则）
 

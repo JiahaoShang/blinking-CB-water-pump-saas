@@ -1,0 +1,266 @@
+test_age_failure_removes_partial_ciphertext_and_never_uploads (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_app_restore_failure_blocks_encryption_and_upload (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_app_restore_retry_after_inner_failure_then_continues (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_cloud_verify_mismatch_fails_and_keeps_evidence (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_existing_cloud_object_refused_without_upload (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+云端已有对象（默认表格输出的真实行）→ 拒绝覆盖：只做一次 ls、不执行任何 cp、退出 14。 ... FAIL
+test_ls_failure_fail_closed_no_upload (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+云端预检 ls 以非零退出（2.4.0 实核的 403 口径）→ fail-closed 退出 14；不执行任何上传。 ... FAIL
+test_ops_secret_never_uploaded_in_plaintext (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_precheck_tolerates_user_reported_compact_footer (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+服务器用户回传的空桶尾行为 `Object Number is:0`（无空格）；官方二进制实核为 `Object Number is: 0`。 ... FAIL
+test_preflight_rejects_missing_ossutil_binary (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_preflight_rejects_secret_key_as_recipient (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_retention_prunes_only_aged_export_and_verify_items (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_script_parses_in_bash (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_snapshot_failure_no_upload_and_app_restored (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_snapshot_success_but_missing_bundle_is_rejected (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_success_flow_uploads_cipher_and_checksum_then_verifies (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_success_with_inactive_app_starts_nothing (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_upload_failure_nonzero_keeps_local_artifacts_and_app_running (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_wait_for_local_backup_finishes_then_proceeds (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_wait_for_local_backup_timeout_refuses_to_start (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_patch_build_succeeds_with_checksum_file (test_first_launch_t4_offsite.PatchPackageTests) ... ok
+test_patch_contains_only_task_files (test_first_launch_t4_offsite.PatchPackageTests) ... ok
+test_patch_manifest_matches_files (test_first_launch_t4_offsite.PatchPackageTests) ... ok
+test_patch_template_carries_acme_webroot_fix (test_first_launch_t4_offsite.PatchPackageTests) ... ok
+test_existing_pinned_out_refused_before_stopping_app (test_first_launch_t4_offsite.SnapshotOutPinningTests) ... ok
+test_pinned_out_is_created_exactly_at_given_path (test_first_launch_t4_offsite.SnapshotOutPinningTests) ... ok
+test_relative_pinned_out_refused (test_first_launch_t4_offsite.SnapshotOutPinningTests) ... ok
+test_offsite_service_unit_wiring (test_first_launch_t4_offsite.SystemdUnitAndDocsTests) ... ok
+test_offsite_timer_unit_wiring (test_first_launch_t4_offsite.SystemdUnitAndDocsTests) ... ok
+test_readme_documents_offsite_chain_install (test_first_launch_t4_offsite.SystemdUnitAndDocsTests) ... ok
+
+======================================================================
+FAIL: test_app_restore_retry_after_inner_failure_then_continues (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_offsite.py", line 754, in test_app_restore_retry_after_inner_failure_then_continues
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 14 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-l1ixg6k_/backups/20261013-192651；云端目标 oss://bucket-t4-oss/backups/20261013-192651/；本地保留 14 天。
+① 停写快照：调用 /Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-l1ixg6k_/backups/20261013-192651
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-l1ixg6k_/backups/20261013-192651
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-l1ixg6k_/backups/20261013-192651（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+② 确认应用已恢复运行
+已恢复应用运行：b2b-app
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-l1ixg6k_/backups/20261013-192651.export.tar.gz.age
+④ 生成 sha256 校验文件
+⑤ 云端预检：确认 oss://bucket-t4-oss/backups/20261013-192651/ 为空
+警告：应用未能恢复启动（请人工处理）：b2b-app
+警告：快照流程后 b2b-app 未处于运行状态，尝试恢复（快照脚本本应已恢复，此为兜底）…
+错误：无法确认云端目标前缀为空（ls 退出码 1，fail-closed）；未上传。
+Error: unknown shorthand flag: 's' in -s
+
+
+======================================================================
+FAIL: test_cloud_verify_mismatch_fails_and_keeps_evidence (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_offsite.py", line 627, in test_cloud_verify_mismatch_fails_and_keeps_evidence
+    self.assertEqual(result.returncode, 16, result.stdout + result.stderr)
+AssertionError: 14 != 16 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-jeiwa74a/backups/20261013-192653；云端目标 oss://bucket-t4-oss/backups/20261013-192653/；本地保留 14 天。
+① 停写快照：调用 /Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-jeiwa74a/backups/20261013-192653
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-jeiwa74a/backups/20261013-192653
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-jeiwa74a/backups/20261013-192653（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-jeiwa74a/backups/20261013-192653.export.tar.gz.age
+④ 生成 sha256 校验文件
+⑤ 云端预检：确认 oss://bucket-t4-oss/backups/20261013-192653/ 为空
+错误：无法确认云端目标前缀为空（ls 退出码 1，fail-closed）；未上传。
+Error: unknown shorthand flag: 's' in -s
+
+
+======================================================================
+FAIL: test_existing_cloud_object_refused_without_upload (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+云端已有对象（默认表格输出的真实行）→ 拒绝覆盖：只做一次 ls、不执行任何 cp、退出 14。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_offsite.py", line 590, in test_existing_cloud_object_refused_without_upload
+    self.assertIn("拒绝", result.stderr)
+AssertionError: '拒绝' not found in "错误：无法确认云端目标前缀为空（ls 退出码 1，fail-closed）；未上传。\nError: unknown shorthand flag: 's' in -s\n"
+
+======================================================================
+FAIL: test_ls_failure_fail_closed_no_upload (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+云端预检 ls 以非零退出（2.4.0 实核的 403 口径）→ fail-closed 退出 14；不执行任何上传。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_offsite.py", line 607, in test_ls_failure_fail_closed_no_upload
+    self.assertIn("AccessDenied", result.stderr, "应回显 ls 的错误输出")
+AssertionError: 'AccessDenied' not found in "错误：无法确认云端目标前缀为空（ls 退出码 1，fail-closed）；未上传。\nError: unknown shorthand flag: 's' in -s\n" : 应回显 ls 的错误输出
+
+======================================================================
+FAIL: test_ops_secret_never_uploaded_in_plaintext (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_offsite.py", line 681, in test_ops_secret_never_uploaded_in_plaintext
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 14 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bh0ohjq7/backups/20261013-192657；云端目标 oss://bucket-t4-oss/backups/20261013-192657/；本地保留 14 天。
+① 停写快照：调用 /Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bh0ohjq7/backups/20261013-192657
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bh0ohjq7/backups/20261013-192657
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bh0ohjq7/backups/20261013-192657（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bh0ohjq7/backups/20261013-192657.export.tar.gz.age
+④ 生成 sha256 校验文件
+⑤ 云端预检：确认 oss://bucket-t4-oss/backups/20261013-192657/ 为空
+错误：无法确认云端目标前缀为空（ls 退出码 1，fail-closed）；未上传。
+Error: unknown shorthand flag: 's' in -s
+
+
+======================================================================
+FAIL: test_precheck_tolerates_user_reported_compact_footer (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+服务器用户回传的空桶尾行为 `Object Number is:0`（无空格）；官方二进制实核为 `Object Number is: 0`。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_offsite.py", line 622, in test_precheck_tolerates_user_reported_compact_footer
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 14 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-qsc4wsr6/backups/20261013-192659；云端目标 oss://bucket-t4-oss/backups/20261013-192659/；本地保留 14 天。
+① 停写快照：调用 /Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-qsc4wsr6/backups/20261013-192659
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-qsc4wsr6/backups/20261013-192659
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-qsc4wsr6/backups/20261013-192659（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-qsc4wsr6/backups/20261013-192659.export.tar.gz.age
+④ 生成 sha256 校验文件
+⑤ 云端预检：确认 oss://bucket-t4-oss/backups/20261013-192659/ 为空
+错误：无法确认云端目标前缀为空（ls 退出码 1，fail-closed）；未上传。
+Error: unknown shorthand flag: 's' in -s
+
+
+======================================================================
+FAIL: test_retention_prunes_only_aged_export_and_verify_items (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_offsite.py", line 738, in test_retention_prunes_only_aged_export_and_verify_items
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 14 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-2wb4gvmw/backups/20261013-192701；云端目标 oss://bucket-t4-oss/backups/20261013-192701/；本地保留 14 天。
+① 停写快照：调用 /Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-2wb4gvmw/backups/20261013-192701
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-2wb4gvmw/backups/20261013-192701
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-2wb4gvmw/backups/20261013-192701（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-2wb4gvmw/backups/20261013-192701.export.tar.gz.age
+④ 生成 sha256 校验文件
+⑤ 云端预检：确认 oss://bucket-t4-oss/backups/20261013-192701/ 为空
+错误：无法确认云端目标前缀为空（ls 退出码 1，fail-closed）；未上传。
+Error: unknown shorthand flag: 's' in -s
+
+
+======================================================================
+FAIL: test_success_flow_uploads_cipher_and_checksum_then_verifies (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_offsite.py", line 641, in test_success_flow_uploads_cipher_and_checksum_then_verifies
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 14 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-zwn6n700/backups/20261013-192703；云端目标 oss://bucket-t4-oss/backups/20261013-192703/；本地保留 14 天。
+① 停写快照：调用 /Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-zwn6n700/backups/20261013-192703
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-zwn6n700/backups/20261013-192703
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-zwn6n700/backups/20261013-192703（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-zwn6n700/backups/20261013-192703.export.tar.gz.age
+④ 生成 sha256 校验文件
+⑤ 云端预检：确认 oss://bucket-t4-oss/backups/20261013-192703/ 为空
+错误：无法确认云端目标前缀为空（ls 退出码 1，fail-closed）；未上传。
+Error: unknown shorthand flag: 's' in -s
+
+
+======================================================================
+FAIL: test_success_with_inactive_app_starts_nothing (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_offsite.py", line 709, in test_success_with_inactive_app_starts_nothing
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 14 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-c6fscldv/backups/20261013-192705；云端目标 oss://bucket-t4-oss/backups/20261013-192705/；本地保留 14 天。
+① 停写快照：调用 /Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/deploy/backup_snapshot.sh
+提示：b2b-app 原本未运行，不停不启（备份后保持原状）
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-c6fscldv/backups/20261013-192705
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-c6fscldv/backups/20261013-192705
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-c6fscldv/backups/20261013-192705（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-c6fscldv/backups/20261013-192705.export.tar.gz.age
+④ 生成 sha256 校验文件
+⑤ 云端预检：确认 oss://bucket-t4-oss/backups/20261013-192705/ 为空
+错误：无法确认云端目标前缀为空（ls 退出码 1，fail-closed）；未上传。
+Error: unknown shorthand flag: 's' in -s
+
+
+======================================================================
+FAIL: test_upload_failure_nonzero_keeps_local_artifacts_and_app_running (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_offsite.py", line 576, in test_upload_failure_nonzero_keeps_local_artifacts_and_app_running
+    self.assertEqual(result.returncode, 15, result.stdout + result.stderr)
+AssertionError: 14 != 15 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bfxyhfp7/backups/20261013-192706；云端目标 oss://bucket-t4-oss/backups/20261013-192706/；本地保留 14 天。
+① 停写快照：调用 /Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bfxyhfp7/backups/20261013-192706
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bfxyhfp7/backups/20261013-192706
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bfxyhfp7/backups/20261013-192706（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bfxyhfp7/backups/20261013-192706.export.tar.gz.age
+④ 生成 sha256 校验文件
+⑤ 云端预检：确认 oss://bucket-t4-oss/backups/20261013-192706/ 为空
+错误：无法确认云端目标前缀为空（ls 退出码 1，fail-closed）；未上传。
+Error: unknown shorthand flag: 's' in -s
+
+
+======================================================================
+FAIL: test_wait_for_local_backup_finishes_then_proceeds (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_offsite.py", line 789, in test_wait_for_local_backup_finishes_then_proceeds
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 14 != 0 : 检测到 b2b-backup.service 正在运行，等待其完成（最多 30 秒）…
+本机备份已结束，继续异地链。
+异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-cnpdpgkw/backups/20261013-192708；云端目标 oss://bucket-t4-oss/backups/20261013-192708/；本地保留 14 天。
+① 停写快照：调用 /Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-cnpdpgkw/backups/20261013-192708
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-cnpdpgkw/backups/20261013-192708
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-cnpdpgkw/backups/20261013-192708（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-cnpdpgkw/backups/20261013-192708.export.tar.gz.age
+④ 生成 sha256 校验文件
+⑤ 云端预检：确认 oss://bucket-t4-oss/backups/20261013-192708/ 为空
+错误：无法确认云端目标前缀为空（ls 退出码 1，fail-closed）；未上传。
+Error: unknown shorthand flag: 's' in -s
+
+
+----------------------------------------------------------------------
+Ran 29 tests in 22.918s
+
+FAILED (failures=11)

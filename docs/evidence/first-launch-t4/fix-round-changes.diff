@@ -1,0 +1,3015 @@
+diff --git a/.gitignore b/.gitignore
+index 4da4a1f..955b0ed 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -8,3 +8,4 @@ data/
+ 
+ # 企业知识第二批隔离运行环境（requirements-knowledge.txt；不入库）
+ .venv-knowledge/
++dist/
+diff --git a/tools/backup_restore.py b/tools/backup_restore.py
+index c9d1147..2c5f425 100644
+--- a/tools/backup_restore.py
++++ b/tools/backup_restore.py
+@@ -1,5 +1,29 @@
+ #!/usr/bin/env python3
+-"""Create a consistent SQLite backup and verify it with uploaded source files."""
++"""Create a consistent SQLite backup and verify it with uploaded source files.
++
++覆盖范围（T4 清单实测口径）：
++- 业务数据库 app.db：SQLite 在线备份接口（事务一致快照）；
++- 全部登记原件：source_documents（产品来源）、knowledge_sources（第一批知识）、
++  kb2_sources（第二批批次资料，含 uploads/phase2/ 嵌套目录），逐条核验存在与 sha256；
++- 私有企业模型配置 <db>.model-secrets/（model_settings.EnterpriseModels 读取的目录）；
++- 渠道桥登录状态 <db 父目录>/connection-runtime/（channel_runtime 中个人版桥的会话卷）；
++- 受限运维配置（可选 `--ops-config`，如 /etc/b2b/b2b.env）：随包 `ops-config/` 目录，
++  恢复时按原相对路径保留；含密钥，因此产物保持 0600、禁止明文上传到云端（见 deploy/offsite-backup-r2-plan.md）。
++
++一致性边界（不伪装原子快照）：
++数据库快照是一致的；原件与私有目录在快照之后顺序复制、无全局锁——并发写入
++（正在上传/处理中）时可能出现“库中行与文件不完全匹配”。要得到互相匹配的一整套，
++须先停止应用与渠道桥（停止写入与后台 worker）再运行本工具；
++deploy/backup_snapshot.sh 即该停写流程（systemd stop → 备份 → start）。
++
++恢复：只写入尚不存在的空目录；归档内记录的原件绝对路径会重写为恢复目录
++（旧相对路径 `data/uploads/…` 保持原样，由运行环境的上传目录配置解析）；
++`<db>.model-secrets` 按恢复后的库文件名映射（app.db → app.db.model-secrets）。
++安全校验：路径逃逸（含 `..` 段与解析出根的路径）、符号链接（原件、上传根/备份包根、归档内均拒绝）、
++缺件、内容篡改、私有权限（0700/0600）。
++"""
++
++from __future__ import annotations
+ 
+ import argparse
+ import hashlib
+@@ -11,6 +35,8 @@ import tempfile
+ from datetime import datetime, timezone
+ from pathlib import Path
+ 
++SOURCE_TABLES = ("source_documents", "knowledge_sources", "kb2_sources")
++
+ 
+ def digest(path: Path) -> str:
+     return hashlib.sha256(path.read_bytes()).hexdigest()
+@@ -20,84 +46,426 @@ def restrict_permissions(root: Path) -> None:
+     """备份/恢复产物只允许属主访问：目录 0700、文件 0600，不随进程 umask 放宽。"""
+     os.chmod(root, 0o700)
+     for path in root.rglob("*"):
++        if path.is_symlink():
++            raise ValueError(f"产物包含符号链接，拒绝收紧权限: {path}")
+         os.chmod(path, 0o700 if path.is_dir() else 0o600)
+ 
+ 
++def _tables(conn: sqlite3.Connection) -> set[str]:
++    return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
++
++
++def resolve_stored_file(stored, uploads) -> Path:
++    """把数据库记录的 storage_path 解析为 uploads 目录内的路径。
++
++    记录格式（按实际代码）：
++    1. 绝对路径：knowledge_sources / kb2_sources 的常规格式，以及配置了
++       B2B_UPLOAD_DIR 之后 source_documents 的写入格式；必须落在 uploads 根内。
++    2. 旧相对路径 `data/uploads/<…>`：source_documents 的历史格式（相对仓库根），
++       去掉前缀后在 uploads 根内解析。
++    3. 其他相对路径：按 uploads 根解析（保守兼容）。
++    安全口径（T4 初审修复）：任何含 `..` 段的路径、上传根本身是符号链接、路径任一段
++    是符号链接、或最终解析（resolve）后逃逸 uploads 根的路径一律拒绝；
++    临时目录等符号链接前缀造成的字面差异，通过“解析后仍在根内”的比较兼容。
++    """
++    text = str(stored)
++    if not text or "\x00" in text:
++        raise ValueError(f"原件存储路径无效: {stored!r}")
++    uploads = Path(uploads)
++    if uploads.is_symlink():
++        raise ValueError(f"上传目录是符号链接，拒绝处理: {uploads}")
++    raw = Path(text)
++    if not raw.is_absolute():
++        parts = raw.parts
++        if parts[:2] == ("data", "uploads"):
++            parts = parts[2:]
++        if ".." in parts:
++            raise ValueError(f"原件路径包含上级目录引用（..），拒绝处理: {stored}")
++        raw = uploads.joinpath(*parts)
++    elif ".." in raw.parts:
++        raise ValueError(f"原件路径包含上级目录引用（..），拒绝处理: {stored}")
++    try:
++        rel = raw.relative_to(uploads)
++        walk_base = uploads
++    except ValueError:
++        # 字面形式不在根内：再按解析后比较（临时目录等前缀可能含符号链接），仍须在根内。
++        try:
++            rel = raw.resolve().relative_to(uploads.resolve())
++        except (ValueError, OSError):
++            raise ValueError(f"原件路径逃逸上传目录，拒绝处理: {stored}") from None
++        walk_base = uploads.resolve()
++        raw = walk_base / rel
++    if rel.is_absolute() or ".." in rel.parts:
++        raise ValueError(f"原件路径逃逸上传目录，拒绝处理: {stored}")
++    current = walk_base
++    for part in rel.parts:
++        current = current / part
++        if current.is_symlink():
++            raise ValueError(f"原件路径包含符号链接，拒绝处理: {stored}")
++    # 解析后仍须落在上传根内（词法 + 解析双重防线；两侧同样先解析再比较）。
++    try:
++        raw.resolve().relative_to(uploads.resolve())
++    except (ValueError, OSError):
++        raise ValueError(f"原件路径逃逸上传目录，拒绝处理: {stored}") from None
++    return raw
++
++
++def _stored_rows(database: Path):
++    """遍历三类表中已登记原件的行；旧库缺表时按实际存在的表核验。"""
++    with sqlite3.connect(str(database)) as conn:
++        present = _tables(conn)
++        for table in SOURCE_TABLES:
++            if table not in present:
++                continue
++            rows = conn.execute(
++                f"SELECT id, storage_path, sha256 FROM {table} WHERE storage_path IS NOT NULL AND storage_path<>''"
++            ).fetchall()
++            for row in rows:
++                yield {"table": table, "id": row[0], "stored": str(row[1]), "sha256": str(row[2] or "")}
++
++
++def _verified_relative_files(database: Path, uploads: Path) -> dict[str, str]:
++    """核验全部登记原件存在且哈希一致；返回 {相对 uploads 根的路径: sha256（可能为空）}。"""
++    uploads = Path(uploads)
++    required: dict[str, str] = {}
++    for row in _stored_rows(database):
++        target = resolve_stored_file(row["stored"], uploads)
++        if not target.is_file():
++            raise ValueError(f"原件缺失或校验失败（{row['table']}）: {row['stored']}")
++        expected = row["sha256"]
++        if expected and digest(target) != expected:
++            raise ValueError(f"原件校验失败（内容与登记不一致，{row['table']}）: {row['stored']}")
++        try:
++            rel = target.relative_to(uploads)
++        except ValueError:
++            rel = target.relative_to(uploads.resolve())
++        rel_text = str(rel)
++        previous = required.get(rel_text)
++        if previous is not None and expected and previous and previous != expected:
++            raise ValueError(f"同一原件路径登记了不同哈希，拒绝处理: {row['stored']}")
++        required[rel_text] = expected
++    return required
++
++
+ def check_source_files(database: Path, uploads: Path) -> int:
++    """核验三类原件表中登记的（含嵌套目录）文件存在与哈希，返回通过核验的条数总和。"""
++    return len(_verified_relative_files(database, uploads))
++
++
++def _sqlite_counts(database: Path) -> dict[str, int]:
+     with sqlite3.connect(str(database)) as conn:
+-        rows = conn.execute("SELECT storage_path, sha256 FROM source_documents WHERE storage_path IS NOT NULL").fetchall()
+-    for storage_path, expected in rows:
+-        path = Path(storage_path)
+-        if path.parts[:2] != ("data", "uploads") or len(path.parts) != 3:
+-            raise ValueError(f"不支持的资料存储路径: {storage_path}")
+-        target = uploads / path.name
+-        if not target.is_file() or (expected and digest(target) != expected):
+-            raise ValueError(f"资料缺失或校验失败: {storage_path}")
+-    return len(rows)
+-
+-
+-def backup(database: Path, uploads: Path, destination: Path) -> None:
++        present = _tables(conn)
++        counts = {}
++        for table in SOURCE_TABLES:
++            counts[table] = (
++                conn.execute(
++                    f"SELECT COUNT(*) FROM {table} WHERE storage_path IS NOT NULL AND storage_path<>''"
++                ).fetchone()[0]
++                if table in present
++                else 0
++            )
++        counts["rfqs"] = conn.execute("SELECT COUNT(*) FROM rfqs").fetchone()[0] if "rfqs" in present else 0
++    return counts
++
++
++def _copy_tree(source: Path, destination: Path) -> None:
++    """复制私有目录树；符号链接与非普通文件一律拒绝（宁可见失败，不做静默跳过）。"""
++    source = Path(source)
++    destination = Path(destination)
++    if source.is_symlink():
++        raise ValueError(f"目录是符号链接，拒绝复制: {source}")
++    for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
++        current = Path(dirpath)
++        rel = current.relative_to(source)
++        target_dir = destination / rel
++        target_dir.mkdir(parents=True, exist_ok=True)
++        for name in dirnames + filenames:
++            entry = current / name
++            if entry.is_symlink():
++                raise ValueError(f"目录包含符号链接，拒绝复制: {entry}")
++        for name in filenames:
++            entry = current / name
++            if not entry.is_file():
++                raise ValueError(f"目录包含非普通文件，拒绝复制: {entry}")
++            shutil.copy2(entry, target_dir / name)
++
++
++def _select_aux_dir(explicit, default: Path, label: str):
++    """选择随库的私有目录：显式指定时必须存在；自动探测时存在才纳入。"""
++    target = Path(explicit) if explicit is not None else Path(default)
++    if target.is_symlink():
++        raise ValueError(f"{label}是符号链接，拒绝处理: {target}")
++    if target.exists():
++        if not target.is_dir():
++            raise ValueError(f"{label}存在但不是目录: {target}")
++        return target
++    if explicit is not None:
++        raise ValueError(f"指定的{label}不存在: {target}")
++    return None
++
++
++def backup(
++    database: Path,
++    uploads: Path,
++    destination: Path,
++    *,
++    model_secrets=None,
++    connection_runtime=None,
++    ops_config=None,
++) -> int:
++    """制作一致性快照 + 全部登记原件 + 私有模型配置 + 连接运行状态（+ 可选运维配置）的备份包。
++
++    目录布局：app.db / uploads/ / model-secrets/（可选）/ connection-runtime/（可选）/
++    ops-config/（可选，`--ops-config` 指定的受限运维配置，如 /etc/b2b/b2b.env）/ manifest.json。
++    停写边界见模块说明；本函数不把“先库后文件”称为原子快照。
++    返回通过核验并复制进包的**去重原件文件数**（登记行数可能更多：多行可指向同一文件）。
++    """
++    database = Path(database)
++    uploads = Path(uploads)
++    destination = Path(destination)
+     if destination.exists():
+         raise ValueError("备份目标已存在")
+     if not database.is_file():
+         raise ValueError("数据库不存在")
++    if uploads.is_symlink():
++        raise ValueError(f"上传目录是符号链接，拒绝备份: {uploads}")
++    if ops_config is not None:
++        ops_config = Path(ops_config)
++        if ops_config.is_symlink() or not ops_config.is_file():
++            raise ValueError(f"运维配置必须是普通文件（拒绝符号链接/目录/缺失）: {ops_config}")
++    secrets_dir = _select_aux_dir(model_secrets, Path(str(database) + ".model-secrets"), "模型私有配置目录")
++    runtime_dir = _select_aux_dir(
++        connection_runtime, database.resolve().parent / "connection-runtime", "连接运行状态目录"
++    )
+     destination.parent.mkdir(parents=True, exist_ok=True)
+     with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
+         bundle = Path(temporary) / "bundle"
+         bundle.mkdir()
+         with sqlite3.connect(str(database)) as source, sqlite3.connect(str(bundle / "app.db")) as target:
+             source.backup(target)
+-        if uploads.exists():
+-            shutil.copytree(uploads, bundle / "uploads")
++        # 以一致快照为准核验全部登记原件与真实上传目录的对应关系（在复制前做全量核对）。
++        required = _verified_relative_files(bundle / "app.db", uploads)
++        if uploads.is_dir():
++            _copy_tree(uploads, bundle / "uploads")
+         else:
+             (bundle / "uploads").mkdir()
+-        check_source_files(bundle / "app.db", bundle / "uploads")
++        for rel, expected in required.items():
++            copied = bundle / "uploads" / rel
++            if not copied.is_file():
++                raise ValueError(f"备份复制缺失原件: {rel}")
++            if expected and digest(copied) != expected:
++                raise ValueError(f"备份复制损坏（内容与登记不一致）: {rel}")
++        if secrets_dir is not None:
++            _copy_tree(secrets_dir, bundle / "model-secrets")
++        if runtime_dir is not None:
++            _copy_tree(runtime_dir, bundle / "connection-runtime")
++        if ops_config is not None:
++            ops_dir = bundle / "ops-config"
++            ops_dir.mkdir()
++            shutil.copy2(ops_config, ops_dir / ops_config.name)
+         files = {str(path.relative_to(bundle)): digest(path) for path in bundle.rglob("*") if path.is_file()}
+-        manifest = {"created_at": datetime.now(timezone.utc).isoformat(), "files": files}
++        counts = _sqlite_counts(bundle / "app.db")
++        manifest = {
++            "created_at": datetime.now(timezone.utc).isoformat(),
++            "format": 2,
++            "files": files,
++            "origin": {
++                "database": str(database),
++                "uploads": str(uploads),
++                "uploads_resolved": str(uploads.resolve()),
++                "model_secrets": str(secrets_dir) if secrets_dir is not None else None,
++                "connection_runtime": str(runtime_dir) if runtime_dir is not None else None,
++            },
++            "counts": counts,
++        }
+         (bundle / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+-        # 备份含业务库与全部原件：先把整棵产物收紧到属主可读，再移出临时目录。
++        # 备份含业务库与全部私有材料：先把整棵产物收紧到属主可读，再移出临时目录。
+         restrict_permissions(bundle)
+         bundle.rename(destination)
++    return len(required)
++
++
++def _reject_symlinks_in_tree(root: Path) -> None:
++    if root.is_symlink():
++        raise ValueError(f"目录是符号链接，拒绝处理: {root}")
++    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
++        for name in dirnames + filenames:
++            entry = Path(dirpath) / name
++            if entry.is_symlink():
++                raise ValueError(f"备份包包含符号链接，拒绝恢复: {entry.relative_to(root)}")
++
++
++def _legacy_original_match(uploads_dest: Path, raw: Path, sha256: str) -> Path | None:
++    """旧格式包（无来源路径记录）尽力重建：按文件名 + 哈希唯一匹配恢复目录内原件。"""
++    if not sha256:
++        return None
++    matches = [p for p in uploads_dest.rglob(raw.name) if p.is_file() and digest(p) == sha256]
++    if len(matches) == 1:
++        return matches[0].relative_to(uploads_dest)
++    return None
++
++
++def _remap_absolute_paths(conn: sqlite3.Connection, destination: Path, origin, uploads_dest: Path) -> int:
++    """把恢复库中指向原机的绝对原件路径重写为恢复目录下的对应路径。"""
++    origin = origin if isinstance(origin, dict) else {}
++    bases = [str(origin[key]) for key in ("uploads", "uploads_resolved") if origin.get(key)]
++    uploads_dest = Path(uploads_dest)
++    present = _tables(conn)
++    remapped = 0
++    for table in SOURCE_TABLES:
++        if table not in present:
++            continue
++        rows = conn.execute(
++            f"SELECT id, storage_path, sha256 FROM {table} WHERE storage_path IS NOT NULL AND storage_path<>''"
++        ).fetchall()
++        for row in rows:
++            stored = str(row[1])
++            raw = Path(stored)
++            if not raw.is_absolute():
++                continue  # 旧相对路径保持原样（由运行环境上传目录配置解析）
++            rel = None
++            for base in bases:
++                try:
++                    rel = raw.relative_to(base)
++                    break
++                except ValueError:
++                    pass
++            if rel is None:
++                for base in bases:
++                    try:
++                        rel = raw.resolve().relative_to(Path(base).resolve())
++                        break
++                    except (ValueError, OSError):
++                        pass
++            if rel is None and not bases:
++                rel = _legacy_original_match(uploads_dest, raw, str(row[2] or ""))
++            if rel is None:
++                continue
++            if rel.is_absolute() or ".." in rel.parts:
++                raise ValueError(f"备份记录的原件路径异常（逃逸上传目录），拒绝恢复: {stored}")
++            new_path = str(uploads_dest / rel)
++            if new_path != stored:
++                conn.execute(f"UPDATE {table} SET storage_path=? WHERE id=?", (new_path, row[0]))
++                remapped += 1
++    return remapped
+ 
+ 
+ def restore_and_verify(bundle: Path, destination: Path) -> tuple[int, int]:
++    """把备份包恢复到空目录并核验；返回（可恢复的 RFQ 条数，通过核验的原件条数）。
++
++    旧格式包（仅 app.db + uploads/ + manifest.files）仍可恢复：绝对路径按
++    “文件名 + 哈希”唯一匹配尽力重建，无法重建的行会让校验失败（fail-closed）。
++    """
++    bundle = Path(bundle)
++    destination = Path(destination)
++    if bundle.is_symlink():
++        raise ValueError(f"备份包目录是符号链接，拒绝处理: {bundle}")
+     if destination.exists():
+         raise ValueError("恢复目标已存在，必须使用隔离的空目录")
+-    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+-    actual_files = {str(path.relative_to(bundle)) for path in bundle.rglob("*") if path.is_file() and path.name != "manifest.json"}
+-    if actual_files != set(manifest["files"]):
++    manifest_file = bundle / "manifest.json"
++    if not manifest_file.is_file():
++        raise ValueError("备份包缺少 manifest.json")
++    if not (bundle / "app.db").is_file():
++        raise ValueError("备份包缺少数据库文件")
++    _reject_symlinks_in_tree(bundle)
++    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
++    files = manifest.get("files")
++    if not isinstance(files, dict):
++        raise ValueError("备份清单格式无效")
++    for name, expected in files.items():
++        if not isinstance(name, str) or not isinstance(expected, str) or not name:
++            raise ValueError(f"备份清单包含非法路径项: {name!r}")
++        candidate = Path(name)
++        if candidate.is_absolute() or ".." in candidate.parts:
++            raise ValueError(f"备份清单包含非法路径项: {name!r}")
++    actual_files = {
++        str(path.relative_to(bundle)) for path in bundle.rglob("*") if path.is_file() and path.name != "manifest.json"
++    }
++    if actual_files != set(files):
+         raise ValueError("备份文件清单与实际文件不一致")
+-    for name, expected in manifest["files"].items():
++    for name, expected in files.items():
+         path = bundle / name
+-        if path.resolve().is_relative_to(bundle.resolve()) is False or not path.is_file() or digest(path) != expected:
++        if path.is_symlink() or not path.is_file() or digest(path) != expected:
+             raise ValueError(f"备份文件校验失败: {name}")
+-    shutil.copytree(bundle, destination)
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    destination.mkdir()
++    shutil.copy2(bundle / "app.db", destination / "app.db")
++    if (bundle / "uploads").is_dir():
++        _copy_tree(bundle / "uploads", destination / "uploads")
++    else:
++        (destination / "uploads").mkdir()
++    model_secrets = bundle / "model-secrets"
++    if model_secrets.is_dir():
++        # 目录映射：恢复后库名为 app.db，私有模型配置目录必须同名可查（EnterpriseModels 约定）。
++        _copy_tree(model_secrets, destination / "app.db.model-secrets")
++    elif model_secrets.exists():
++        raise ValueError("备份内的模型私有配置不是目录")
++    runtime = bundle / "connection-runtime"
++    if runtime.is_dir():
++        _copy_tree(runtime, destination / "connection-runtime")
++    elif runtime.exists():
++        raise ValueError("备份内的连接运行状态不是目录")
++    for name in files:
++        first = name.split("/", 1)[0]
++        if first not in {"app.db", "uploads", "model-secrets", "connection-runtime"}:
++            # 旧包若含清单登记的其他顶层文件：按原相对路径保留（不使用旧格式不存在的布局）。
++            target = destination / name
++            target.parent.mkdir(parents=True, exist_ok=True)
++            shutil.copy2(bundle / name, target)
++    shutil.copy2(manifest_file, destination / "manifest.json")
+     restrict_permissions(destination)
+     with sqlite3.connect(str(destination / "app.db")) as conn:
+         if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+             raise ValueError("恢复数据库完整性检查失败")
+         records = conn.execute("SELECT COUNT(*) FROM rfqs").fetchone()[0]
++        _remap_absolute_paths(conn, destination, manifest.get("origin"), destination / "uploads")
++        conn.commit()
+     sources = check_source_files(destination / "app.db", destination / "uploads")
+     return records, sources
+ 
+ 
+ def main() -> None:
+-    parser = argparse.ArgumentParser(description=__doc__)
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+     sub = parser.add_subparsers(dest="action", required=True)
+     create = sub.add_parser("backup")
+     create.add_argument("--db", type=Path, required=True)
+     create.add_argument("--uploads", type=Path, required=True)
+     create.add_argument("--out", type=Path, required=True)
++    create.add_argument("--secrets", type=Path, default=None, help="私有模型配置目录（默认 <db>.model-secrets，存在才纳入）")
++    create.add_argument("--runtime", type=Path, default=None, help="连接运行状态目录（默认 <db 父目录>/connection-runtime，存在才纳入）")
++    create.add_argument("--ops-config", type=Path, default=None, help="受限运维配置（如 /etc/b2b/b2b.env）：随包 ops-config/，恢复时按原相对路径保留")
+     recover = sub.add_parser("restore-check")
+     recover.add_argument("--bundle", type=Path, required=True)
+     recover.add_argument("--out", type=Path, required=True)
+     args = parser.parse_args()
+     if args.action == "backup":
+-        backup(args.db, args.uploads, args.out)
++        verified = backup(args.db, args.uploads, args.out, model_secrets=args.secrets,
++                          connection_runtime=args.runtime, ops_config=args.ops_config)
++        counts = _sqlite_counts(args.out / "app.db")
++        secrets_note = "模型配置有" if (args.out / "model-secrets").is_dir() else "模型配置无"
++        runtime_note = "连接运行状态有" if (args.out / "connection-runtime").is_dir() else "连接运行状态无"
++        ops_note = "运维配置有" if (args.out / "ops-config").is_dir() else "运维配置无"
+         print(f"备份完成: {args.out}")
++        print(
++            f"覆盖：RFQ {counts['rfqs']} 条；原件已核验 {verified} 个文件"
++            f"（登记行：产品 {counts['source_documents']} / 知识 {counts['knowledge_sources']} / 批次 {counts['kb2_sources']}）；"
++            f"{secrets_note}；{runtime_note}；{ops_note}"
++        )
++        print("一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。")
+     else:
+         records, sources = restore_and_verify(args.bundle, args.out)
+-        print(f"隔离恢复完成: RFQ {records} 条；有文件的资料 {sources} 份；路径 {args.out}")
++        counts = _sqlite_counts(args.out / "app.db")
++        print(
++            f"隔离恢复完成: RFQ {records} 条；原件校验 {sources} 个文件"
++            f"（登记行：产品 {counts['source_documents']} / 知识 {counts['knowledge_sources']} / 批次 {counts['kb2_sources']}）；"
++            f"路径 {args.out}"
++        )
++        if (args.out / "app.db.model-secrets").is_dir():
++            print("私有模型配置已按恢复后库名映射（app.db.model-secrets）。")
++        if (args.out / "connection-runtime").is_dir():
++            print("连接运行状态已恢复到恢复目录（connection-runtime）。")
++        if (args.out / "ops-config").is_dir():
++            print("运维配置已恢复到 ops-config/（含密钥材料，按运维规程保管、禁止明文上传云端）。")
+ 
+ 
+ if __name__ == "__main__":
+diff --git "a/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/tools/pilot_checks/check_first_launch_t4.py" "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/tools/pilot_checks/check_first_launch_t4.py"
+new file mode 100644
+index 0000000..eae0591
+--- /dev/null
++++ "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/tools/pilot_checks/check_first_launch_t4.py"	
+@@ -0,0 +1,479 @@
++#!/usr/bin/env python3
++# -*- coding: utf-8 -*-
++"""首次邀请测试上线 T4：最小部署与备份恢复端到端演练（本机、全离线、临时数据）。
++
++覆盖 T4 验收（对照 docs/首次上线-T4执行方案.md）：
++1. 新安装：显式创建首位管理员（普通新库无默认账号）→ 服务启动于 127.0.0.1。
++2. 真实 HTTP：管理员登录（会话 Cookie）；登记官网来源；买方会话/消息/RFQ 提交。
++3. 合成持久状态：人工任务、知识条目与原件、企业模型配置（假密钥）、桥登录状态目录、
++   待处理入库作业（记录数据均写入临时目录）。
++4. 重启（不恢复）：会话、RFQ、人工任务、知识保持；待处理作业在重启后继续处理完成。
++5. 停写窗口备份：停止应用后运行 tools/backup_restore.py（覆盖三类原件 / 模型配置 / 桥状态 / 运维配置）。
++6. 模拟原机丢失原件与私有配置 → 隔离恢复到空目录（路径重映射、目录名映射、私有权限）。
++7. 恢复实例启动：登录会话/RFQ/任务/知识可用；模型配置可读；待处理作业继续处理；
++   可创建新会话与 RFQ（业务可继续）。
++
++约束：全部数据写入系统临时目录；不读不写仓库 data/；强制离线（清除模型/渠道/Dify 环境变量，
++AI_MODE 缺省=本地规则）；不连外部账号、不发送任何外部消息；不读取密钥。
++退出码：0=全部通过；1=存在 FAIL/REVIEW；2=用法/环境问题（未执行演练）。
++本脚本是制作方自测工具；结果不自动构成独立验收。
++
++用法：
++  python3 tools/pilot_checks/check_first_launch_t4.py [--keep-workdir] [--out /tmp/t4-report.json]
++"""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import http.client
++import json
++import os
++import re
++import shutil
++import socket
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import time
++import urllib.parse
++from datetime import datetime, timezone
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[2]
++
++REQUIRED_ENV_PREFIXES = ("DEEPSEEK", "DIFY", "TWILIO", "META", "LANGBOT", "WHATSAPP", "AI_MODE")
++ADMIN_EMAIL = "t4-drill-admin@example.invalid"
++ADMIN_PASSWORD = "t4-drill-password-123"
++TENANT = "pilot-t4"
++TASK_QUESTION = "T4 drill manual question about pump head"
++KNOWLEDGE_TITLE = "T4 drill knowledge note"
++JOB1_FILE = "t4-drill-job1.txt"
++JOB2_FILE = "t4-drill-job2.txt"
++BRIDGE_ACCOUNT = "0123456789abcdef01234567"
++
++
++def now_iso() -> str:
++    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
++
++
++def sha256_file(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++class Report:
++    """逐项状态 + 摘要；状态：PASS / FAIL / REVIEW / INFO / SKIP。"""
++
++    ALLOWED = ("PASS", "FAIL", "REVIEW", "INFO", "SKIP")
++
++    def __init__(self) -> None:
++        self.items: list[dict] = []
++        self.started = now_iso()
++
++    def add(self, section: str, name: str, status: str, detail: str = "", **extra) -> None:
++        if status not in self.ALLOWED:
++            raise ValueError(f"未知状态 {status}")
++        item = {"section": section, "name": name, "status": status, "detail": str(detail), **extra}
++        self.items.append(item)
++        print(f"[{status}] {section}: {name}" + (f" — {detail}" if detail else ""))
++
++    def check(self, section: str, name: str, condition: bool, detail: str = "") -> bool:
++        self.add(section, name, "PASS" if condition else "FAIL", detail)
++        return bool(condition)
++
++    def counts(self) -> dict:
++        result = {status: 0 for status in self.ALLOWED}
++        for item in self.items:
++            result[item["status"]] += 1
++        return result
++
++    def payload(self) -> dict:
++        return {"started_at": self.started, "finished_at": now_iso(), "tool_sha256": sha256_file(Path(__file__)),
++                "python": sys.version.split()[0], "items": self.items, "counts": self.counts()}
++
++
++def scrubbed_env(uploads_dir: Path) -> dict:
++    """服务子进程环境：清除模型/渠道/Dify 变量并强制上传目录；保持完全离线。"""
++    env = {}
++    for key, value in os.environ.items():
++        if key == "AI_MODE" or key.startswith(REQUIRED_ENV_PREFIXES):
++            continue
++        env[key] = value
++    env["PYTHONDONTWRITEBYTECODE"] = "1"
++    env["PYTHONUNBUFFERED"] = "1"
++    env["B2B_UPLOAD_DIR"] = str(uploads_dir)
++    return env
++
++
++def free_port() -> int:
++    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
++        probe.bind(("127.0.0.1", 0))
++        return int(probe.getsockname()[1])
++
++
++class Server:
++    """本机应用实例（子进程 app.py）；stop() 即演练中的“停写窗口”动作。"""
++
++    def __init__(self, code_root: Path, db_path: Path, uploads_dir: Path, port: int, log_path: Path):
++        self.code_root = code_root
++        self.db_path = db_path
++        self.uploads_dir = uploads_dir
++        self.port = port
++        self.log_path = log_path
++        self.proc: subprocess.Popen | None = None
++        self._log = None
++
++    def start(self) -> None:
++        self._log = self.log_path.open("ab")
++        self.proc = subprocess.Popen(
++            [sys.executable, "app.py", "--host", "127.0.0.1", "--port", str(self.port), "--db", str(self.db_path)],
++            cwd=str(self.code_root), env=scrubbed_env(self.uploads_dir),
++            stdout=self._log, stderr=subprocess.STDOUT,
++        )
++        deadline = time.time() + 30
++        while time.time() < deadline:
++            if self.proc.poll() is not None:
++                raise RuntimeError(f"服务启动失败（退出码 {self.proc.returncode}）：见 {self.log_path}")
++            try:
++                with socket.create_connection(("127.0.0.1", self.port), timeout=0.5):
++                    status, _headers, _body = http_request(self.port, "GET", "/login")
++                    if status == 200:
++                        return
++            except OSError:
++                time.sleep(0.15)
++        raise RuntimeError("服务未在 30 秒内就绪")
++
++    def stop(self) -> None:
++        if self.proc is None:
++            return
++        self.proc.terminate()
++        try:
++            self.proc.wait(timeout=10)
++        except subprocess.TimeoutExpired:
++            self.proc.kill()
++            self.proc.wait(timeout=5)
++        finally:
++            if self._log is not None:
++                self._log.close()
++            self.proc = None
++
++
++def http_request(port: int, method: str, path: str, body: bytes | None = None, headers: dict | None = None):
++    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
++    try:
++        conn.request(method, path, body=body, headers=headers or {})
++        response = conn.getresponse()
++        return response.status, dict(response.getheaders()), response.read()
++    finally:
++        conn.close()
++
++
++def form_body(fields: dict) -> bytes:
++    return urllib.parse.urlencode(fields).encode("utf-8")
++
++
++def json_body(payload: dict) -> bytes:
++    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
++
++
++def open_db(path: Path) -> sqlite3.Connection:
++    conn = sqlite3.connect(str(path), timeout=10)
++    conn.row_factory = sqlite3.Row
++    return conn
++
++
++def poll_kb2_status(db_path: Path, filename: str, timeout: float = 75.0) -> tuple[str, str]:
++    """轮询待处理作业状态直到离开 pending/processing；返回 (status, error)。"""
++    deadline = time.time() + timeout
++    status, error = "pending", ""
++    while time.time() < deadline:
++        with open_db(db_path) as conn:
++            row = conn.execute(
++                "SELECT status, error FROM kb2_sources WHERE tenant_id=? AND filename=? ORDER BY created_at DESC LIMIT 1",
++                (TENANT, filename),
++            ).fetchone()
++        if row:
++            status, error = str(row["status"]), str(row["error"] or "")
++            if status not in ("pending", "processing"):
++                return status, error
++        time.sleep(2)
++    return status, error
++
++
++def run_cli(code_root: Path, args: list[str], timeout: int = 120) -> tuple[int, str]:
++    result = subprocess.run(
++        [sys.executable, str(code_root / "tools" / "backup_restore.py"), *args],
++        cwd=str(code_root), capture_output=True, text=True, timeout=timeout,
++        env=scrubbed_env(code_root / "data" / "uploads"),
++    )
++    return result.returncode, (result.stdout or "") + (result.stderr or "")
++
++
++def run_drill(report: Report, workdir: Path, code_root: Path, port: int) -> None:
++    sys.path.insert(0, str(code_root))
++    from app import Database  # noqa: E402  运行所在代码根（默认本仓库）
++    from model_settings import EnterpriseModels  # noqa: E402
++
++    data_dir = workdir / "data"
++    uploads = data_dir / "uploads"
++    db_path = data_dir / "app.db"
++    data_dir.mkdir(parents=True, exist_ok=True)
++    # 本进程内的产品函数写入（知识导入/批次文件）也必须落到临时上传目录：
++    # 与服务器子进程的 B2B_UPLOAD_DIR 保持一致，绝不触碰仓库 data/uploads。
++    os.environ["B2B_UPLOAD_DIR"] = str(uploads)
++
++    # ── 1. 新安装：先创建管理员（无默认账号），再启动服务 ──────────────────
++    created = subprocess.run(
++        [sys.executable, "tools/create_admin.py", "--db", str(db_path), "--email", ADMIN_EMAIL,
++         "--name", "T4 Drill Admin", "--tenant", TENANT, "--tenant-name", "T4 演练企业", "--password-stdin"],
++        cwd=str(code_root), input=ADMIN_PASSWORD + "\n", text=True, capture_output=True, timeout=60,
++    )
++    report.check("1 新安装", "首位管理员创建（普通新库）", created.returncode == 0,
++                 (created.stdout or created.stderr).strip().splitlines()[-1] if (created.stdout or created.stderr) else "")
++
++    server = Server(code_root, db_path, uploads, port, workdir / "server-1.log")
++    server.start()
++    report.add("1 新安装", "应用启动（127.0.0.1）", "PASS", f"port={port}，库与上传目录均在临时目录")
++
++    # ── 2. 真实 HTTP：登录、登记官网、买方会话/RFQ ─────────────────────────
++    status, headers, _body = http_request(port, "POST", "/login", form_body({"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "next": "/admin"}), {"Content-Type": "application/x-www-form-urlencoded"})
++    cookie = ""
++    match = re.search(r"cb_session=([^;]+)", headers.get("Set-Cookie", ""))
++    if match:
++        cookie = match.group(1)
++    report.check("2 HTTP 业务", "管理员登录（会话 Cookie）", status in (302, 303) and bool(cookie), f"status={status}")
++    auth_headers = {"Cookie": f"cb_session={cookie}"}
++    status, _headers, body = http_request(port, "GET", "/admin", headers=auth_headers)
++    report.check("2 HTTP 业务", "后台页面可访问", status == 200, f"GET /admin → {status}")
++
++    origin = f"http://127.0.0.1:{port}"
++    status, _headers, _body = http_request(port, "POST", "/admin/sites", form_body({"allowed_origin": origin}),
++                                           {**auth_headers, "Content-Type": "application/x-www-form-urlencoded"})
++    status2, _headers, sites_body = http_request(port, "GET", "/admin/sites", headers=auth_headers)
++    site_match = re.search(r"网站标识：<code>([^<]+)</code>", sites_body.decode("utf-8", "replace"))
++    site_key = site_match.group(1) if site_match else ""
++    report.check("2 HTTP 业务", "登记官网来源并取得网站标识", bool(site_key), f"origin={origin}")
++
++    buyer_headers = {"X-Site-Key": site_key, "Origin": origin, "Content-Type": "application/json"}
++    status, _headers, body = http_request(port, "POST", "/api/v1/buyer/conversations",
++                                          json_body({"site_key": site_key, "locale": "en"}), buyer_headers)
++    created_ok = status == 201
++    payload = json.loads(body.decode("utf-8")) if created_ok else {}
++    conversation_id = payload.get("conversation_id", "")
++    access_token = payload.get("access_token", "")
++    report.check("2 HTTP 业务", "买方会话创建", created_ok and bool(conversation_id), f"status={status}")
++
++    buyer_auth = {**buyer_headers, "Authorization": f"Bearer {access_token}"}
++    status, _headers, body = http_request(
++        port, "POST", f"/api/v1/buyer/conversations/{conversation_id}/messages",
++        json_body({"text": "We need a clean-water pump for a plant room: flow 30 m3/h, head 25 m."}),
++        {**buyer_auth, "Idempotency-Key": "t4-drill-message-1"},
++    )
++    message_id = ""
++    if status in (200, 201):
++        message_id = json.loads(body.decode("utf-8")).get("message_id", "")
++    report.check("2 HTTP 业务", "买方消息提交（含需求抽取）", status in (200, 201) and bool(message_id), f"status={status}")
++
++    status, _headers, body = http_request(
++        port, "POST", f"/api/v1/buyer/conversations/{conversation_id}/rfqs",
++        json_body({
++            "contact": {"contact_name": "Drill Buyer", "company": "Drill Co", "contact_email": "drill-buyer@example.invalid",
++                        "contact_phone": "+49 30 555 0208", "quantity": "1", "region": "Germany"},
++            "contact_confirmed": True, "notes": "T4 drill rfq", "entry_surface": "chat",
++        }),
++        {**buyer_auth, "Idempotency-Key": "t4-drill-rfq-1"},
++    )
++    rfq_id = json.loads(body.decode("utf-8")).get("rfq_id", "") if status in (200, 201) else ""
++    report.check("2 HTTP 业务", "买方 RFQ 提交", status in (200, 201) and bool(rfq_id), f"status={status} rfq={rfq_id}")
++
++    # ── 3. 合成持久状态：人工任务 / 知识 / 模型配置 / 桥登录状态 ────────────
++    with open_db(db_path) as conn:
++        admin_row = conn.execute("SELECT id FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()
++    admin_id = admin_row["id"]
++    db = Database(db_path)
++    try:
++        db.create_human_task(TENANT, conversation_id, message_id, TASK_QUESTION, "T4 演练：需人工核实",
++                             {"confirmed_requirements": {}})
++        knowledge = db.import_knowledge_file(TENANT, admin_id, filename="t4-drill-knowledge.txt",
++                                             data=b"T4 drill knowledge body: lead time depends on configuration.",
++                                             title=KNOWLEDGE_TITLE)
++        knowledge_row = db.conn.execute(
++            "SELECT storage_path FROM knowledge_sources WHERE id=?", (knowledge["source_id"],)).fetchone()
++        job1_batch = db.kb2_create_batch(TENANT, admin_id, [{"kind": "file", "filename": JOB1_FILE,
++                                                             "data": b"Job one paragraph about pumps.\n\nJob one detail."}],
++                                         process_now=False)
++    finally:
++        db.conn.close()
++    EnterpriseModels(db_path, None).save(TENANT, "https://api.example.com/v1", "t4-drill-model", "sk-t4-drill-fake-not-real")
++    runtime_state = data_dir / "connection-runtime" / BRIDGE_ACCOUNT / "sessions" / "state.json"
++    runtime_state.parent.mkdir(parents=True, exist_ok=True)
++    runtime_state.write_bytes(b'{"logged_in": true, "drill": true}')
++    os.chmod(runtime_state, 0o600)
++    report.check("3 合成状态", "人工任务 / 知识原件 / 企业模型配置 / 桥登录状态写入",
++                 Path(knowledge_row["storage_path"]).is_file() and runtime_state.is_file(),
++                 f"knowledge={Path(knowledge_row['storage_path']).name}")
++
++    new_job1_status, _ = poll_kb2_status(db_path, JOB1_FILE, timeout=1.0)
++    server.stop()  # 停写窗口：重启演练开始（作业 1 已在库中保持 pending）
++
++    # ── 4. 重启（不恢复）：会话与业务记录保存；待处理作业继续处理 ───────────
++    server = Server(code_root, db_path, uploads, port, workdir / "server-2.log")
++    server.start()
++    status, _headers, body = http_request(port, "GET", "/admin", headers=auth_headers)
++    report.check("4 重启保存", "重启后原登录会话仍有效", status == 200, f"GET /admin → {status}")
++    status, _headers, rfqs_body = http_request(port, "GET", "/admin/rfqs", headers=auth_headers)
++    report.check("4 重启保存", "RFQ 记录仍在", status == 200 and rfq_id in rfqs_body.decode("utf-8", "replace"))
++    status, _headers, tasks_body = http_request(port, "GET", "/admin/tasks", headers=auth_headers)
++    report.check("4 重启保存", "人工任务仍在", status == 200 and TASK_QUESTION in tasks_body.decode("utf-8", "replace"))
++    status, _headers, item_body = http_request(port, "GET", f"/admin/knowledge/item/{knowledge['item_id']}", headers=auth_headers)
++    report.check("4 重启保存", "知识条目仍在", status == 200 and KNOWLEDGE_TITLE in item_body.decode("utf-8", "replace"), f"item={knowledge['item_id']}")
++    status, _headers, conv_body = http_request(port, "GET", f"/api/v1/buyer/conversations/{conversation_id}", headers=buyer_auth)
++    report.check("4 重启保存", "买方访问凭据仍有效", status == 200, f"GET buyer conversation → {status}")
++
++    job1_status, job1_error = poll_kb2_status(db_path, JOB1_FILE)
++    report.check("4 重启保存", "待处理作业在重启后继续处理完成", job1_status in ("extracted", "registered"),
++                 f"status={job1_status} error={job1_error[:60]}")
++    server.stop()
++
++    # ── 5. 停写窗口内备份（含作业 2 的待处理状态） ─────────────────────────
++    db = Database(db_path)
++    try:
++        db.kb2_create_batch(TENANT, admin_id, [{"kind": "file", "filename": JOB2_FILE,
++                                                "data": b"Job two paragraph about valves.\n\nJob two detail."}],
++                            process_now=False)
++    finally:
++        db.conn.close()
++    job2_pending, _ = poll_kb2_status(db_path, JOB2_FILE, timeout=1.0)
++    ops_env = workdir / "b2b.env"
++    ops_env.write_text("B2B_UPLOAD_DIR=/var/lib/b2b/data/uploads\nDEEPSEEK_API_KEY=drill-fake-key\n", encoding="utf-8")
++    os.chmod(ops_env, 0o600)
++    backup_out = workdir / "backup-1"
++    code, output = run_cli(code_root, ["backup", "--db", str(db_path), "--uploads", str(uploads),
++                                       "--out", str(backup_out), "--ops-config", str(ops_env)])
++    bundle_ok = (
++        code == 0
++        and (backup_out / "uploads" / "phase2").is_dir()
++        and (backup_out / "model-secrets").is_dir()
++        and (backup_out / "connection-runtime" / BRIDGE_ACCOUNT / "sessions" / "state.json").is_file()
++        and (backup_out / "ops-config" / "b2b.env").is_file()
++        and (backup_out / "manifest.json").is_file()
++    )
++    report.check("5 备份", "停写窗口备份覆盖原件/模型配置/桥状态/运维配置", bundle_ok, output.strip().replace("\n", " | ")[:220])
++    report.add("5 备份", "备份时作业 2 状态", "INFO", f"pending={job2_pending}")
++
++    # ── 6. 模拟丢失 + 隔离恢复 ─────────────────────────────────────────────
++    shutil.rmtree(uploads, ignore_errors=True)
++    shutil.rmtree(Path(str(db_path) + ".model-secrets"), ignore_errors=True)
++    shutil.rmtree(data_dir / "connection-runtime", ignore_errors=True)
++    restored = workdir / "restored"
++    code, output = run_cli(code_root, ["restore-check", "--bundle", str(backup_out), "--out", str(restored)])
++    restored_ok = code == 0
++    report.check("6 恢复", "隔离恢复到空目录", restored_ok, output.strip().replace("\n", " | ")[:220])
++    report.check("6 恢复", "模型配置目录按恢复后库名映射", (restored / "app.db.model-secrets").is_dir())
++    report.check("6 恢复", "桥登录状态恢复", (restored / "connection-runtime" / BRIDGE_ACCOUNT / "sessions" / "state.json").is_file())
++    report.check("6 恢复", "运维配置按原相对路径恢复", (restored / "ops-config" / "b2b.env").is_file())
++    secrets_file = next((p for p in (restored / "app.db.model-secrets").rglob("*") if p.is_file()), None)
++    if secrets_file:
++        report.check("6 恢复", "恢复产物私有权限（0600 文件 / 0700 目录）",
++                     oct(secrets_file.stat().st_mode & 0o777) == oct(0o600)
++                     and oct((restored / "app.db.model-secrets").stat().st_mode & 0o777) == oct(0o700))
++
++    # ── 7. 恢复实例：业务可继续 ────────────────────────────────────────────
++    restored_uploads = restored / "uploads"
++    server = Server(code_root, restored / "app.db", restored_uploads, port, workdir / "server-3.log")
++    server.start()
++    status, _headers, body = http_request(port, "GET", "/admin", headers=auth_headers)
++    report.check("7 恢复后", "登录会话在恢复后仍有效", status == 200, f"GET /admin → {status}")
++    status, _headers, rfqs_body = http_request(port, "GET", "/admin/rfqs", headers=auth_headers)
++    report.check("7 恢复后", "RFQ 可查看", status == 200 and rfq_id in rfqs_body.decode("utf-8", "replace"))
++    status, _headers, tasks_body = http_request(port, "GET", "/admin/tasks", headers=auth_headers)
++    report.check("7 恢复后", "人工任务可查看", status == 200 and TASK_QUESTION in tasks_body.decode("utf-8", "replace"))
++    status, _headers, item_body = http_request(port, "GET", f"/admin/knowledge/item/{knowledge['item_id']}", headers=auth_headers)
++    report.check("7 恢复后", "知识条目可查看", status == 200 and KNOWLEDGE_TITLE in item_body.decode("utf-8", "replace"))
++
++    restored_models = EnterpriseModels(restored / "app.db", None).read(TENANT)
++    report.check("7 恢复后", "企业模型配置可读（映射正确）",
++                 bool(restored_models) and restored_models.get("model") == "t4-drill-model"
++                 and restored_models.get("base_url") == "https://api.example.com/v1")
++
++    job2_status, job2_error = poll_kb2_status(restored / "app.db", JOB2_FILE)
++    report.check("7 恢复后", "待处理作业在恢复后继续处理完成", job2_status in ("extracted", "registered"),
++                 f"status={job2_status} error={job2_error[:60]}")
++
++    status, _headers, body = http_request(
++        port, "POST", "/api/v1/buyer/conversations",
++        json_body({"site_key": site_key, "locale": "en"}), buyer_headers)
++    new_conversation = json.loads(body.decode("utf-8")).get("conversation_id", "") if status == 201 else ""
++    new_token = json.loads(body.decode("utf-8")).get("access_token", "") if status == 201 else ""
++    status2, _headers, body2 = http_request(
++        port, "POST", f"/api/v1/buyer/conversations/{new_conversation}/rfqs",
++        json_body({
++            "contact": {"contact_name": "Drill Buyer 2", "company": "Drill Co", "contact_email": "drill-buyer2@example.invalid",
++                        "contact_phone": "+49 30 555 0209", "quantity": "2", "region": "France"},
++            "contact_confirmed": True, "notes": "T4 drill rfq after restore", "entry_surface": "chat",
++        }),
++        {**buyer_headers, "Authorization": f"Bearer {new_token}", "Idempotency-Key": "t4-drill-rfq-2"},
++    )
++    new_rfq = json.loads(body2.decode("utf-8")).get("rfq_id", "") if status2 in (200, 201) else ""
++    report.check("7 恢复后", "恢复后可创建新会话与新 RFQ（业务继续）",
++                 status == 201 and status2 in (200, 201) and bool(new_rfq), f"conversation={new_conversation} rfq={new_rfq}")
++    server.stop()
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    parser.add_argument("--keep-workdir", action="store_true", help="保留临时工作目录供检查")
++    parser.add_argument("--out", type=Path, default=None, help="报告 JSON 输出路径（可选）")
++    parser.add_argument("--port", type=int, default=0, help="固定端口（默认自动选择空闲端口）")
++    parser.add_argument("--code-root", type=Path, default=ROOT, help="被测代码根目录（默认本脚本所在仓库）")
++    args = parser.parse_args()
++
++    code_root = args.code_root.resolve()
++    for required in ("app.py", "tools/backup_restore.py", "tools/create_admin.py"):
++        if not (code_root / required).is_file():
++            print(f"[用法错误] 代码根缺少 {required}: {code_root}")
++            raise SystemExit(2)
++
++    report = Report()
++    workdir = Path(tempfile.mkdtemp(prefix="b2b-t4-drill-"))
++    report.add("0 边界", "临时工作目录", "INFO", str(workdir))
++    report.add("0 边界", "被测代码根", "INFO", str(code_root))
++    report.add("0 边界", "离线说明", "INFO", "清除模型/渠道/Dify 环境变量；AI_MODE 缺省=本地规则；不读取仓库 data/、不连外部服务")
++    port = args.port or free_port()
++    failure: str | None = None
++    saved_upload_env = os.environ.get("B2B_UPLOAD_DIR")
++    try:
++        run_drill(report, workdir, code_root, port)
++    except Exception as error:  # 演练中断也给出可读报告
++        import traceback
++        traceback.print_exc()
++        failure = f"{type(error).__name__}: {error}"
++        report.add("X 中断", "演练中断", "FAIL", failure[:220])
++    finally:
++        if saved_upload_env is None:
++            os.environ.pop("B2B_UPLOAD_DIR", None)
++        else:
++            os.environ["B2B_UPLOAD_DIR"] = saved_upload_env
++
++    counts = report.counts()
++    print("\n===== T4 演练摘要 =====")
++    for status in ("PASS", "FAIL", "REVIEW", "INFO", "SKIP"):
++        print(f"{status}: {counts[status]}")
++    if failure:
++        print(f"中断原因: {failure}")
++    if args.out:
++        args.out.parent.mkdir(parents=True, exist_ok=True)
++        args.out.write_text(json.dumps(report.payload(), ensure_ascii=False, indent=2), encoding="utf-8")
++        print(f"报告: {args.out}")
++    if not args.keep_workdir:
++        shutil.rmtree(workdir, ignore_errors=True)
++    else:
++        print(f"工作目录保留: {workdir}")
++    if counts["FAIL"] or counts["REVIEW"]:
++        raise SystemExit(1)
++    raise SystemExit(0)
++
++
++if __name__ == "__main__":
++    main()
+diff --git "a/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/test_first_launch_t4.py" "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/test_first_launch_t4.py"
+new file mode 100644
+index 0000000..b118557
+--- /dev/null
++++ "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/test_first_launch_t4.py"	
+@@ -0,0 +1,517 @@
++# -*- coding: utf-8 -*-
++"""T4 判别性测试：备份/恢复覆盖全部原件表、私有模型配置与持久状态；恢复映射与安全拒绝；上传目录持久配置。
++
++约束（与 T4 任务一致）：
++- 只使用临时数据库、临时上传目录、临时私有目录与**假密钥**；不读现有 data/、不调用真实模型、不连外部服务。
++- 先有判别力的失败断言（在修补代码上跑红），再最小实现使其变绿。
++- 新接口（resolve_stored_file / resolve_source_storage_path / app.upload_dir）在用例内部导入，
++  以便在旧代码上运行红基线时其余用例仍可执行并给出各自失败原因。
++"""
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++import shutil
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import unittest
++from datetime import datetime, timezone
++from pathlib import Path
++
++import app as app_module
++from app import Database
++from model_settings import EnterpriseModels
++from tools.backup_restore import backup, digest, restore_and_verify
++
++
++def write_private(path: Path, data: bytes) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_bytes(data)
++    os.chmod(path, 0o600)
++
++
++class T4TestBase(unittest.TestCase):
++    def setUp(self) -> None:
++        self._tmp = tempfile.TemporaryDirectory(prefix="t4-test-")
++        self.root = Path(self._tmp.name)
++        self._saved = (app_module.ROOT, app_module.UPLOAD_DIR)
++        app_module.ROOT = self.root
++        app_module.UPLOAD_DIR = self.root / "data" / "uploads"
++        os.environ.pop("B2B_UPLOAD_DIR", None)
++        os.environ.pop("B2B_KB_STORAGE_ROOT", None)
++        self.uploads = app_module.UPLOAD_DIR
++        self.db_path = self.root / "app.db"
++        self.db = Database(self.db_path)
++        self.db.ensure_tenant("t4-tenant", "T4 测试企业")
++        self.admin_id = self.db.create_user(
++            "t4-tenant", "t4-admin@example.invalid", "T4 Admin", "admin", "password-123", actor="t4-test"
++        )
++
++    def tearDown(self) -> None:
++        self.db.conn.close()
++        app_module.ROOT, app_module.UPLOAD_DIR = self._saved
++        os.environ.pop("B2B_UPLOAD_DIR", None)
++        os.environ.pop("B2B_KB_STORAGE_ROOT", None)
++        self._tmp.cleanup()
++
++    # ── 夹具 ──────────────────────────────────────────────────────────────
++    def _product(self, model: str = "P-T4") -> str:
++        return self.db.create_product("t4-tenant", model, f"Pump {model}", "test use")
++
++    def _source_document(self, name: str = "manual.txt", data: bytes = b"source original") -> dict:
++        """产品来源原件：真实文件 + source_documents 行（走 add_source + 行内 storage_path/hash 修正）。"""
++        product_id = self._product(f"P-{hashlib.sha256(name.encode()).hexdigest()[:6]}")
++        source_id = self.db.add_source("t4-tenant", product_id, name, "TXT", "p1")
++        file_name = f"{source_id}-{Path(name).name}"
++        target = self.uploads / file_name
++        write_private(target, data)
++        self.db.conn.execute(
++            "UPDATE source_documents SET storage_path=?, sha256=?, processing_status='stored' WHERE id=?",
++            (f"data/uploads/{file_name}", hashlib.sha256(data).hexdigest(), source_id),
++        )
++        self.db.conn.commit()
++        return dict(self.db.conn.execute("SELECT * FROM source_documents WHERE id=?", (source_id,)).fetchone())
++
++    def _knowledge_source(self, name: str = "doc.txt", data: bytes = b"knowledge original") -> dict:
++        result = self.db.import_knowledge_file("t4-tenant", self.admin_id, filename=name, data=data)
++        row = self.db.conn.execute("SELECT * FROM knowledge_sources WHERE id=?", (result["source_id"],)).fetchone()
++        return dict(row)
++
++    def _kb2_source(self, name: str = "batch.txt", data: bytes = b"batch original") -> dict:
++        batch_id = self.db.kb2_create_batch(
++            "t4-tenant", self.admin_id, [{"kind": "file", "filename": name, "data": data}], process_now=False
++        )
++        row = self.db.conn.execute(
++            "SELECT * FROM kb2_sources WHERE tenant_id=? AND batch_id=?", ("t4-tenant", batch_id)
++        ).fetchone()
++        return dict(row)
++
++    def _rfq(self, key: str = "t4-rfq-1") -> str:
++        conversation_id = self.db.create_conversation("t4-tenant")
++        rfq_id, _ = self.db.create_rfq(
++            "t4-tenant", conversation_id, key,
++            {"contact_email": "buyer@example.invalid", "contact_phone": "+49 30 555 0208", "quantity": "1", "region": "DE"},
++            "T4 drill note",
++        )
++        return rfq_id
++
++    def _backup(self, name: str = "bundle") -> Path:
++        out = self.root / name
++        backup(self.db_path, self.uploads, out)
++        return out
++
++
++class BackupCoverageTests(T4TestBase):
++    """备份必须核验三类原件表；缺件/篡改/逃逸/符号链接必须失败。"""
++
++    def test_backup_fails_when_knowledge_original_missing(self) -> None:
++        row = self._knowledge_source()
++        Path(row["storage_path"]).unlink()
++        with self.assertRaises(ValueError):
++            self._backup()
++
++    def test_backup_fails_when_kb2_original_missing(self) -> None:
++        row = self._kb2_source()
++        Path(row["storage_path"]).unlink()
++        with self.assertRaises(ValueError):
++            self._backup()
++
++    def test_backup_fails_when_knowledge_original_tampered(self) -> None:
++        row = self._knowledge_source(data=b"original bytes")
++        Path(row["storage_path"]).write_bytes(b"tampered bytes!")
++        with self.assertRaises(ValueError):
++            self._backup()
++
++    def test_backup_fails_when_knowledge_original_escapes_uploads(self) -> None:
++        row = self._knowledge_source()
++        outside = self.root / "outside" / "escaped.txt"
++        write_private(outside, Path(row["storage_path"]).read_bytes())
++        Path(row["storage_path"]).unlink()
++        self.db.conn.execute(
++            "UPDATE knowledge_sources SET storage_path=? WHERE id=?", (str(outside), row["id"])
++        )
++        self.db.conn.commit()
++        with self.assertRaises(ValueError):
++            self._backup()
++
++    def test_backup_fails_when_source_document_is_symlink(self) -> None:
++        source = self._source_document(name="linked.txt", data=b"real bytes")
++        target = self.uploads / Path(source["storage_path"]).name
++        real = self.uploads / "real-target.bin"
++        write_private(real, b"real bytes")
++        target.unlink()
++        target.symlink_to(real)
++        with self.assertRaises(ValueError):
++            self._backup()
++
++    def test_backup_fails_when_knowledge_original_is_symlink(self) -> None:
++        row = self._knowledge_source()
++        target = Path(row["storage_path"])
++        real = target.parent / "real-knowledge.bin"
++        write_private(real, target.read_bytes())
++        target.unlink()
++        target.symlink_to(real)
++        with self.assertRaises(ValueError):
++            self._backup()
++
++    def test_backup_accepts_nested_phase2_relative_source_path(self) -> None:
++        """T0 登记的旧边界：source_documents 中 data/uploads/phase2/... 嵌套相对路径必须被受理。"""
++        product_id = self._product("P-NESTED")
++        source_id = self.db.add_source("t4-tenant", product_id, "nested.txt", "TXT", "p1")
++        nested = self.uploads / "phase2" / "nested.txt"
++        write_private(nested, b"nested original")
++        self.db.conn.execute(
++            "UPDATE source_documents SET storage_path=?, sha256=?, processing_status='stored' WHERE id=?",
++            ("data/uploads/phase2/nested.txt", hashlib.sha256(b"nested original").hexdigest(), source_id),
++        )
++        self.db.conn.commit()
++        bundle = self._backup()
++        self.assertTrue((bundle / "uploads" / "phase2" / "nested.txt").is_file())
++        restored = self.root / "restored"
++        records, sources = restore_and_verify(bundle, restored)
++        self.assertEqual(sources, 1)
++        self.assertTrue((restored / "uploads" / "phase2" / "nested.txt").is_file())
++
++
++class PersistentStateCoverageTests(T4TestBase):
++    """私有模型配置与连接运行状态必须进入备份并在恢复目录中正确映射。"""
++
++    def test_model_secrets_included_and_remapped_on_restore(self) -> None:
++        secrets_dir = Path(str(self.db_path) + ".model-secrets")
++        EnterpriseModels(self.db_path, None).save(
++            "t4-tenant", "https://api.example.com/v1", "example-model", "sk-t4-fake-key-not-real"
++        )
++        self.assertTrue(secrets_dir.is_dir())
++        self._rfq()
++        bundle = self._backup()
++        self.assertTrue((bundle / "model-secrets").is_dir())
++        shutil.rmtree(secrets_dir)  # 模拟原机丢失私有配置
++        restored = self.root / "restored"
++        records, _sources = restore_and_verify(bundle, restored)
++        self.assertEqual(records, 1)
++        restored_secrets = restored / "app.db.model-secrets"
++        self.assertTrue(restored_secrets.is_dir())
++        self.assertEqual(oct(restored_secrets.stat().st_mode & 0o777), oct(0o700))
++        for item in restored_secrets.rglob("*"):
++            if item.is_file():
++                self.assertEqual(oct(item.stat().st_mode & 0o777), oct(0o600))
++        cfg = EnterpriseModels(restored / "app.db", None).read("t4-tenant")
++        self.assertEqual(cfg["model"], "example-model")
++        self.assertEqual(cfg["base_url"], "https://api.example.com/v1")
++
++    def test_connection_runtime_included_and_restored(self) -> None:
++        runtime = self.root / "connection-runtime" / "0123456789abcdef01234567" / "sessions"
++        write_private(runtime / "state.json", b'{"logged_in": true}')
++        bundle = self._backup()
++        self.assertTrue((bundle / "connection-runtime").is_dir())
++        shutil.rmtree(self.root / "connection-runtime")
++        restored = self.root / "restored"
++        restore_and_verify(bundle, restored)
++        self.assertEqual(
++            (restored / "connection-runtime" / "0123456789abcdef01234567" / "sessions" / "state.json").read_bytes(),
++            b'{"logged_in": true}',
++        )
++
++    def test_roundtrip_counts_cover_all_source_tables(self) -> None:
++        self._source_document()
++        self._knowledge_source()
++        self._kb2_source()
++        self._rfq()
++        bundle = self._backup()
++        restored = self.root / "restored"
++        records, sources = restore_and_verify(bundle, restored)
++        self.assertEqual(records, 1)
++        self.assertEqual(sources, 3)
++
++
++class RestoreMappingTests(T4TestBase):
++    """恢复后绝对路径必须重映射到恢复目录；旧相对路径保持不变；旧格式备份包尽力恢复。"""
++
++    def test_restore_remaps_absolute_paths_and_keeps_legacy_relative(self) -> None:
++        product_id = self._product("P-ABS")
++        source_id = self.db.add_source("t4-tenant", product_id, "abs.bin", "BIN", "p1")
++        absolute_target = self.uploads / "abs.bin"
++        write_private(absolute_target, b"absolute source")
++        legacy_target = self.uploads / "legacy.bin"
++        write_private(legacy_target, b"legacy source")
++        self.db.conn.execute(
++            "UPDATE source_documents SET storage_path=?, sha256=?, processing_status='stored' WHERE id=?",
++            (str(absolute_target), hashlib.sha256(b"absolute source").hexdigest(), source_id),
++        )
++        legacy_id = self.db.add_source("t4-tenant", product_id, "legacy.bin", "BIN", "p1")
++        self.db.conn.execute(
++            "UPDATE source_documents SET storage_path=?, sha256=?, processing_status='stored' WHERE id=?",
++            ("data/uploads/legacy.bin", hashlib.sha256(b"legacy source").hexdigest(), legacy_id),
++        )
++        self.db.conn.commit()
++        knowledge = self._knowledge_source()
++        kb2 = self._kb2_source()
++        self._rfq()
++        bundle = self._backup()
++        shutil.rmtree(self.uploads)  # 模拟原机原件全部丢失
++        restored = self.root / "restored"
++        records, sources = restore_and_verify(bundle, restored)
++        self.assertEqual(records, 1)
++        self.assertEqual(sources, 4)
++        with sqlite3.connect(str(restored / "app.db")) as conn:
++            conn.row_factory = sqlite3.Row
++            abs_row = conn.execute("SELECT storage_path FROM source_documents WHERE id=?", (source_id,)).fetchone()
++            legacy_row = conn.execute("SELECT storage_path FROM source_documents WHERE id=?", (legacy_id,)).fetchone()
++            knowledge_row = conn.execute("SELECT storage_path FROM knowledge_sources WHERE id=?", (knowledge["id"],)).fetchone()
++            kb2_row = conn.execute("SELECT storage_path FROM kb2_sources WHERE id=?", (kb2["id"],)).fetchone()
++        self.assertEqual(abs_row["storage_path"], str(restored / "uploads" / "abs.bin"))
++        self.assertEqual(legacy_row["storage_path"], "data/uploads/legacy.bin")
++        self.assertEqual(knowledge_row["storage_path"], str(restored / "uploads" / Path(knowledge["storage_path"]).name))
++        self.assertEqual(kb2_row["storage_path"], str(restored / "uploads" / "phase2" / Path(kb2["storage_path"]).name))
++        self.assertTrue((restored / "uploads" / "legacy.bin").is_file())
++
++    def test_restore_accepts_legacy_bundle_layout(self) -> None:
++        """旧格式包（无 origin 记录）：按文件名 + 哈希尽力重建知识原件映射。"""
++        knowledge = self._knowledge_source(name="legacy-knowledge.txt", data=b"legacy knowledge bytes")
++        self._rfq()
++        bundle = self.root / "legacy-bundle"
++        bundle.mkdir()
++        with sqlite3.connect(str(self.db_path)) as source, sqlite3.connect(str(bundle / "app.db")) as target:
++            source.backup(target)
++        shutil.copytree(self.uploads, bundle / "uploads")
++        files = {str(p.relative_to(bundle)): digest(p) for p in bundle.rglob("*") if p.is_file()}
++        (bundle / "manifest.json").write_text(
++            json.dumps({"created_at": datetime.now(timezone.utc).isoformat(), "files": files}, ensure_ascii=False),
++            encoding="utf-8",
++        )
++        Path(knowledge["storage_path"]).unlink()
++        restored = self.root / "restored-legacy"
++        records, sources = restore_and_verify(bundle, restored)
++        self.assertEqual(records, 1)
++        self.assertEqual(sources, 1)
++        with sqlite3.connect(str(restored / "app.db")) as conn:
++            row = conn.execute("SELECT storage_path FROM knowledge_sources WHERE id=?", (knowledge["id"],)).fetchone()
++        self.assertEqual(row[0], str(restored / "uploads" / Path(knowledge["storage_path"]).name))
++
++    def test_restore_rejects_bundle_containing_symlink(self) -> None:
++        self._rfq()
++        bundle = self.root / "symlink-bundle"
++        bundle.mkdir()
++        with sqlite3.connect(str(self.db_path)) as source, sqlite3.connect(str(bundle / "app.db")) as target:
++            source.backup(target)
++        (bundle / "uploads").mkdir()
++        real = bundle / "uploads" / "real.bin"
++        real.write_bytes(b"symlinked content")
++        link = bundle / "uploads" / "sneaky.bin"
++        link.symlink_to(real)
++        files = {str(p.relative_to(bundle)): digest(p) for p in bundle.rglob("*") if p.is_file()}
++        (bundle / "manifest.json").write_text(
++            json.dumps({"created_at": datetime.now(timezone.utc).isoformat(), "files": files}, ensure_ascii=False),
++            encoding="utf-8",
++        )
++        with self.assertRaises(ValueError):
++            restore_and_verify(bundle, self.root / "restored-symlink")
++
++    def test_restore_refuses_existing_destination(self) -> None:
++        self._rfq()
++        bundle = self._backup()
++        destination = self.root / "restored-once"
++        restore_and_verify(bundle, destination)
++        with self.assertRaises(ValueError):
++            restore_and_verify(bundle, destination)
++
++
++class SourcePathEscapeHardeningTests(T4TestBase):
++    """Codex 初审复现（docs/evidence/first-launch-t4/independent/path-escape-review.txt）：
++    `data/uploads/../x`、`../x`、`<uploads>/../x` 三种形态曾可解析到上传目录外的文件。
++    修复口径：拒绝 `..` 段 + 解析后必须仍在上传根内；上传根/备份包根为符号链接一律拒绝。
++    `/etc/b2b/b2b.env` 等受限运维配置作为 `ops-config/` 随备份包并提供可恢复映射。"""
++
++    def _outside_file(self, name: str = "outside-secret.txt", data: bytes = b"outside secret") -> Path:
++        outside = self.root / name
++        write_private(outside, data)
++        return outside
++
++    def test_resolve_stored_file_rejects_dotdot_forms(self) -> None:
++        from tools.backup_restore import resolve_stored_file
++
++        outside = self._outside_file()
++        forms = (
++            f"data/uploads/../{outside.name}",
++            f"../{outside.name}",
++            str(self.uploads / ".." / outside.name),
++        )
++        for stored in forms:
++            with self.assertRaises(ValueError, msg=f"未拒绝逃逸路径: {stored}"):
++                resolve_stored_file(stored, self.uploads)
++
++    def test_backup_fails_when_source_row_escapes_with_dotdot(self) -> None:
++        outside = self._outside_file("registry-esc.bin", b"registry escape bytes")
++        product_id = self._product("P-ESC")
++        source_id = self.db.add_source("t4-tenant", product_id, "esc.bin", "BIN", "p1")
++        self.db.conn.execute(
++            "UPDATE source_documents SET storage_path=?, sha256=?, processing_status='stored' WHERE id=?",
++            (f"data/uploads/../{outside.name}", hashlib.sha256(b"registry escape bytes").hexdigest(), source_id),
++        )
++        self.db.conn.commit()
++        with self.assertRaises(ValueError):
++            self._backup()
++
++    def test_backup_rejects_symlinked_uploads_root(self) -> None:
++        real = self.root / "real-uploads"
++        real.mkdir()
++        link = self.root / "uploads-link"
++        link.symlink_to(real, target_is_directory=True)
++        with self.assertRaises(ValueError):
++            backup(self.db_path, link, self.root / "bundle-symlink-root")
++
++    def test_restore_rejects_symlinked_bundle_root(self) -> None:
++        self._rfq()
++        bundle = self._backup()
++        link = self.root / "bundle-link"
++        link.symlink_to(bundle, target_is_directory=True)
++        with self.assertRaises(ValueError):
++            restore_and_verify(link, self.root / "restored-link")
++
++    def test_restore_fails_closed_on_dotdot_registered_path(self) -> None:
++        outside = self._outside_file("restore-escape.bin", b"restore escape bytes")
++        knowledge = self._knowledge_source(name="restore-kb.txt", data=b"kb normal bytes")
++        self._rfq()
++        bundle = self._backup()
++        # 篡改备份包内数据库：登记路径改为 `..` 形态，且正好命中恢复目录之外的同名文件；
++        # 恢复必须 fail-closed（旧实现会沿 `..` 读到恢复目录之外并“成功”通过核验）。
++        conn = sqlite3.connect(str(bundle / "app.db"))
++        conn.execute(
++            "UPDATE knowledge_sources SET storage_path=?, sha256=? WHERE id=?",
++            (
++                f"data/uploads/../../{outside.name}",
++                hashlib.sha256(b"restore escape bytes").hexdigest(),
++                knowledge["id"],
++            ),
++        )
++        conn.commit()
++        conn.close()
++        manifest_file = bundle / "manifest.json"
++        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
++        manifest["files"]["app.db"] = digest(bundle / "app.db")
++        manifest_file.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
++        with self.assertRaises(ValueError):
++            restore_and_verify(bundle, self.root / "restored-escape")
++
++    def test_ops_config_file_included_and_restored(self) -> None:
++        ops = self.root / "b2b.env"
++        write_private(ops, b"B2B_UPLOAD_DIR=/var/lib/b2b/data/uploads\nDEEPSEEK_API_KEY=fake-key-for-drill\n")
++        self._rfq()
++        bundle = self.root / "bundle-ops"
++        backup(self.db_path, self.uploads, bundle, ops_config=ops)
++        packaged = bundle / "ops-config" / "b2b.env"
++        self.assertTrue(packaged.is_file())
++        self.assertEqual(oct(packaged.stat().st_mode & 0o777), oct(0o600))
++        manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
++        self.assertIn("ops-config/b2b.env", manifest["files"])
++        restored = self.root / "restored-ops"
++        restore_and_verify(bundle, restored)
++        self.assertEqual((restored / "ops-config" / "b2b.env").read_bytes(), ops.read_bytes())
++
++    def test_ops_config_rejects_directory_or_symlink(self) -> None:
++        directory = self.root / "cfg-dir"
++        directory.mkdir()
++        with self.assertRaises(ValueError):
++            backup(self.db_path, self.uploads, self.root / "bundle-dir-cfg", ops_config=directory)
++        real = self.root / "real-ops.env"
++        write_private(real, b"X=1\n")
++        link = self.root / "link-ops.env"
++        link.symlink_to(real)
++        with self.assertRaises(ValueError):
++            backup(self.db_path, self.uploads, self.root / "bundle-link-cfg", ops_config=link)
++
++
++class UploadDirConfigTests(T4TestBase):
++    """上传目录持久配置：新写入与控制目录一致，旧相对路径迁移后按持久目录解析。"""
++
++    def test_configured_upload_dir_receives_new_source_files(self) -> None:
++        persist = self.root / "persist" / "uploads"
++        os.environ["B2B_UPLOAD_DIR"] = str(persist)
++        product_id = self._product("P-ENV")
++        source_id = self.db.add_source("t4-tenant", product_id, "env.bin", "BIN", "p1", content=b"persisted bytes")
++        row = self.db.conn.execute("SELECT * FROM source_documents WHERE id=?", (source_id,)).fetchone()
++        stored = Path(row["storage_path"])
++        self.assertTrue(stored.is_absolute(), msg=f"配置持久目录后应为绝对路径: {stored}")
++        self.assertEqual(stored, persist / stored.name)
++        self.assertEqual(stored.read_bytes(), b"persisted bytes")
++        from app import resolve_source_storage_path
++
++        self.assertEqual(resolve_source_storage_path(row["storage_path"]), stored)
++
++    def test_legacy_relative_path_resolves_to_configured_upload_dir(self) -> None:
++        from app import resolve_source_storage_path
++
++        persist = self.root / "persist2" / "uploads"
++        os.environ["B2B_UPLOAD_DIR"] = str(persist)
++        target = persist / "legacy.bin"
++        write_private(target, b"legacy persisted")
++        self.assertEqual(
++            resolve_source_storage_path("data/uploads/legacy.bin"),
++            target,
++        )
++
++    def test_knowledge_import_lands_in_configured_upload_dir(self) -> None:
++        persist = self.root / "persist3" / "uploads"
++        os.environ["B2B_UPLOAD_DIR"] = str(persist)
++        row = self._knowledge_source(name="env-knowledge.txt")
++        stored = Path(row["storage_path"])
++        self.assertEqual(stored.parent, persist)
++        self.assertTrue(stored.is_file())
++
++    def test_resolve_stored_file_rejects_escape_and_symlink(self) -> None:
++        from tools.backup_restore import resolve_stored_file
++
++        outside = self.root / "outside2" / "x.bin"
++        write_private(outside, b"outside")
++        with self.assertRaises(ValueError):
++            resolve_stored_file(str(outside), self.uploads)
++        real = self.uploads / "real2.bin"
++        write_private(real, b"real")
++        link = self.uploads / "link2.bin"
++        link.symlink_to(real)
++        with self.assertRaises(ValueError):
++            resolve_stored_file("data/uploads/link2.bin", self.uploads)
++        self.assertEqual(resolve_stored_file("data/uploads/real2.bin", self.uploads), real)
++
++
++class CliRoundtripTests(T4TestBase):
++    """命令行备份/恢复在“持久上传目录 + 绝对路径登记”的部署形态下可整体复跑（锁回归）。
++
++    该用例在修补前代码上运行会失败（旧工具只接受 data/uploads 单层相对路径，遇到知识/
++    批次的绝对路径登记直接拒绝），属对 T0 登记缺口的端到端判别。
++    """
++
++    def test_cli_backup_and_restore_roundtrip(self) -> None:
++        repo_root = Path(__file__).resolve().parent
++        persist = self.root / "persist-cli" / "uploads"
++        os.environ["B2B_UPLOAD_DIR"] = str(persist)
++        product_id = self._product("P-CLI")
++        source_id = self.db.add_source("t4-tenant", product_id, "cli.bin", "BIN", "p1", content=b"cli source bytes")
++        source_row = self.db.conn.execute("SELECT storage_path FROM source_documents WHERE id=?", (source_id,)).fetchone()
++        self.assertTrue(Path(source_row["storage_path"]).is_absolute(), msg="配置持久目录后来源原件应登记绝对路径")
++        self._knowledge_source()
++        self._kb2_source()
++        self._rfq()
++        bundle = self.root / "cli-backup"
++        restored = self.root / "cli-restored"
++        backup_run = subprocess.run(
++            [sys.executable, str(repo_root / "tools" / "backup_restore.py"), "backup",
++             "--db", str(self.db_path), "--uploads", str(persist), "--out", str(bundle)],
++            cwd=str(repo_root), capture_output=True, text=True, timeout=120,
++        )
++        self.assertEqual(backup_run.returncode, 0, msg=backup_run.stdout + backup_run.stderr)
++        self.assertIn("原件已核验", backup_run.stdout)
++        restore_run = subprocess.run(
++            [sys.executable, str(repo_root / "tools" / "backup_restore.py"), "restore-check",
++             "--bundle", str(bundle), "--out", str(restored)],
++            cwd=str(repo_root), capture_output=True, text=True, timeout=120,
++        )
++        self.assertEqual(restore_run.returncode, 0, msg=restore_run.stdout + restore_run.stderr)
++        self.assertTrue((restored / "uploads" / Path(source_row["storage_path"]).name).is_file())
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git "a/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/test_first_launch_t4_deploy.py" "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/test_first_launch_t4_deploy.py"
+new file mode 100644
+index 0000000..934c177
+--- /dev/null
++++ "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/test_first_launch_t4_deploy.py"	
+@@ -0,0 +1,569 @@
++# -*- coding: utf-8 -*-
++"""T4 部署准备修复轮：备份停写脚本 / HTTPS 引导配置 / systemd 单元 / 发布包工具的判别性测试。
++
++覆盖（先红后绿；见 docs/首次上线-T4执行方案.md 修复轮记录）：
++- deploy/backup_snapshot.sh：备份以 root 运行、产物 root 私有；停止前保存原活跃状态，
++  失败也经 trap 恢复；只停/启“本库 connection-runtime/ 登记账号”的受管桥容器，
++  不触碰其他容器；保留策略 glob 与实际时间戳目录名匹配；运维配置 /etc/b2b/b2b.env 进包。
++- deploy/systemd：备份单元读取 /etc/b2b/b2b.env；应用单元保持既有加固与非 root 运行。
++- deploy/nginx-*.conf.example：HTTP-only 引导 → nginx -t → certbot → 443 最终配置；
++  默认站点关闭连接（444）且不代理应用；精确 server_name 防空 Host 反射；
++  访问日志不记录 query/凭据（b2b_nocreds 格式 + /rfq/ 关闭访问日志）。
++- deploy/make_release.py：从当前源码白名单导出发布包 + 逐文件 sha256 清单；
++  不包含业务 data/、密钥、.git、测试与历史资料原件。
++
++边界（如实）：systemctl/docker 在测试中用 PATH 假件替换——只能验证脚本逻辑与状态恢复；
++真实 Linux/systemd/docker 与 HTTPS 验收仍须在服务器（Workbench）按 deploy/README.md 执行。
++"""
++from __future__ import annotations
++
++import hashlib
++import os
++import re
++import sqlite3
++import subprocess
++import sys
++import tarfile
++import tempfile
++import time
++import unittest
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parent
++SCRIPT = REPO / "deploy" / "backup_snapshot.sh"
++FINAL_NGINX = REPO / "deploy" / "nginx-b2b.conf.example"
++BOOTSTRAP_NGINX = REPO / "deploy" / "nginx-b2b-http-bootstrap.conf.example"
++
++SYSTEMCTL_SHIM = """#!/bin/sh
++# 测试假件：FAKE_STATE_DIR/units/<unit>.active 存在 == 服务活动。
++cmd="$1"
++shift
++dir="${FAKE_STATE_DIR:-/tmp}/units"
++mkdir -p "$dir"
++unit=""
++quiet=0
++for a in "$@"; do
++  case "$a" in
++    --quiet) quiet=1 ;;
++    -*) ;;
++    *) unit="$a" ;;
++  esac
++done
++log="${FAKE_LOG:-/dev/null}"
++case "$cmd" in
++  is-active)
++    if [ -f "$dir/$unit.active" ]; then
++      [ "$quiet" = "1" ] || echo active
++      exit 0
++    fi
++    [ "$quiet" = "1" ] || echo inactive
++    exit 3 ;;
++  stop)
++    echo "systemctl stop $unit" >> "$log"
++    rm -f "$dir/$unit.active"
++    exit 0 ;;
++  start)
++    echo "systemctl start $unit" >> "$log"
++    : > "$dir/$unit.active"
++    exit 0 ;;
++  *) exit 0 ;;
++esac
++"""
++
++DOCKER_SHIM = """#!/bin/sh
++# 测试假件：FAKE_STATE_DIR/containers/<name>.exists / .running 表示容器状态。
++cmd="$1"
++shift
++dir="${FAKE_STATE_DIR:-/tmp}/containers"
++mkdir -p "$dir"
++log="${FAKE_LOG:-/dev/null}"
++case "$cmd" in
++  info) exit 0 ;;
++  inspect)
++    name=""
++    for a in "$@"; do
++      case "$a" in -*) ;; *) name="$a" ;; esac
++    done
++    if [ -f "$dir/$name.exists" ]; then
++      if [ -f "$dir/$name.running" ]; then echo true; else echo false; fi
++      exit 0
++    fi
++    echo "Error: No such object: $name" >&2
++    exit 1 ;;
++  stop)
++    echo "docker stop $1" >> "$log"
++    rm -f "$dir/$1.running"
++    exit 0 ;;
++  start)
++    echo "docker start $1" >> "$log"
++    : > "$dir/$1.running"
++    exit 0 ;;
++  *) exit 0 ;;
++esac
++"""
++
++BACKUP_SHIM = '''# -*- coding: utf-8 -*-
++"""测试假件：记录调用顺序；可注入失败；成功路径委托给真实 tools/backup_restore.py。"""
++import os
++import runpy
++import sys
++
++
++def mark(line):
++    path = os.environ.get("FAKE_LOG", "")
++    if path:
++        with open(path, "a", encoding="utf-8") as handle:
++            handle.write(line + "\\n")
++
++
++if os.environ.get("T4_FAKE_BACKUP_FAIL") == "1":
++    mark("backup-fail")
++    sys.exit(7)
++mark("backup-start")
++runpy.run_path(os.environ["T4_REAL_BACKUP_TOOL"], run_name="__main__")
++mark("backup-ok")
++'''
++
++
++def set_mtime(path: Path, days_ago: float) -> None:
++    stamp = time.time() - days_ago * 86400
++    os.utime(path, (stamp, stamp))
++
++
++def tar_read(tar: tarfile.TarFile, name: str) -> bytes:
++    stream = tar.extractfile(name)
++    assert stream is not None
++    return stream.read()
++
++
++def find_bundle_dirs(root: Path) -> list[Path]:
++    if not root.is_dir():
++        return []
++    return sorted(p for p in root.iterdir() if p.is_dir() and re.fullmatch(r"\d{8}-\d{6}", p.name))
++
++
++class DeployScriptTestBase(unittest.TestCase):
++    """以 PATH 假件驱动真实 deploy/backup_snapshot.sh（脚本逻辑真执行，外部命令假件）。"""
++
++    def setUp(self) -> None:
++        self._tmp = tempfile.TemporaryDirectory(prefix="t4-deploy-")
++        self.root = Path(self._tmp.name)
++        self.state = self.root / "state"
++        (self.state / "units").mkdir(parents=True)
++        (self.state / "containers").mkdir(parents=True)
++        self.log = self.root / "calls.log"
++        self.shims = self.root / "shims"
++        self.shims.mkdir()
++        self._write_shim("systemctl", SYSTEMCTL_SHIM)
++        self._write_shim("docker", DOCKER_SHIM)
++        self.app_dir = self.root / "app"
++        (self.app_dir / "tools").mkdir(parents=True)
++        (self.app_dir / "tools" / "backup_restore.py").write_text(BACKUP_SHIM, encoding="utf-8")
++        self.data_dir = self.root / "data"
++        self.uploads = self.data_dir / "uploads"
++        self.uploads.mkdir(parents=True)
++        self.db_path = self.data_dir / "app.db"
++        sqlite3.connect(str(self.db_path)).close()
++        self.backup_root = self.root / "backups"
++        self.env_file = self.root / "b2b.env"
++        self.env_file.write_text("B2B_UPLOAD_DIR=/var/lib/b2b/data/uploads\n", encoding="utf-8")
++        os.chmod(self.env_file, 0o600)
++
++    def tearDown(self) -> None:
++        self._tmp.cleanup()
++
++    # ── 夹具 ──────────────────────────────────────────────────────────────
++    def _write_shim(self, name: str, content: str) -> None:
++        path = self.shims / name
++        path.write_text(content, encoding="utf-8")
++        os.chmod(path, 0o755)
++
++    def activate_app(self) -> None:
++        (self.state / "units" / "b2b-app.active").write_text("", encoding="utf-8")
++
++    def add_container(self, name: str, running: bool) -> None:
++        (self.state / "containers" / f"{name}.exists").write_text("", encoding="utf-8")
++        if running:
++            (self.state / "containers" / f"{name}.running").write_text("", encoding="utf-8")
++
++    def add_bridge_account(self, account: str) -> str:
++        (self.data_dir / "connection-runtime" / account).mkdir(parents=True, exist_ok=True)
++        return f"b2b-account-{account}"
++
++    def run_script(self, *, with_docker: bool = True, fail_backup: bool = False) -> subprocess.CompletedProcess:
++        env = {
++            "PATH": f"{self.shims}:/usr/bin:/bin",
++            "FAKE_STATE_DIR": str(self.state),
++            "FAKE_LOG": str(self.log),
++            "T4_REAL_BACKUP_TOOL": str(REPO / "tools" / "backup_restore.py"),
++            "B2B_APP_UNIT": "b2b-app",
++            "B2B_APP_DIR": str(self.app_dir),
++            "B2B_PY": sys.executable,
++            "B2B_DATA_DIR": str(self.data_dir),
++            "B2B_BACKUP_ROOT": str(self.backup_root),
++            "B2B_BACKUP_KEEP_DAYS": "14",
++            "B2B_ENV_FILE": str(self.env_file),
++        }
++        if not with_docker:
++            (self.shims / "docker").unlink()
++        if fail_backup:
++            env["T4_FAKE_BACKUP_FAIL"] = "1"
++        return subprocess.run(
++            ["/bin/sh", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=120,
++        )
++
++    def log_lines(self) -> list[str]:
++        if not self.log.exists():
++            return []
++        return self.log.read_text(encoding="utf-8").splitlines()
++
++    def assert_order(self, lines: list[str], expected: list[str]) -> None:
++        positions = []
++        for item in expected:
++            self.assertIn(item, lines, msg=f"缺少调用记录: {item}（实际: {lines}）")
++            positions.append(lines.index(item))
++        self.assertEqual(positions, sorted(positions), msg=f"调用顺序不符: {lines}")
++
++
++class BackupScriptBehaviorTests(DeployScriptTestBase):
++    def test_script_parses_in_sh(self) -> None:
++        result = subprocess.run(["/bin/sh", "-n", str(SCRIPT)], capture_output=True, text=True)
++        self.assertEqual(result.returncode, 0, result.stderr)
++
++    def test_success_flow_saves_state_and_writes_root_private_bundle(self) -> None:
++        self.activate_app()
++        account_a = "0123456789abcdef01234567"
++        name_a = self.add_bridge_account(account_a)
++        self.add_container(name_a, running=True)
++        name_b = self.add_bridge_account("111111111111111111111111")
++        self.add_container(name_b, running=False)
++        name_other_account = "b2b-account-222222222222222222222222"  # 未在本库登记
++        self.add_container(name_other_account, running=True)
++        self.add_container("unrelated-service", running=True)
++        self.add_bridge_account("not-a-valid-account")  # 非法目录名：不得产生候选
++        self.backup_root.mkdir(parents=True)
++        os.chmod(self.backup_root, 0o755)  # 预置过宽权限：脚本必须收紧为 0700
++
++        result = self.run_script()
++        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++        self.assertEqual(oct(self.backup_root.stat().st_mode & 0o777), oct(0o700))
++        bundles = find_bundle_dirs(self.backup_root)
++        self.assertEqual(len(bundles), 1, msg=f"应恰好产生一个时间戳备份目录: {bundles}")
++        bundle = bundles[0]
++        self.assertEqual(oct(bundle.stat().st_mode & 0o777), oct(0o700))
++        self.assertEqual(oct((bundle / "manifest.json").stat().st_mode & 0o777), oct(0o600))
++        self.assertTrue((bundle / "ops-config" / "b2b.env").is_file(), "运维配置必须进包")
++        self.assert_order(self.log_lines(), [
++            "systemctl stop b2b-app",
++            f"docker stop {name_a}",
++            "backup-start",
++            "backup-ok",
++            f"docker start {name_a}",
++            "systemctl start b2b-app",
++        ])
++        lines = self.log_lines()
++        self.assertNotIn(f"docker stop {name_b}", lines, "原本未运行的容器不得被停")
++        self.assertNotIn(f"docker start {name_b}", lines, "不得启动原本未运行的容器")
++        self.assertNotIn(f"docker stop {name_other_account}", lines, "未登记账号的容器不得触碰")
++        self.assertNotIn("docker stop unrelated-service", lines, "无关容器不得触碰")
++        # 状态恢复：应用回到活动、原本运行的桥回到运行
++        self.assertTrue((self.state / "units" / "b2b-app.active").exists())
++        self.assertTrue((self.state / "containers" / f"{name_a}.running").exists())
++
++    def test_failed_backup_restores_original_state_and_skips_cleanup(self) -> None:
++        self.activate_app()
++        name_a = self.add_bridge_account("0123456789abcdef01234567")
++        self.add_container(name_a, running=True)
++        self.backup_root.mkdir(parents=True)
++        aged = self.backup_root / "20200101-000000"
++        aged.mkdir()
++        set_mtime(aged, 30)
++
++        result = self.run_script(fail_backup=True)
++        self.assertNotEqual(result.returncode, 0, "注入的备份失败必须让脚本非零退出")
++        lines = self.log_lines()
++        self.assertIn("backup-fail", lines)
++        self.assertIn(f"docker start {name_a}", lines)
++        self.assertIn("systemctl start b2b-app", lines)
++        self.assertTrue((self.state / "units" / "b2b-app.active").exists(), "应用必须恢复为活动")
++        self.assertTrue((self.state / "containers" / f"{name_a}.running").exists(), "桥必须恢复运行")
++        self.assertTrue(aged.exists(), "备份失败时不得执行保留清理")
++        remaining = [p for p in find_bundle_dirs(self.backup_root) if p != aged]
++        self.assertEqual(remaining, [], "失败时不得留下半成品时间戳目录")
++
++    def test_success_with_inactive_app_keeps_it_stopped(self) -> None:
++        result = self.run_script()
++        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++        lines = self.log_lines()
++        self.assertNotIn("systemctl stop b2b-app", lines)
++        self.assertNotIn("systemctl start b2b-app", lines)
++        self.assertEqual(len(find_bundle_dirs(self.backup_root)), 1)
++
++    def test_failed_backup_with_inactive_app_starts_nothing(self) -> None:
++        result = self.run_script(fail_backup=True)
++        self.assertNotEqual(result.returncode, 0)
++        lines = self.log_lines()
++        self.assertNotIn("systemctl start b2b-app", lines)
++        self.assertNotIn("docker start", " ".join(lines))
++
++    def test_docker_unavailable_still_backs_up_with_warning(self) -> None:
++        self.activate_app()
++        self.add_bridge_account("0123456789abcdef01234567")
++        result = self.run_script(with_docker=False)
++        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++        self.assertIn("Docker", result.stderr)
++        lines = self.log_lines()
++        self.assertFalse(any(line.startswith("docker ") for line in lines))
++        self.assertEqual(len(find_bundle_dirs(self.backup_root)), 1)
++
++    def test_missing_env_file_warns_and_backs_up_without_ops_config(self) -> None:
++        self.activate_app()
++        self.env_file.unlink()
++        result = self.run_script()
++        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++        bundles = find_bundle_dirs(self.backup_root)
++        self.assertEqual(len(bundles), 1)
++        self.assertFalse((bundles[0] / "ops-config").exists())
++        self.assertIn("b2b.env", result.stderr)
++
++    def test_retention_prunes_only_aged_stamp_dirs(self) -> None:
++        self.activate_app()
++        self.backup_root.mkdir(parents=True)
++        aged = self.backup_root / "20200101-000000"
++        aged.mkdir()
++        recent = self.backup_root / "20261013-000000"
++        recent.mkdir()
++        manual = self.backup_root / "manual-1"
++        manual.mkdir()
++        note = self.backup_root / "notes.txt"
++        note.write_text("keep me", encoding="utf-8")
++        set_mtime(aged, 30)
++        set_mtime(recent, 0)
++        set_mtime(manual, 30)
++        set_mtime(note, 30)
++
++        result = self.run_script()
++        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++        self.assertFalse(aged.exists(), "超过保留天数的“YYYYmmdd-HHMMSS”目录必须被清理")
++        self.assertTrue(recent.exists(), "未超过保留天数的目录必须保留")
++        self.assertTrue(manual.exists(), "非本工具命名的目录不得清理")
++        self.assertTrue(note.exists(), "非目录文件不得清理")
++        self.assertEqual(len(find_bundle_dirs(self.backup_root)), 2)  # recent + 本次新备份
++
++
++class SystemdUnitTests(unittest.TestCase):
++    def test_backup_service_reads_env_file_and_runs_script(self) -> None:
++        unit = (REPO / "deploy" / "systemd" / "b2b-backup.service").read_text(encoding="utf-8")
++        self.assertIn("EnvironmentFile=/etc/b2b/b2b.env", unit)
++        self.assertIn("ExecStart=/opt/b2b/app/deploy/backup_snapshot.sh", unit)
++        self.assertIn("User=root", unit)
++
++    def test_app_service_keeps_hardening_and_loopback(self) -> None:
++        unit = (REPO / "deploy" / "systemd" / "b2b-app.service").read_text(encoding="utf-8")
++        self.assertIn("--host 127.0.0.1", unit)
++        self.assertIn("ReadWritePaths=/var/lib/b2b", unit)
++        self.assertNotIn("docker", unit.lower())
++
++
++class NginxConfigTests(unittest.TestCase):
++    def test_final_config_host_restriction_and_default_site(self) -> None:
++        conf = FINAL_NGINX.read_text(encoding="utf-8")
++        self.assertIn("server_name pilot.alpsaga.tech;", conf)
++        self.assertIn("listen 80 default_server;", conf)
++        self.assertIn("listen 443 ssl default_server;", conf)
++        self.assertIn("ssl_reject_handshake on;", conf)
++        blocks = conf.split("server {")
++        self.assertGreaterEqual(len(blocks), 4, "应为 默认站点 + 80 跳转 + 443 站点 三段")
++        default_block = blocks[1]
++        self.assertIn("return 444;", default_block)
++        self.assertNotIn("proxy_pass", default_block, "默认站点不得代理应用")
++        named_block = blocks[-1]
++        self.assertIn("proxy_pass http://127.0.0.1:8000;", named_block)
++        self.assertIn("ssl_certificate", named_block)
++        self.assertIn("client_max_body_size 12m;", named_block)
++
++    def test_final_config_redirect_is_exact_host(self) -> None:
++        conf = FINAL_NGINX.read_text(encoding="utf-8")
++        self.assertIn("return 301 https://pilot.alpsaga.tech$request_uri;", conf)
++
++    def test_final_config_access_log_omits_query_and_token_paths(self) -> None:
++        conf = FINAL_NGINX.read_text(encoding="utf-8")
++        log_lines = [line for line in conf.splitlines() if line.startswith("log_format")]
++        self.assertEqual(len(log_lines), 1, "必须定义唯一的 b2b_nocreds 日志格式")
++        log_line = log_lines[0]
++        self.assertIn("$uri", log_line)
++        self.assertNotIn("$request_uri", log_line)
++        self.assertNotIn('"$request"', log_line)
++        self.assertNotIn("referer", log_line, "Referer 可能带 query，不得记录")
++        index = conf.index("location ^~ /rfq/")
++        self.assertIn("access_log off;", conf[index:index + 400], "/rfq/ 凭据路径必须关闭访问日志")
++        self.assertIn("error_log", conf)
++        self.assertIn("crit", conf, "错误日志收敛到 crit，避免请求行（含 URI）落盘")
++
++    def test_bootstrap_config_is_http_only_and_does_not_expose_app(self) -> None:
++        conf = BOOTSTRAP_NGINX.read_text(encoding="utf-8")
++        self.assertIn("server_name pilot.alpsaga.tech;", conf)
++        self.assertIn("listen 80 default_server;", conf)
++        self.assertIn("return 444;", conf)
++        self.assertIn(".well-known/acme-challenge/", conf)
++        self.assertIn("root /var/www/b2b-acme;", conf)
++        self.assertIn("return 404;", conf)
++        self.assertNotIn("listen 443", conf, "引导阶段只开 80（先签证再上 443）")
++        self.assertNotIn("proxy_pass", conf, "引导阶段不得暴露应用")
++
++    def test_readme_documents_bootstrap_sequence(self) -> None:
++        readme = (REPO / "deploy" / "README.md").read_text(encoding="utf-8")
++        for token in ("nginx-b2b-http-bootstrap.conf.example", "certbot", "pilot.alpsaga.tech",
++                      "nginx-b2b.conf.example", "make_release.py"):
++            self.assertIn(token, readme, msg=f"README 缺少步骤要素: {token}")
++
++
++class ReleasePackageTests(unittest.TestCase):
++    """发布包：从当前源码白名单导出 + sha256 清单；不含 data/密钥/.git/测试与历史资料。"""
++
++    @classmethod
++    def setUpClass(cls) -> None:
++        cls._tmp = tempfile.TemporaryDirectory(prefix="t4-release-")
++        cls.out = Path(cls._tmp.name) / "b2b-release-test.tar.gz"
++        cls.build = subprocess.run(
++            [sys.executable, str(REPO / "deploy" / "make_release.py"),
++             "--source", str(REPO), "--out", str(cls.out), "--label", "t4-test"],
++            capture_output=True, text=True, timeout=300, cwd=str(REPO),
++        )
++        cls.package_root = "b2b-release-t4-test"
++        cls.file_hashes: dict[str, str] = {}
++        cls.names: list[str] = []
++        if cls.out.is_file():
++            with tarfile.open(cls.out, "r:gz") as tar:
++                for member in tar.getmembers():
++                    cls.names.append(member.name)
++                    if member.isfile():
++                        cls.file_hashes[member.name] = hashlib.sha256(tar_read(tar, member.name)).hexdigest()
++
++    @classmethod
++    def tearDownClass(cls) -> None:
++        cls._tmp.cleanup()
++
++    def test_build_succeeds_and_writes_package_checksum(self) -> None:
++        self.assertEqual(self.build.returncode, 0, self.build.stdout + self.build.stderr)
++        self.assertTrue(self.out.is_file())
++        checksum_file = Path(str(self.out) + ".sha256")
++        self.assertTrue(checksum_file.is_file())
++        recorded = checksum_file.read_text(encoding="utf-8").split()
++        actual = hashlib.sha256(self.out.read_bytes()).hexdigest()
++        self.assertEqual(recorded[0], actual)
++
++    def test_package_contains_runtime_assets_and_templates(self) -> None:
++        required = [
++            f"{self.package_root}/app.py",
++            f"{self.package_root}/reference-client/app.js",
++            f"{self.package_root}/static/knowledge-phase2.js",
++            f"{self.package_root}/assets/brand.png",
++            f"{self.package_root}/requirements-knowledge.txt",
++            f"{self.package_root}/deploy/backup_snapshot.sh",
++            f"{self.package_root}/deploy/make_release.py",
++            f"{self.package_root}/deploy/nginx-b2b.conf.example",
++            f"{self.package_root}/deploy/systemd/b2b-app.service",
++            f"{self.package_root}/tools/backup_restore.py",
++            f"{self.package_root}/tools/create_admin.py",
++            f"{self.package_root}/tools/pilot_checks/check_first_launch_t4.py",
++            f"{self.package_root}/RELEASE-MANIFEST.json",
++            f"{self.package_root}/RELEASE-MANIFEST.sha256",
++        ]
++        for name in required:
++            self.assertIn(name, self.names, msg=f"发布包缺少: {name}")
++
++    def test_package_excludes_data_secrets_git_tests_and_history(self) -> None:
++        for name in self.names:
++            segments = name.split("/")
++            basename = segments[-1]
++            self.assertNotIn("data", segments, msg=f"不得打包业务数据: {name}")
++            self.assertNotIn(".git", segments, msg=f"不得打包 .git: {name}")
++            self.assertNotIn("docs", segments, msg=f"不得打包 docs（含 evidence/历史）：{name}")
++            self.assertNotIn("design", segments)
++            self.assertNotIn("fixtures", segments, msg=f"不得打包演示夹具: {name}")
++            self.assertNotIn("B2B_Pump_Demo_Research", segments)
++            self.assertNotIn("__pycache__", segments)
++            self.assertFalse(basename.startswith("test_"), msg=f"不得打包测试文件: {name}")
++            self.assertFalse(basename.endswith((".pyc", ".db", ".log", ".env")), msg=f"不得打包: {name}")
++
++    def test_manifest_hashes_match_every_file(self) -> None:
++        import json
++
++        manifest_name = f"{self.package_root}/RELEASE-MANIFEST.json"
++        with tarfile.open(self.out, "r:gz") as tar:
++            manifest = json.loads(tar_read(tar, manifest_name).decode("utf-8"))
++        files = manifest["files"]
++        actual_files = {
++            name[len(self.package_root) + 1:] for name in self.file_hashes
++            if name.startswith(self.package_root + "/")
++        }
++        self.assertEqual(set(files), actual_files - {"RELEASE-MANIFEST.json", "RELEASE-MANIFEST.sha256"})
++        for rel, info in files.items():
++            self.assertEqual(
++                info["sha256"], self.file_hashes[f"{self.package_root}/{rel}"],
++                msg=f"清单哈希与实际内容不一致: {rel}",
++            )
++        self.assertEqual(manifest["label"], "t4-test")
++        head = manifest["source_head"]
++        self.assertTrue(head is None or re.fullmatch(r"[0-9a-f]{40}", head), msg=f"source_head 形态异常: {head!r}")
++        self.assertIn(manifest["source_dirty"], (True, False, None))
++
++    def test_manifest_sha256sum_file_verifies_all_files(self) -> None:
++        sums_name = f"{self.package_root}/RELEASE-MANIFEST.sha256"
++        with tarfile.open(self.out, "r:gz") as tar:
++            content = tar_read(tar, sums_name).decode("utf-8")
++        entries = {}
++        for line in content.splitlines():
++            line = line.strip()
++            if not line:
++                continue
++            digest, path = line.split("  ", 1)
++            entries[path] = digest
++        expected = {
++            name[len(self.package_root) + 1:] for name in self.file_hashes
++            if name.startswith(self.package_root + "/")
++        } - {"RELEASE-MANIFEST.sha256"}
++        self.assertEqual(set(entries), expected)
++        for rel, digest in entries.items():
++            self.assertEqual(digest, self.file_hashes[f"{self.package_root}/{rel}"])
++
++    def test_extracted_package_imports_and_deploy_script_parses(self) -> None:
++        extract_root = Path(self._tmp.name) / "extract"
++        with tarfile.open(self.out, "r:gz") as tar:
++            tar.extractall(extract_root)
++        package = extract_root / self.package_root
++        env = {
++            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
++            "PYTHONDONTWRITEBYTECODE": "1",
++            "PYTHONPATH": str(package),
++        }
++        result = subprocess.run(
++            [sys.executable, "-c",
++             "import app; import tools.backup_restore; import tools.create_admin; "
++             "import channel_runtime; import enterprise_knowledge_phase2_ui; print('IMPORT-OK')"],
++            cwd=str(package), env=env, capture_output=True, text=True, timeout=180,
++        )
++        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++        self.assertIn("IMPORT-OK", result.stdout)
++        syntax = subprocess.run(
++            ["/bin/sh", "-n", str(package / "deploy" / "backup_snapshot.sh")],
++            capture_output=True, text=True,
++        )
++        self.assertEqual(syntax.returncode, 0, syntax.stderr)
++
++    def test_build_fails_closed_on_incomplete_source(self) -> None:
++        empty = Path(self._tmp.name) / "empty-source"
++        empty.mkdir(exist_ok=True)
++        result = subprocess.run(
++            [sys.executable, str(REPO / "deploy" / "make_release.py"),
++             "--source", str(empty), "--out", str(Path(self._tmp.name) / "empty.tar.gz"), "--label", "empty"],
++            capture_output=True, text=True, timeout=120, cwd=str(REPO),
++        )
++        self.assertNotEqual(result.returncode, 0)
++        output = result.stdout + result.stderr
++        self.assertIn("app.py", output)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git "a/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/README.md" "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/README.md"
+new file mode 100644
+index 0000000..4274ed6
+--- /dev/null
++++ "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/README.md"	
+@@ -0,0 +1,253 @@
++# 首次邀请测试上线：最小 Linux 单机部署配置（T4）
++
++日期：2026-10-13（修复轮）。制作：本地 Hermes；独立验收由 Codex 复跑。状态：**配置与工具就绪；服务器已由用户购买并核对到位，业务程序尚未部署；本目录的 systemd/nginx/脚本未在真实 Linux 上执行过（制作环境为 macOS），首装必须在服务器（Workbench）上按第 3 节第 ⑩ 步逐项验收。本目录不构成上线放行。**
++
++实际资源（用户提供、以 Workbench 为准；Codex 本机 SSH 超时未独立复验）：
++
++- 服务器：阿里云香港轻量应用服务器，Ubuntu 24.04.2 x86_64，2 核 / 4GB 内存 / 50GB 磁盘；admin 有 sudo；Python/Git/curl/venv/Docker 已验证；TCP 22/80/443 已开放。
++- 域名：`pilot.alpsaga.tech` 已解析到 `47.243.192.209`；HTTPS 证书在部署时用 certbot 申请（见第 3 节 ⑨）。
++- 跨境独立备份：尚无账号与凭据——R2 私有桶 + age 加密方案见 [offsite-backup-r2-plan.md](offsite-backup-r2-plan.md)（未创建、未购买、未上传）。
++
++适用形态（对照 [T0 清单](../docs/首次上线-T0范围与现状核对.md) 与 [T4 执行方案](../docs/首次上线-T4执行方案.md)）：Python 3 + SQLite 单体应用，单实例、本机回环端口 + 反向 HTTPS 代理；不引入微服务、数据库迁移框架或新界面。首次真实数据进入部署环境前，必须先完成一次备份/恢复演练（见第 6 节）。
++
++修复轮变更（2026-10-13，Codex 初审实际阻断）：
++
++- `deploy/backup_snapshot.sh` 重写：以 root 运行、产物 root 私有；停止前保存原活跃状态，**失败也经 trap 恢复**（只恢复原本活跃的应用/受管桥，不启动原本未运行的东西、不触碰其他容器）；受管桥按“本库 `connection-runtime/` 登记账号”自动停写；保留策略 glob 与实际时间戳目录名匹配；运维配置 `/etc/b2b/b2b.env` 进包。
++- 首次 HTTPS 引导（HTTP-only 配置 → `nginx -t` → certbot webroot → 443 最终配置）；精确 `server_name` + 默认站点 444（防任意 Host 反射、默认站点不暴露程序）；nginx 日志不记录买方凭据/query（详见 ⑨）。
++- 新增 `deploy/make_release.py`：从当前源码白名单导出发布包 + sha256 版本清单（新安装/升级不再 `git clone`）。
++- `tools/backup_restore.py`：修复 `..` 路径逃逸（三种形态）与上传根/备份包根符号链接拒绝；`--ops-config` 支持。
++
++## 1. 目标布局
++
++```text
++/opt/b2b/
++  app -> releases/b2b-release-<label>/   # 当前版本（软链切换，回滚=换回旧目录）
++  releases/b2b-release-<label>/          # 发布包解包内容（不含 data/、密钥、.git；由 make_release.py 生成）
++  venv/                                  # 必建：单元以 /opt/b2b/venv/bin/python3 启动
++/var/lib/b2b/
++  data/app.db                            # 业务库（--db 指向此处；库权限 0600）
++  data/uploads/                          # 全部原件（B2B_UPLOAD_DIR 指向此处）
++  data/app.db.model-secrets/             # 企业自定义模型私有配置（随库名；0700/0600）
++  data/connection-runtime/<账号>/sessions/   # WhatsApp 个人版桥的登录会话卷（随库父目录）
++/etc/b2b/b2b.env                         # 私有运行配置（root:b2b 0640；密钥只在这里）
++/var/backups/b2b/<YYYYmmdd-HHMMSS>/      # 本机备份快照：root 私有（0700/0600），保留 14 天；异地见 R2 方案
++```
++
++全部持久状态都在 `/var/lib/b2b` 与 `/etc/b2b` 下，**不在代码目录内**；因此切换 `/opt/b2b/app` 指向的版本不会丢原件（这依赖 `B2B_UPLOAD_DIR`，见第 4 节）。
++
++## 2. 持久映射表（按当前代码实测，不猜路径）
++
++| 资产 | 实际位置（本部署下） | 代码依据 | 备份覆盖 |
++| --- | --- | --- | --- |
++| 业务数据库（企业/成员/会话/RFQ/人工任务/知识与批次/渠道账号与连接治理/审计/模型调用日志） | `/var/lib/b2b/data/app.db` | `app.py --db`；`Database.__init__` | 是（SQLite 在线备份快照） |
++| 产品来源原件（source_documents.storage_path） | `data/uploads/`（配置后存绝对路径；历史库为相对路径） | `app.py add_source` / `resolve_source_storage_path` | 是（逐条核验存在与 sha256） |
++| 知识原件（knowledge_sources） | `data/uploads/kb-*` | `enterprise_knowledge.py` | 是 |
++| 批次原件（kb2_sources，含嵌套） | `data/uploads/phase2/kb2-*` | `enterprise_knowledge_phase2.py` | 是 |
++| 企业模型私有配置 | `data/app.db.model-secrets/`（0700/0600） | `model_settings.py EnterpriseModels` | 是（备份目录 `model-secrets/`，恢复映射为恢复目录下 `<库名>.model-secrets`） |
++| 渠道桥登录状态（WhatsApp 个人版 WAHA 会话卷） | `data/connection-runtime/<账号ID>/sessions/`（docker 卷挂载） | `channel_runtime.py provision_personal_bridge` | 是（目录 `connection-runtime/`）。备份脚本自动停写“本库登记账号”的 `b2b-account-*` 容器；**本部署形态下桥未启用（见第 10 节），T5 前不要开放** |
++| 受限运维配置（密钥） | `/etc/b2b/b2b.env`（root:b2b 0640） | 单元 `EnvironmentFile` | 是（`ops-config/b2b.env`；恢复时按原相对路径保留；**禁止明文上传云端**） |
++| 后台作业状态（无需单独文件：全部在库表内） | `kb_sync_state`、`knowledge_processing`、`kb2_sources.status/processing_owner`、`messages.delivery_status='queued'` | `knowledge_delivery.py`、`enterprise_knowledge*.py`、`tools/channels/outbound_worker.py` | 是（随数据库快照） |
++| 服务日志 | systemd journal（stdout/stderr）；诊断日志 `data/whatsapp_personal_events.log`、`data/whatsapp_personal_start_audit.log`（代码目录内、非业务状态） | `app.py _append_private_log` | 不纳入备份（诊断用途）；journald 按系统策略轮转；代码目录内写入的约束见第 10 节 |
++| 演示工具开关 | 默认关闭；唯一开启入口 `tools/demo/start_demo.py`（部署单元不调用） | `app.py make_server(demo_tools=...)` | 不适用（见第 8 节门控） |
++
++网络暴露面：应用只监听 `127.0.0.1:8000`，公网仅经 Nginx 的 443（HTTPS）。
++
++## 3. 服务器首安装（精确步骤；在 Workbench 里逐条执行）
++
++> 部署通道说明：Codex 本机 SSH 到服务器超时，实际执行经阿里云控制台 **Workbench**（admin 有 sudo）。以下命令可按段复制；`<label>` 用发布包标签（如 `2026-10-13-a`）替换。
++
++**① 系统包**
++
++```sh
++sudo apt-get update
++sudo apt-get install -y python3 python3-venv nginx certbot
++```
++
++**② 账号与目录**
++
++```sh
++sudo useradd --system --create-home --home-dir /var/lib/b2b --shell /usr/sbin/nologin b2b
++sudo install -d -m 0700 -o b2b -g b2b /var/lib/b2b/data /var/lib/b2b/data/uploads
++sudo install -d -m 0700 -o root -g b2b /etc/b2b /var/backups/b2b
++sudo install -d -m 0755 -o root -g root /opt/b2b /opt/b2b/releases
++```
++
++**③ 构建发布包（在受信任的构建机上，不要用 git clone——工作内容含未提交修改，HEAD 不代表当前版本）**
++
++```sh
++cd <本仓库>
++python3 deploy/make_release.py --label <label>
++# 产出：dist/b2b-release-<label>.tar.gz 与 dist/b2b-release-<label>.tar.gz.sha256
++sha256sum dist/b2b-release-<label>.tar.gz     # 记录到部署记录里
++# 传到服务器（scp，或经控制台/Workbench 文件上传到 /tmp）：
++scp dist/b2b-release-<label>.tar.gz dist/b2b-release-<label>.tar.gz.sha256 admin@47.243.192.209:/tmp/
++```
++
++**④ 服务器上校验并解包（先核对哈希，再解包）**
++
++```sh
++cd /tmp
++sha256sum -c b2b-release-<label>.tar.gz.sha256          # 必须 OK
++sudo tar -xzf b2b-release-<label>.tar.gz -C /opt/b2b/releases
++cd /opt/b2b/releases/b2b-release-<label>
++sudo sha256sum -c RELEASE-MANIFEST.sha256               # 包内逐文件哈希，必须全 OK
++sudo ln -sfn /opt/b2b/releases/b2b-release-<label> /opt/b2b/app
++```
++
++**⑤ 运行配置（私有；密钥只在这里）**
++
++```sh
++sudo cp /opt/b2b/app/deploy/b2b.env.example /etc/b2b/b2b.env
++sudo chown root:b2b /etc/b2b/b2b.env && sudo chmod 0640 /etc/b2b/b2b.env
++sudo editor /etc/b2b/b2b.env       # 至少确认 B2B_UPLOAD_DIR；启用模型时再填 AI_MODE/DEEPSEEK_API_KEY
++```
++
++**⑥ 虚拟环境（必建；纯文本/手工整理可不装知识依赖，需要解析 PDF/Word 时执行 pip）**
++
++```sh
++sudo python3 -m venv /opt/b2b/venv
++sudo /opt/b2b/venv/bin/pip install -r /opt/b2b/app/requirements-knowledge.txt   # 仅解析 PDF/Word 需要
++```
++
++**⑦ 创建首位管理员（普通新库没有默认账号；口令从标准输入，不出现在命令行）**
++
++```sh
++sudo -u b2b sh -c 'umask 077; /opt/b2b/venv/bin/python3 /opt/b2b/app/tools/create_admin.py \
++  --db /var/lib/b2b/data/app.db --email admin@你的邮箱 --name "管理员" --password-stdin'
++```
++
++**⑧ systemd（应用 + 每日备份；先语法校验再启用）**
++
++```sh
++sudo cp /opt/b2b/app/deploy/systemd/b2b-app.service /etc/systemd/system/
++sudo cp /opt/b2b/app/deploy/systemd/b2b-backup.service /opt/b2b/app/deploy/systemd/b2b-backup.timer /etc/systemd/system/
++sudo systemd-analyze verify /etc/systemd/system/b2b-app.service /etc/systemd/system/b2b-backup.service
++sudo systemctl daemon-reload
++sudo systemctl enable --now b2b-app.service
++sudo systemctl enable --now b2b-backup.timer
++```
++
++**⑨ 反向代理与证书（三步：HTTP-only 引导 → certbot → 443 配置）**
++
++```sh
++# a) HTTP-only 引导配置（此时不引用未生成的证书，业务页面还不提供）
++sudo install -d -m 0755 /var/www/b2b-acme
++sudo cp /opt/b2b/app/deploy/nginx-b2b-http-bootstrap.conf.example /etc/nginx/sites-available/b2b.conf
++sudo ln -sfn ../sites-available/b2b.conf /etc/nginx/sites-enabled/b2b.conf
++sudo rm -f /etc/nginx/sites-enabled/default        # 发行版默认站点必须移除（本配置自带 444 默认站点）
++sudo nginx -t && sudo systemctl reload nginx
++
++# b) 首次签证（webroot；不修改 nginx 配置，可审计）
++sudo certbot certonly --webroot -w /var/www/b2b-acme -d pilot.alpsaga.tech \
++  --agree-tos -m <你的运维邮箱>
++# 续期：certbot 的 systemd timer 默认处理；续期后 reload：certbot renew 时加 --deploy-hook "systemctl reload nginx"
++
++# c) 换成 443 最终配置（HTTPS 入口；/rfq/ 不记访问日志；默认站点 444）
++sudo cp /opt/b2b/app/deploy/nginx-b2b.conf.example /etc/nginx/sites-available/b2b.conf
++sudo ln -sfn ../sites-available/b2b.conf /etc/nginx/sites-enabled/b2b.conf
++sudo nginx -t && sudo systemctl reload nginx
++```
++
++日志口径（两套配置一致）：访问日志用 `b2b_nocreds` 格式——只记 `$uri`（不含 query），也不记 Referer（来源页 URL 可能带 query）；买方询价链接 `/rfq/<token>` 的 token 属凭据，该路径 `access_log off`；错误日志收敛到 `crit`（避免请求行/凭据路径随错误信息落盘），应用级诊断看 `journalctl -u b2b-app`。
++
++**⑩ 首装验收（服务器上逐条跑；本机假件测试不能代替此步）**
++
++```sh
++# 1) 服务与定时器
++systemctl is-active b2b-app b2b-backup.timer          # 两个都应为 active
++# 2) 本机回环
++curl -sf -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/login      # 200
++# 3) 域名 HTTPS（浏览器打开 https://pilot.alpsaga.tech/login 用 ⑦ 账号登录，确认无演示账号痕迹）
++curl -sS -o /dev/null -w '%{http_code}\n' https://pilot.alpsaga.tech/login # 200
++# 4) 默认站点不暴露程序（期望连接被直接关闭或非 200；curl 报错/000 即符合预期）
++curl -sS -o /dev/null -w '%{http_code}\n' --resolve nope.invalid:443:47.243.192.209 https://nope.invalid/login
++curl -sS -o /dev/null -w '%{http_code}\n' --resolve nope.invalid:80:47.243.192.209 http://nope.invalid/
++# 5) 日志口径（应无输出/为 0）
++sudo grep -E '/rfq/|\?' /var/log/nginx/b2b-access.log || true
++# 6) 备份真跑一次（停写窗口 + root 私有产物 + 运维配置进包）
++sudo systemctl start b2b-backup.service && systemctl status b2b-backup.service
++sudo ls -ld /var/backups/b2b/20*
++sudo ls -l /var/backups/b2b/20*/ops-config/b2b.env     # 目录 0700、文件 0600
++journalctl -u b2b-backup.service -n 50                 # 看“停止 → 快照 → 恢复”流程日志
++# 7) 隔离恢复检查（不会覆盖任何现有数据）
++sudo /opt/b2b/venv/bin/python3 /opt/b2b/app/tools/backup_restore.py restore-check \
++  --bundle /var/backups/b2b/<时间戳> --out /var/lib/b2b/restore-check-<时间戳>
++```
++
++通过标准：以上全部符合预期；`curl` 对默认站点不是 200/301/404 页面；`/rfq/` 不出现于访问日志；备份产物权限为 root 私有。
++
++## 4. 上传目录持久配置（版本切换不丢原件）
++
++- 应用默认把原件放在**代码目录**的 `data/uploads`（历史行为）。部署必须设置环境变量 **`B2B_UPLOAD_DIR=/var/lib/b2b/data/uploads`**（见 `b2b.env.example`），此后新写原件落在持久目录并记录绝对路径。
++- 迁移旧部署：把旧代码目录的 `data/uploads`（含 `phase2/` 子目录）**整体复制**到 `B2B_UPLOAD_DIR` 指向的目录即可；旧库中的相对路径（`data/uploads/…`）在配置了该变量后按持久目录解析，无需改库。
++- 产品来源、知识导入、批次原件共用该目录；知识导入另有测试/隔离专用变量 `B2B_KB_STORAGE_ROOT`（优先级更高，正式部署不用）。
++
++## 5. 备份、恢复与停写边界
++
++**一致性边界（不伪装原子快照）**：`tools/backup_restore.py` 的数据库快照是事务一致的；原件与私有目录在快照之后顺序复制、无全局锁。并发上传/处理中可能出现“库中行与文件不完全匹配”。要得到互相匹配的一整套（库 + 全部原件 + 模型配置 + 桥登录状态 + 运维配置），必须**先停止写入**——`deploy/backup_snapshot.sh` 即该停写流程：
++
++- 以 root 运行（systemd `b2b-backup.service`，读取 `/etc/b2b/b2b.env`）；**产物 root 私有**（目录 0700/文件 0600）——包内含密钥材料，不进 b2b 用户可读范围。
++- 先保存原活跃状态：只停止原本在运行的 `b2b-app` 与“本库 `connection-runtime/` 登记账号”的受管桥容器（`b2b-account-<24 位 ID>`）；备份后只把原本活跃的恢复回去；**任何失败都经 trap 恢复原状**，不会出现“应用被停掉而备份没做成”。
++- 运维配置 `/etc/b2b/b2b.env` 随包 `ops-config/`（文件缺失时告警继续，不阻断业务数据备份）。
++- 自动备份：`b2b-backup.timer` 每日 03:30（错过则开机补跑）；保留天数由 `B2B_BACKUP_KEEP_DAYS`（默认 14）控制，只清理本工具创建的 `YYYYmmdd-HHMMSS` 目录。
++- 手工执行（root；同样先停应用）：
++
++```sh
++sudo systemctl stop b2b-app
++sudo /opt/b2b/venv/bin/python3 /opt/b2b/app/tools/backup_restore.py backup \
++  --db /var/lib/b2b/data/app.db --uploads /var/lib/b2b/data/uploads \
++  --out /var/backups/b2b/manual-$(date +%Y%m%d-%H%M%S) --ops-config /etc/b2b/b2b.env
++sudo systemctl start b2b-app
++```
++
++- 恢复到空目录核对（不会覆盖任何现有数据；恢复产物同样 root 私有）：
++
++```sh
++sudo /opt/b2b/venv/bin/python3 /opt/b2b/app/tools/backup_restore.py restore-check \
++  --bundle /var/backups/b2b/<时间戳> --out /var/lib/b2b/restore-check-<时间戳>
++```
++
++恢复会把归档里的绝对原件路径重写到恢复目录、把 `model-secrets/` 映射为恢复库同名目录、把 `ops-config/` 按原相对路径保留，并校验全部原件哈希与数据库完整性；路径逃逸（含 `..`）、符号链接、缺件、篡改一律拒绝。把恢复目录投入使用前先跑第 6 节的演练脚本或至少人工登录核对；如需把恢复目录交给 b2b 用户使用，先 `sudo chown -R b2b:b2b <目录>`（本工具默认保持 root 私有）。
++
++- **异地/独立备份**：本机备份不能防整机丢失；跨机备份必须先加密再上传（备份包含密钥，**禁止明文上传**）。方案与执行清单见 [offsite-backup-r2-plan.md](offsite-backup-r2-plan.md)（账号/凭据尚未创建，由 Codex 带用户逐项执行）。
++
++## 6. 部署前后必做的恢复演练（可复跑）
++
++```sh
++# 本地（builder/开发机）端到端演练：新安装 → HTTP 业务 → 重启保存 → 备份 → 丢件 → 恢复 → 业务继续（全离线、临时数据）
++python3 /opt/b2b/app/tools/pilot_checks/check_first_launch_t4.py
++# 判别性测试（备份覆盖/安全拒绝/恢复映射/上传目录配置/原件路径逃逸）
++python3 -m unittest -v test_first_launch_t4 test_first_launch_t4_deploy
++```
++
++通过标准：演练脚本 0 FAIL 且退出码 0；真实数据进入部署环境前，再按第 5 节对本部署的真实库做一次 `backup` + `restore-check` 并记录耗时与结果（在服务器上做，属第 3 节 ⑩ 的一部分）。
++
++## 7. 版本切换、回滚与迁移前备份
++
++1. **升级前必须先做一次停写窗口备份**（第 5 节）——这就是“迁移前备份”。
++2. 新版本：构建机 `python3 deploy/make_release.py --label <新 label>` → 传包 → 校验哈希 → `sudo tar -xzf … -C /opt/b2b/releases` → `systemctl stop b2b-app` → `ln -sfn releases/b2b-release-<新 label> /opt/b2b/app` → `systemctl start b2b-app` → 按第 3 节 ⑩ 自检。
++3. **回滚**：停止应用 → 把升级前备份 `restore-check` 到干净目录并替换 `data/`（或按备份包重建）→ 切回旧版本目录 → 启动核对。**不要**把旧版本代码直接指向已由新版本迁移过的库：应用的建表/加列是向前写的，仓库没有反向迁移脚本，也不承诺旧版本可读新 schema；回滚以“恢复升级前备份”为准。
++4. 升级前一并核对迁移影响：`python3 tools/pilot_checks/check_db_migrations.py --db <库的副本>`（只操作副本，检查关键列/索引与重复数据风险）。
++
++## 8. 正式演示门控
++
++- 部署单元只运行 `app.py`（`make_server(demo_tools=False)` 默认）——演示按钮与演示写入口一律 403，登录页不出现演示账号文案。
++- **不要在服务器上运行 `tools/demo/start_demo.py`**；演示环境与正式库分离。正式库只经 `tools/create_admin.py` 创建首位管理员，其余成员在成员管理中创建。
++- 沿用 [正式化清单](../docs/正式化清单.md)：未处理项不得对外发布；本部署形态不引入演示数据。
++
++## 9. 发布包工具（make_release.py）
++
++- 从**当前源码**按白名单导出：应用代码与全部本地模块、静态资源（`reference-client/`、`static/`、`assets/`）、部署模板（`deploy/` 全套）、运维工具（`tools/backup_restore.py`、`tools/create_admin.py`、`tools/pilot_checks/`）、知识解析依赖清单（`requirements-knowledge.txt`）。
++- 生成逐文件 sha256 清单 `RELEASE-MANIFEST.json` + 可校验的 `RELEASE-MANIFEST.sha256`；清单同时记录来源 HEAD 与“是否含未提交修改”（如实，不掩饰）。
++- **绝不包含**：业务 `data/`、密钥、`.git`、`docs/`（含 evidence 与历史资料原件）、`design/`、演示素材（`fixtures/`、`B2B_Pump_Demo_Research/`）、测试文件。
++- 新增应用模块或静态资源时，必须同步补进 `deploy/make_release.py` 的 `INCLUDE_PATTERNS`（缺文件会在安装导入或页面加载时暴露；发布包测试有导入校验）。
++
++## 10. 已知限制与未闭项（如实）
++
++- **未在真实 Linux 执行过**：本目录的 systemd/nginx/脚本在本机（macOS）只做过语法与逻辑校验（含外部命令假件的脚本测试）+ 隔离演练；首装必须按第 3 节 ⑩ 在服务器上跑一遍并记录结果（`systemd-analyze verify`、`nginx -t`、`b2b-backup.service` 真跑、HTTPS 与默认站点检查）。
++- **WhatsApp 个人版桥在本部署形态下不可用**：应用以非 root `b2b` 用户运行，无 Docker socket 访问权限（也**不**默认加 docker 组、不放开 socket）；`channel_runtime.py` 的容器启动/会话读取在服务器上会失败。桥在本轮及 T5 前一律不启用；接入方式（专用 root 助手单元 / socket 代理 / 其他）留 T5 专项评估后再定。
++- **代码内诊断日志写入受加固限制**：`app.py` 把 `data/whatsapp_personal_events.log`、`data/whatsapp_personal_start_audit.log` 写在**代码目录**；单元加固（`ProtectSystem=strict` + `ReadWritePaths=/var/lib/b2b`）下代码目录只读，这些写入静默失败（调用处 try/except 吞掉）。不影响业务数据、审计与备份（都在 `/var/lib/b2b` 与库表内）；是否需要 `B2B_LOG_DIR` 之类改造留 T5 决定。
++- 单实例 + 本地 SQLite：短时维护可接受（试点前提）；高可用/多实例/外部对象存储属后续架构决策（ADR-07/08），不因本目录新增。
++- 桥容器（WhatsApp 个人版）需要 Docker 与足够内存（官方建议 ≥2C4G，容量按实际实测）；其登录会话恢复后如状态异常，按 `/admin/channels` 页面重新扫码（属运营动作，T5 专项验收）。
++- 安全组 22/80/443 与 DNS 解析为用户提供信息，未独立复验（Codex 本机 SSH 超时）；以 Workbench 实际操作结果为准。
++- 独立异地备份（R2）账号/凭据尚未创建；方案见 [offsite-backup-r2-plan.md](offsite-backup-r2-plan.md)。
+diff --git "a/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/backup_snapshot.sh" "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/backup_snapshot.sh"
+new file mode 100755
+index 0000000..7b7f39d
+--- /dev/null
++++ "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/backup_snapshot.sh"	
+@@ -0,0 +1,122 @@
++#!/bin/sh
++# T4 停写窗口备份（单机部署；以 root 运行，由 systemd b2b-backup.service 调用）。
++# 流程：保存原活跃状态 → 停止应用与受管桥 → 一致性快照（库 + 全部原件 + 私有模型配置
++# + 桥登录状态 + 受限运维配置 /etc/b2b/b2b.env）→ 恢复“原本活跃”的服务。
++# 任何失败都经 EXIT trap 恢复原状态，绝不留下“应用被停掉而备份没做成”的现场。
++#
++# 边界（不伪装原子快照）：先停写再复制；数据库用 SQLite 在线备份接口取事务一致快照。
++# 备份产物为 root 私有（目录 0700/文件 0600）：包内含业务数据与密钥（b2b.env、企业模型
++# 配置），因此不进 b2b 用户可读范围，也不允许明文上传到云——异地方案必须先加密
++# （见 deploy/offsite-backup-r2-plan.md）。
++#
++# 受管桥（WhatsApp 个人版容器，名称固定为 b2b-account-<24 位账号 ID>）：
++# 只处理本库 <数据目录>/connection-runtime/ 下登记过账号对应的容器，绝不触碰其他容器；
++# docker 不可用或容器不存在时告警跳过、不猜不停。本部署形态下应用没有 Docker 权限、
++# 桥在 T5 前不启用（见 deploy/README.md 已知限制），此逻辑待桥真实运行后生效。
++#
++# 环境变量（由 /etc/b2b/b2b.env 或单元文件提供；均有默认值）：
++#   B2B_APP_UNIT、B2B_APP_DIR、B2B_PY、B2B_DATA_DIR、B2B_BACKUP_ROOT、
++#   B2B_BACKUP_KEEP_DAYS、B2B_ENV_FILE
++set -eu
++
++APP_UNIT="${B2B_APP_UNIT:-b2b-app}"
++APP_DIR="${B2B_APP_DIR:-/opt/b2b/app}"
++PY="${B2B_PY:-/opt/b2b/venv/bin/python3}"
++DATA_DIR="${B2B_DATA_DIR:-/var/lib/b2b/data}"
++BACKUP_ROOT="${B2B_BACKUP_ROOT:-/var/backups/b2b}"
++KEEP_DAYS="${B2B_BACKUP_KEEP_DAYS:-14}"
++OPS_ENV_FILE="${B2B_ENV_FILE:-/etc/b2b/b2b.env}"
++
++DB_PATH="$DATA_DIR/app.db"
++UPLOADS_DIR="$DATA_DIR/uploads"
++RUNTIME_DIR="$DATA_DIR/connection-runtime"
++
++[ -x "$PY" ] || PY="$(command -v python3)"   # 未建 venv 时用系统 python3（纯文本场景可行）
++
++# ── 原状态保存与恢复（任何退出路径都恢复，只动本来就活跃的东西）────────────
++APP_WAS_ACTIVE=0
++STOPPED_BRIDGES=""
++RESTORED=0
++
++restore_services() {
++  if [ "$RESTORED" = "1" ]; then
++    return 0
++  fi
++  RESTORED=1
++  for name in $STOPPED_BRIDGES; do
++    if docker start "$name" >/dev/null 2>&1; then
++      echo "已恢复受管桥：$name"
++    else
++      echo "警告：受管桥容器未能恢复启动（请人工处理）：$name" >&2
++    fi
++  done
++  if [ "$APP_WAS_ACTIVE" = "1" ]; then
++    if systemctl start "$APP_UNIT"; then
++      echo "已恢复服务：$APP_UNIT"
++    else
++      echo "警告：应用未能恢复启动（请人工处理）：$APP_UNIT" >&2
++    fi
++  fi
++}
++trap 'restore_services' EXIT
++trap 'exit 130' INT TERM HUP
++
++if systemctl is-active --quiet "$APP_UNIT"; then
++  APP_WAS_ACTIVE=1
++fi
++
++# 备份根目录：root 私有；已经存在但权限过宽时收紧。
++if [ ! -d "$BACKUP_ROOT" ]; then
++  install -d -m 0700 "$BACKUP_ROOT"
++fi
++chmod 0700 "$BACKUP_ROOT"
++STAMP="$(date +%Y%m%d-%H%M%S)"
++OUT="$BACKUP_ROOT/$STAMP"
++
++# ── 停写：应用 → 受管桥 ───────────────────────────────────────────────────
++if [ "$APP_WAS_ACTIVE" = "1" ]; then
++  echo "停写窗口：停止 $APP_UNIT"
++  systemctl stop "$APP_UNIT"
++else
++  echo "提示：$APP_UNIT 原本未运行，不停不启（备份后保持原状）"
++fi
++
++if [ -d "$RUNTIME_DIR" ]; then
++  if ! command -v docker >/dev/null 2>&1; then
++    echo "警告：Docker 未安装或不在 PATH，跳过受管桥停写；如桥正在运行，本次备份可能包含半写会话" >&2
++  elif ! docker info >/dev/null 2>&1; then
++    echo "警告：Docker 不可用，跳过受管桥停写；如桥正在运行，本次备份可能包含半写会话" >&2
++  else
++    for account_dir in "$RUNTIME_DIR"/*/; do
++      [ -d "$account_dir" ] || continue
++      account="$(basename "$account_dir")"
++      if ! printf '%s' "$account" | grep -Eq '^[0-9a-f]{24}$'; then
++        continue
++      fi
++      name="b2b-account-$account"
++      state="$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)"
++      if [ "$state" = "true" ]; then
++        echo "停写窗口：停止受管桥容器 $name"
++        docker stop "$name" >/dev/null
++        STOPPED_BRIDGES="$STOPPED_BRIDGES $name"
++      fi
++    done
++  fi
++fi
++
++# ── 快照（含受限运维配置；root 私有产物）─────────────────────────────────
++echo "快照：$OUT"
++if [ -f "$OPS_ENV_FILE" ]; then
++  "$PY" "$APP_DIR/tools/backup_restore.py" backup \
++    --db "$DB_PATH" --uploads "$UPLOADS_DIR" --out "$OUT" --ops-config "$OPS_ENV_FILE"
++else
++  echo "警告：未找到运维配置 $OPS_ENV_FILE，本次备份不含它；密钥材料请按 deploy/offsite-backup-r2-plan.md 单独加密保管" >&2
++  "$PY" "$APP_DIR/tools/backup_restore.py" backup \
++    --db "$DB_PATH" --uploads "$UPLOADS_DIR" --out "$OUT"
++fi
++
++# ── 保留策略：只清理本工具命名的“YYYYmmdd-HHMMSS”目录，绝不触碰其他文件 ──
++find "$BACKUP_ROOT" -maxdepth 1 -type d -name '20??????-??????' -mtime +"$KEEP_DAYS" -exec rm -rf {} +
++
++echo "备份完成：$OUT（保留 $KEEP_DAYS 天；异地方案见 deploy/offsite-backup-r2-plan.md）"
++# 退出时由 EXIT trap 恢复原本活跃的服务。
+diff --git "a/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/b2b.env.example" "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/b2b.env.example"
+new file mode 100644
+index 0000000..3c7a35a
+--- /dev/null
++++ "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/b2b.env.example"	
+@@ -0,0 +1,40 @@
++# /etc/b2b/b2b.env —— 私有运行配置示例（复制后改权限：chown root:b2b && chmod 0640）
++# 规则：密钥只写在本文件（绝不入 Git、文档、日志、截图、聊天）；不需要的变量保持注释。
++# 注意：环境变量前不要有空格；值不要加引号（systemd EnvironmentFile 语义）。
++
++# ── 持久上传目录（部署必配；见 deploy/README.md 第 4 节）────────────────────
++B2B_UPLOAD_DIR=/var/lib/b2b/data/uploads
++
++# ── 平台模型服务（正式启用时取消注释并填入；不填=本地规则模式）─────────────
++# 官方通道固定 deepseek-flash + 思考开启(强度 low)；密钥只放这里。
++#AI_MODE=deepseek
++#DEEPSEEK_API_KEY=
++
++# ── 可选模型相关（一般不需要）──────────────────────────────────────────────
++#DEEPSEEK_TIMEOUT_SECONDS=20
++#DEEPSEEK_MAX_TOKENS=1024
++
++# ── 渠道接入（首发仅官网/Telegram/WhatsApp；按 T5 联调进度启用）────────────
++# Telegram（经 LangBot 桥）：
++#LANGBOT_API_KEY=
++# WhatsApp 官方（Twilio 或 Meta；二选一，与渠道页配置一致）：
++#TWILIO_ACCOUNT_SID=
++#TWILIO_AUTH_TOKEN=
++#TWILIO_WHATSAPP_FROM=
++#META_WHATSAPP_TOKEN=
++#META_PHONE_NUMBER_ID=
++#META_VERIFY_TOKEN=
++#META_APP_SECRET=
++# WhatsApp 个人版桥（WAHA；由本机 docker 提供）：
++#WHATSAPP_PERSONAL_API_KEY=
++#WHATSAPP_PERSONAL_SELF_IDS=
++
++# ── 共享 Dify：对外生成保持关闭，本部署不配置 DIFY_* 变量 ─────────────────
++
++# ── 部署/备份路径覆盖（可选；b2b-app 与 b2b-backup 单元共用读取本文件）─────
++# 一般不需要改；确有自定义目录时取消注释并改成实际路径。
++#B2B_APP_DIR=/opt/b2b/app
++#B2B_DATA_DIR=/var/lib/b2b/data
++#B2B_BACKUP_ROOT=/var/backups/b2b
++#B2B_BACKUP_KEEP_DAYS=14
++#B2B_ENV_FILE=/etc/b2b/b2b.env
+diff --git "a/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/make_release.py" "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/make_release.py"
+new file mode 100644
+index 0000000..5a3719b
+--- /dev/null
++++ "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/make_release.py"	
+@@ -0,0 +1,251 @@
++#!/usr/bin/env python3
++# -*- coding: utf-8 -*-
++"""T4 部署发布包工具：从当前源码按白名单导出 + 生成 sha256 版本清单。
++
++为什么不用 git clone：本仓库的工作内容含未提交修改，HEAD 不代表当前版本；
++新安装/升级一律使用在受信任构建机（本机）上生成的发布包：
++  1) 构建机运行本工具，产出 tar.gz + 校验文件；
++  2) 经安全通道传到服务器（scp / 控制台文件上传 / Workbench）；
++  3) 服务器上先核对 sha256，再解包到 /opt/b2b/releases/<label>（见 deploy/README.md 第 3 节）。
++
++包内容 = 白名单：运行必需的应用代码与静态资源、部署模板（deploy/）、
++备份/建号/校验工具（tools/）、知识解析依赖清单（requirements-knowledge.txt）+ 版本清单。
++绝不包含：业务 data/、密钥、.git、docs（含 evidence 与历史资料）、设计/演示素材、测试文件。
++新增应用模块或静态资源时，必须同步补进 INCLUDE_PATTERNS（缺文件会在安装导入时暴露）。
++
++用法：
++  python3 deploy/make_release.py [--source 仓库根] [--out 输出.tar.gz] [--label 标签]
++
++产出：
++  <out>                        发布包（顶层目录 b2b-release-<label>/）
++  <out>.sha256                 发布包自身的 sha256（传输后先核对再解包）
++  包内 RELEASE-MANIFEST.json   逐文件 sha256/大小 + 来源 HEAD/是否含未提交修改 + 排除策略
++  包内 RELEASE-MANIFEST.sha256 包内全部文件（除本文件外）的 sha256sum 清单，解包后可：
++                               cd <解包根> && sha256sum -c RELEASE-MANIFEST.sha256
++"""
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import shutil
++import subprocess
++import sys
++import tarfile
++import tempfile
++from datetime import datetime, timezone
++from pathlib import Path
++
++# ── 白名单：只导出这些条目（glob；目录条目会被跳过，文件才进包）──────────────
++INCLUDE_PATTERNS = (
++    # 应用代码（app.py 及其本地模块）
++    "app.py",
++    "ai_client.py",
++    "business_channel_ui.py",
++    "business_channels.py",
++    "channel_runtime.py",
++    "console_guidance.py",
++    "enterprise_knowledge.py",
++    "enterprise_knowledge_phase2.py",
++    "enterprise_knowledge_phase2_ui.py",
++    "enterprise_knowledge_ui.py",
++    "inbox_search.py",
++    "knowledge_delivery.py",
++    "knowledge_ingestion.py",
++    "model_settings.py",
++    # 知识解析依赖清单（部署时 pip install -r 用）与项目说明
++    "requirements-knowledge.txt",
++    "README.md",
++    # 应用静态资源：页面壳、品牌标、第二批知识界面脚本
++    "assets/*",
++    "reference-client/*",
++    "static/*",
++    # 部署模板（systemd/nginx/env 样例/备份脚本）与运维工具
++    "deploy/*",
++    "deploy/systemd/*",
++    "tools/backup_restore.py",
++    "tools/create_admin.py",
++    "tools/pilot_checks/*",
++    "tools/channels/outbound_worker.py",
++)
++
++# 每条至少命中一个文件（空 = 源码不完整，拒绝打包；fail-closed）
++REQUIRED_GLOBS = (
++    "app.py",
++    "reference-client/*",
++    "assets/*",
++    "static/*",
++    "deploy/*",
++    "deploy/systemd/*",
++    "tools/pilot_checks/*",
++)
++
++# ── 排除策略（防御性校验：白名单路径万一命中这些规则也拒绝打包）─────────────
++EXCLUDED_ROOTS = (
++    "data", ".git", ".venv-knowledge", "docs", "design", "fixtures",
++    "B2B_Pump_Demo_Research", "dist", "__pycache__",
++)
++EXCLUDED_BASENAME_PREFIXES = ("test_",)
++EXCLUDED_SUFFIXES = (".pyc", ".db", ".sqlite", ".sqlite3", ".log", ".env", ".pem", ".key", ".DS_Store")
++
++
++class BuildError(Exception):
++    """打包前校验失败（fail-closed，不产出半成品包）。"""
++
++
++def sha256_file(path: Path) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as handle:
++        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def git_info(source: Path):
++    """返回 (HEAD 哈希, 是否含未提交修改)；非 git 仓库或 git 不可用时返回 (None, None)。"""
++    try:
++        head = subprocess.run(
++            ["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30
++        )
++        status = subprocess.run(
++            ["git", "-C", str(source), "status", "--porcelain"], capture_output=True, text=True, timeout=60
++        )
++    except (OSError, subprocess.SubprocessError):
++        return None, None
++    if head.returncode != 0 or status.returncode != 0:
++        return None, None
++    return head.stdout.strip(), bool(status.stdout.strip())
++
++
++def _validate_member(source: Path, path: Path) -> str:
++    if path.is_symlink():
++        raise BuildError(f"拒绝打包符号链接：{path}")
++    rel = path.relative_to(source)
++    parts = rel.parts
++    for root in EXCLUDED_ROOTS:
++        if root in parts:
++            raise BuildError(f"白名单条目命中排除目录（{root}）：{rel}")
++    name = parts[-1]
++    if name.startswith(EXCLUDED_BASENAME_PREFIXES):
++        raise BuildError(f"拒绝打包测试文件：{rel}")
++    if name.endswith(EXCLUDED_SUFFIXES):
++        raise BuildError(f"拒绝打包该类型文件：{rel}")
++    return str(rel)
++
++
++def collect_files(source: Path) -> dict:
++    """按白名单收集文件；返回 {相对路径: 绝对路径}。任何一项不完整/不合规都拒绝打包。"""
++    files: dict = {}
++    for pattern in INCLUDE_PATTERNS:
++        matches = sorted(source.glob(pattern))
++        if not matches:
++            if pattern in REQUIRED_GLOBS:
++                raise BuildError(f"源码不完整：白名单条目没有任何文件：{pattern}（源码目录: {source}）")
++            continue
++        for path in matches:
++            if path.is_dir():
++                continue
++            rel = _validate_member(source, path)
++            files[rel] = path
++    if not files:
++        raise BuildError(f"白名单没有收集到任何文件：{source}")
++    return files
++
++
++def build(source: Path, out: Path, label: str) -> dict:
++    source = source.resolve()
++    if not source.is_dir():
++        raise BuildError(f"源码目录不存在：{source}")
++    if not label or "/" in label or label.startswith("."):
++        raise BuildError(f"版本标签无效：{label!r}")
++    if out.exists():
++        raise BuildError(f"输出已存在（拒绝覆盖）：{out}")
++    files = collect_files(source)
++    head, dirty = git_info(source)
++    root_name = f"b2b-release-{label}"
++    out.parent.mkdir(parents=True, exist_ok=True)
++    with tempfile.TemporaryDirectory(dir=str(out.parent)) as temporary:
++        stage = Path(temporary) / root_name
++        stage.mkdir()
++        for rel, src in files.items():
++            target = stage / rel
++            target.parent.mkdir(parents=True, exist_ok=True)
++            shutil.copy2(src, target)
++        manifest_files = {}
++        for rel in sorted(files):
++            target = stage / rel
++            manifest_files[rel] = {"sha256": sha256_file(target), "size": target.stat().st_size}
++        manifest = {
++            "label": label,
++            "created_at": datetime.now(timezone.utc).isoformat(),
++            "generator": "deploy/make_release.py",
++            "source_root": str(source),
++            "source_head": head,
++            "source_dirty": dirty,
++            "python": sys.version.split()[0],
++            "file_count": len(manifest_files),
++            "files": manifest_files,
++            "policy": {
++                "include_patterns": list(INCLUDE_PATTERNS),
++                "excluded_roots": list(EXCLUDED_ROOTS),
++                "excluded_basename_prefixes": list(EXCLUDED_BASENAME_PREFIXES),
++                "excluded_suffixes": list(EXCLUDED_SUFFIXES),
++                "note": "白名单导出；不含业务 data/、密钥、.git、docs（evidence/历史资料）、演示与测试文件。",
++            },
++        }
++        (stage / "RELEASE-MANIFEST.json").write_text(
++            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
++        )
++        sums = []
++        for path in sorted(stage.rglob("*")):
++            if not path.is_file():
++                continue
++            rel = path.relative_to(stage)
++            if rel.name == "RELEASE-MANIFEST.sha256":
++                continue
++            sums.append(f"{sha256_file(path)}  {rel}")
++        (stage / "RELEASE-MANIFEST.sha256").write_text("\n".join(sums) + "\n", encoding="utf-8")
++        with tarfile.open(out, "w:gz") as tar:
++            tar.add(str(stage), arcname=root_name)
++    digest = sha256_file(out)
++    Path(str(out) + ".sha256").write_text(f"{digest}  {out.name}\n", encoding="utf-8")
++    return {
++        "out": out, "digest": digest, "file_count": len(files), "label": label,
++        "source_head": head, "source_dirty": dirty,
++    }
++
++
++def default_label(source: Path) -> str:
++    head, _dirty = git_info(source)
++    short = head[:7] if head else "nogit"
++    return f"{datetime.now().strftime('%Y%m%d')}-{short}"
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    default_source = Path(__file__).resolve().parent.parent
++    parser.add_argument("--source", type=Path, default=default_source, help="仓库根目录（默认本脚本所在仓库）")
++    parser.add_argument("--out", type=Path, default=None, help="输出 tar.gz 路径（默认 <source>/dist/b2b-release-<label>.tar.gz）")
++    parser.add_argument("--label", default=None, help="版本标签（默认 YYYYMMDD-<git 短哈希>）")
++    args = parser.parse_args()
++
++    source = args.source.resolve()
++    label = args.label or default_label(source)
++    out = args.out or (source / "dist" / f"b2b-release-{label}.tar.gz")
++    try:
++        result = build(source, out, label)
++    except BuildError as error:
++        print(f"[拒绝打包] {error}", file=sys.stderr)
++        raise SystemExit(2)
++    print(f"发布包已生成：{result['out']}")
++    print(f"sha256：{result['digest']}（同时写入 {result['out']}.sha256）")
++    print(
++        f"文件数：{result['file_count']}；来源 HEAD：{result['source_head'] or '（非 git 仓库）'}；"
++        f"含未提交修改：{'是（发布包内容以实际打包为准，清单已记录）' if result['source_dirty'] else '否'}"
++    )
++    print("服务器端校验：① sha256sum -c <包名>.sha256；② 解包后 cd <包根> && sha256sum -c RELEASE-MANIFEST.sha256")
++    print("安装步骤见 deploy/README.md 第 3 节（使用发布包，不从 git clone）。")
++
++
++if __name__ == "__main__":
++    main()
+diff --git "a/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/nginx-b2b.conf.example" "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/nginx-b2b.conf.example"
+new file mode 100644
+index 0000000..542261c
+--- /dev/null
++++ "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/nginx-b2b.conf.example"	
+@@ -0,0 +1,77 @@
++# B2B 售前平台：反向 HTTPS 代理（最终态；域名 pilot.alpsaga.tech）。
++# 安装顺序见 deploy/README.md 第 3 节 ⑦：
++#   1) 先用 deploy/nginx-b2b-http-bootstrap.conf.example 完成首次签证（certbot webroot，本文件此时不用）；
++#   2) 证书就绪后，用本文件替换 /etc/nginx/sites-available/b2b.conf；
++#   3) sudo nginx -t && sudo systemctl reload nginx
++#
++# 安全口径（T1/T4）：
++#  - 只服务精确域名 pilot.alpsaga.tech；其他 Host（IP 直连、伪造域名）落到默认站点
++#    直接关闭连接（HTTP 444 / HTTPS 拒绝握手），不经过应用、不回显任何内容（防任意 Host 反射）。
++#  - 应用只监听 127.0.0.1:8000；公网唯一入口是本文件的 443，默认站点不代理应用。
++#  - 日志不得记录买方访问凭据与 query：
++#      * 访问日志用 b2b_nocreds 格式：$uri（不含查询串）；不记录 $request 原文；
++#        也不记录 Referer（来源页 URL 可能带 query）；
++#      * 买方凭据路径 /rfq/<token>（token 本身即凭据）单独 access_log off；
++#      * 错误日志收敛到 crit，避免请求行（含 URI/凭据路径）随错误信息落盘；
++#        应用级诊断看 systemd journal（journalctl -u b2b-app）。
++#  - 覆盖外来 X-Forwarded-*（不继承客户端伪造值）；声明 X-Forwarded-Proto: https。
++
++log_format b2b_nocreds '$remote_addr - $remote_user [$time_local] "$request_method $uri $server_protocol" $status $body_bytes_sent "$http_user_agent" $request_time';
++
++# 默认站点：不代理应用；未知 Host 一律关闭连接（HTTP 关连接 / HTTPS 拒绝握手）。
++server {
++    listen 80 default_server;
++    listen 443 ssl default_server;
++    server_name _;
++    ssl_reject_handshake on;   # nginx ≥ 1.19.4（Ubuntu 24.04 自带 1.24）
++    access_log off;
++    error_log /var/log/nginx/b2b-error.log crit;
++    return 444;
++}
++
++# 精确域名：HTTP 整站跳转 HTTPS（目标域名写死，避免任何 Host 拼接反射）。
++server {
++    listen 80;
++    server_name pilot.alpsaga.tech;
++    access_log /var/log/nginx/b2b-access.log b2b_nocreds;
++    error_log /var/log/nginx/b2b-error.log crit;
++    return 301 https://pilot.alpsaga.tech$request_uri;
++}
++
++# 精确域名：HTTPS 站点（证书由 certbot 维护；续期后 reload nginx 即可）。
++server {
++    listen 443 ssl;
++    server_name pilot.alpsaga.tech;
++
++    ssl_certificate     /etc/letsencrypt/live/pilot.alpsaga.tech/fullchain.pem;
++    ssl_certificate_key /etc/letsencrypt/live/pilot.alpsaga.tech/privkey.pem;
++    ssl_protocols       TLSv1.2 TLSv1.3;
++    add_header Strict-Transport-Security "max-age=31536000" always;
++
++    access_log /var/log/nginx/b2b-access.log b2b_nocreds;
++    error_log  /var/log/nginx/b2b-error.log crit;
++
++    client_max_body_size 12m;              # 原件上限 10MB（知识/来源文件）+ 表单余量
++
++    # 买方询价链接 /rfq/<token>：token 本身即凭据，禁止写访问日志。
++    location ^~ /rfq/ {
++        access_log off;
++        proxy_pass http://127.0.0.1:8000;  # 应用只监听本机回环
++        proxy_http_version 1.1;
++        proxy_set_header Host $http_host;              # 保留外部 Host（含端口）
++        proxy_set_header X-Forwarded-Proto $scheme;    # https 声明：Secure Cookie/同源协议
++        proxy_set_header X-Forwarded-For $remote_addr; # 覆盖客户端自带值
++        proxy_set_header X-Real-IP $remote_addr;
++        proxy_read_timeout 60s;
++    }
++
++    location / {
++        proxy_pass http://127.0.0.1:8000;  # 应用只监听本机回环
++        proxy_http_version 1.1;
++        proxy_set_header Host $http_host;              # 保留外部 Host（含端口）
++        proxy_set_header X-Forwarded-Proto $scheme;    # https 声明：Secure Cookie/同源协议
++        proxy_set_header X-Forwarded-For $remote_addr; # 覆盖客户端自带值
++        proxy_set_header X-Real-IP $remote_addr;
++        proxy_read_timeout 60s;
++    }
++}
+diff --git "a/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/nginx-b2b-http-bootstrap.conf.example" "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/nginx-b2b-http-bootstrap.conf.example"
+new file mode 100644
+index 0000000..47d8074
+--- /dev/null
++++ "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/nginx-b2b-http-bootstrap.conf.example"	
+@@ -0,0 +1,40 @@
++# B2B 售前平台：首次 HTTPS 引导（HTTP-only，仅用于 certbot webroot 首次签证）。
++# 本文件只在“证书还不存在”的阶段使用，避免给 nginx 配置引用未生成的证书路径；
++# 签证完成后立即换成 deploy/nginx-b2b.conf.example（443 最终配置）。
++# 完整顺序（见 deploy/README.md 第 3 节 ⑦）：
++#   1) 安装本文件为 /etc/nginx/sites-available/b2b.conf 并启用（移除发行版默认站点）；
++#   2) sudo nginx -t && sudo systemctl reload nginx     ← 此时 80 只响应 ACME 校验与 404
++#   3) sudo certbot certonly --webroot -w /var/www/b2b-acme -d pilot.alpsaga.tech ...
++#   4) 用 nginx-b2b.conf.example 替换本文件；sudo nginx -t && sudo systemctl reload nginx
++#
++# 安全口径：不代理应用（不暴露程序）；未知 Host（IP 直连、伪造域名）关闭连接；
++# 访问日志同样不记录 query（b2b_nocreds 格式，且不记 Referer）；错误日志收敛到 crit。
++
++log_format b2b_nocreds '$remote_addr - $remote_user [$time_local] "$request_method $uri $server_protocol" $status $body_bytes_sent "$http_user_agent" $request_time';
++
++# 默认站点：签证阶段也不代理应用；未知 Host 一律关闭连接。
++server {
++    listen 80 default_server;
++    server_name _;
++    access_log off;
++    error_log /var/log/nginx/b2b-error.log crit;
++    return 444;
++}
++
++# 精确域名：仅供 certbot webroot 校验；其余路径一律 404（业务入口在 443 最终配置里）。
++server {
++    listen 80;
++    server_name pilot.alpsaga.tech;
++
++    access_log /var/log/nginx/b2b-access.log b2b_nocreds;
++    error_log  /var/log/nginx/b2b-error.log crit;
++
++    location ^~ /.well-known/acme-challenge/ {
++        root /var/www/b2b-acme;
++        default_type text/plain;
++    }
++
++    location / {
++        return 404;
++    }
++}
+diff --git "a/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/offsite-backup-r2-plan.md" "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/offsite-backup-r2-plan.md"
+new file mode 100644
+index 0000000..834b5f0
+--- /dev/null
++++ "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/offsite-backup-r2-plan.md"	
+@@ -0,0 +1,81 @@
++# 独立异地备份方案：Cloudflare R2 私有桶 + age 客户端加密（T4 准备；未执行）
++
++日期：2026-10-13。状态：**方案就绪，未创建任何账号/凭据、未购买任何资源、未上传任何数据。** 执行方式：服务器首装完成后，由 Codex 带用户逐项执行（以本文件为准）；本仓库不预置任何云凭据。
++
++## 0. 原则（硬线）
++
++- **桶必须私有**：不开公共访问、不绑自定义公开域名；凭据最小权限（只允许对该桶的 Object 读写）。
++- **绝不明文上传**：备份包内含密钥材料（`/etc/b2b/b2b.env`、企业模型私有配置），任何异地副本必须先做客户端加密（age），云上只存密文。
++- **凭据只在服务器 root 私有文件与用户密码管理器**：不进 Git、不进文档、不进聊天、不回显；泄露即轮换。
++- 本机 `/var/backups/b2b` 仍是主恢复路径；异地副本只防“整机丢失/机房事故”。**下载 + 解密 + restore-check 演练通过后才算闭环。**
++
++## 1. 选型与费用线索（执行时以官方页面为准）
++
++- 目标形态：S3 兼容私有桶、客户端加密、保留期可设（生命周期规则）。
++- Cloudflare R2 标准存储有免费额度（约 10GB-月量级），保留期与包大小按真实数据实测后定；阿里云 OSS 为备选（如用户阿里云侧结算更顺）。
++- 备份包大小 ≈ 业务库 + 全部原件 + 私有配置；首装后实测一次（`du -sh /var/backups/b2b/<时间戳>`）。
++
++## 2. 需要用户在 Cloudflare 侧完成（执行清单；Codex 陪同，逐项核对）
++
++1. Cloudflare 账号 → R2 → 创建桶，命名 `b2b-backup`；**不开公共访问**。
++2. 创建 R2 API 令牌：作用域仅该桶、权限 Object Read & Write；记录 Access Key ID / Secret Access Key 与 S3 端点 `https://<accountid>.r2.cloudflarestorage.com`（只存服务器与密码管理器）。
++3. 桶设置：可加生命周期规则“对象 N 天后删除”（与保留期一致，建议先 30 天）；不需要版本控制/公共域名。
++
++## 3. 服务器侧配置（root；待第 2 节完成后执行）
++
++```sh
++sudo apt-get install -y rclone age        # 或按 age 官方文档安装
++# rclone 配置（root 0600）——示例，值在上传时由用户填入，勿写进仓库：
++sudo install -m 0600 /dev/null /etc/b2b/rclone.conf
++sudo tee /etc/b2b/rclone.conf >/dev/null <<'EOF'
++[b2b-r2]
++type = s3
++provider = Cloudflare
++access_key_id = <Access Key ID>
++secret_access_key = <Secret Access Key>
++endpoint = https://<accountid>.r2.cloudflarestorage.com
++acl = private
++EOF
++# age 密钥对（恢复的前提；私钥另存用户密码管理器，服务器丢了还能解密云端副本）
++sudo age-keygen -o /etc/b2b/age.key       # 0600 由 age 默认保证；输出的公钥记入部署记录
++sudo age-keygen -y /etc/b2b/age.key | sudo tee /etc/b2b/age.pub   # 0600
++```
++
++## 4. 加密与上传口径（每日链：本机备份成功后执行）
++
++```sh
++# 打包 + 客户端加密（密文按天命名；密文可另算 sha256 供传输核对）
++B=/var/backups/b2b/$(date +%Y%m%d-%H%M%S)
++sudo -s <<'SH'
++tar -C "$B" -czf - . | age -r "$(cat /etc/b2b/age.pub)" -o "$B.export.tar.gz.age"
++sha256sum "$B.export.tar.gz.age" | tee "$B.export.tar.gz.age.sha256"
++rclone copy "$B.export.tar.gz.age" b2b-r2:b2b-backup/latest/
++rclone copy "$B.export.tar.gz.age.sha256" b2b-r2:b2b-backup/latest/
++SH
++```
++
++上传器脚本化（systemd oneshot，排在本机 b2b-backup 之后）留待执行时落最小实现；**本轮不写、不配置真实令牌**。
++
++## 5. 下载与恢复演练（每季度或换机时；验收闭环步骤）
++
++```sh
++rclone copy b2b-r2:b2b-backup/latest/<stamp>.tar.gz.age /tmp/
++sha256sum -c /tmp/<stamp>.tar.gz.age.sha256
++mkdir /tmp/restore && age -d -i /etc/b2b/age.key -o /tmp/restore/bundle.tar.gz /tmp/<stamp>.tar.gz.age
++mkdir /tmp/restore/bundle && tar -C /tmp/restore/bundle -xzf /tmp/restore/bundle.tar.gz
++sudo /opt/b2b/venv/bin/python3 /opt/b2b/app/tools/backup_restore.py restore-check \
++  --bundle /tmp/restore/bundle --out /var/lib/b2b/restore-check-<stamp>
++# 核对 ops-config/、模型配置、原件哈希全部通过，再考虑投入使用
++```
++
++## 6. 保留与命名
++
++- 本机：14 天（`B2B_BACKUP_KEEP_DAYS`），只清理 `YYYYmmdd-HHMMSS` 目录。
++- 异地：建议 30 天起步（成本实测后调）；对象名 `<stamp>.tar.gz.age`。
++- 密钥轮换：R2 令牌泄露即删除重建；age 密钥轮换需先上传新公钥加密的副本，再退役旧私钥。
++
++## 7. 明确不做（本轮与后续边界）
++
++- 不由 Hermes 创建云账号、生成或保存真实凭据、购买任何资源、上传任何数据。
++- 不把 `/etc/b2b/b2b.env` 或任何密钥明文放进云端、Git、文档或聊天。
++- 异地上传器实现与真实令牌配置属部署执行（Codex 带用户逐项做）；本文件只定义口径与步骤。
+diff --git "a/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/systemd/b2b-backup.service" "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/systemd/b2b-backup.service"
+new file mode 100644
+index 0000000..e0d579c
+--- /dev/null
++++ "b/Users/jiahaoshang/.codex/worktrees/196c/b2b \345\224\256\345\211\215\345\256\242\346\210\267\347\256\241\347\220\206\345\271\263\345\217\260/deploy/systemd/b2b-backup.service"	
+@@ -0,0 +1,14 @@
++# 每日备份：停写窗口（保存原状态 → 停应用与受管桥 → 快照 → 恢复原本活跃的服务），
++# 见 deploy/backup_snapshot.sh。
++# 说明：备份脚本需要能 stop/start b2b-app，因此本单元以 root 运行；
++# 备份产物为 root 私有（0700/0600）——包内含业务库、原件与密钥，不进 b2b 用户可读范围。
++# 读取与 b2b-app 相同的环境配置（/etc/b2b/b2b.env）：B2B_* 路径、保留天数等设置在此生效。
++[Unit]
++Description=B2B presales platform scheduled backup (quiesce + snapshot)
++After=b2b-app.service
++
++[Service]
++Type=oneshot
++User=root
++EnvironmentFile=/etc/b2b/b2b.env
++ExecStart=/opt/b2b/app/deploy/backup_snapshot.sh

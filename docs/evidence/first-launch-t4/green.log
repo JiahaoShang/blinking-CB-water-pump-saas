@@ -1,0 +1,27 @@
+test_backup_accepts_nested_phase2_relative_source_path (test_first_launch_t4.BackupCoverageTests)
+T0 登记的旧边界：source_documents 中 data/uploads/phase2/... 嵌套相对路径必须被受理。 ... ok
+test_backup_fails_when_kb2_original_missing (test_first_launch_t4.BackupCoverageTests) ... ok
+test_backup_fails_when_knowledge_original_escapes_uploads (test_first_launch_t4.BackupCoverageTests) ... ok
+test_backup_fails_when_knowledge_original_is_symlink (test_first_launch_t4.BackupCoverageTests) ... ok
+test_backup_fails_when_knowledge_original_missing (test_first_launch_t4.BackupCoverageTests) ... ok
+test_backup_fails_when_knowledge_original_tampered (test_first_launch_t4.BackupCoverageTests) ... ok
+test_backup_fails_when_source_document_is_symlink (test_first_launch_t4.BackupCoverageTests) ... ok
+test_cli_backup_and_restore_roundtrip (test_first_launch_t4.CliRoundtripTests) ... ok
+test_connection_runtime_included_and_restored (test_first_launch_t4.PersistentStateCoverageTests) ... ok
+test_model_secrets_included_and_remapped_on_restore (test_first_launch_t4.PersistentStateCoverageTests) ... ok
+test_roundtrip_counts_cover_all_source_tables (test_first_launch_t4.PersistentStateCoverageTests) ... ok
+test_restore_accepts_legacy_bundle_layout (test_first_launch_t4.RestoreMappingTests)
+旧格式包（无 origin 记录）：按文件名 + 哈希尽力重建知识原件映射。 ... ok
+test_restore_refuses_existing_destination (test_first_launch_t4.RestoreMappingTests) ... ok
+test_restore_rejects_bundle_containing_symlink (test_first_launch_t4.RestoreMappingTests) ... ok
+test_restore_remaps_absolute_paths_and_keeps_legacy_relative (test_first_launch_t4.RestoreMappingTests) ... ok
+test_configured_upload_dir_receives_new_source_files (test_first_launch_t4.UploadDirConfigTests) ... ok
+test_knowledge_import_lands_in_configured_upload_dir (test_first_launch_t4.UploadDirConfigTests) ... ok
+test_legacy_relative_path_resolves_to_configured_upload_dir (test_first_launch_t4.UploadDirConfigTests) ... ok
+test_resolve_stored_file_rejects_escape_and_symlink (test_first_launch_t4.UploadDirConfigTests) ... ok
+test_backup_restores_database_and_source_file_in_isolated_directory (test_backup_restore.BackupRestoreTests) ... ok
+
+----------------------------------------------------------------------
+Ran 20 tests in 2.723s
+
+OK

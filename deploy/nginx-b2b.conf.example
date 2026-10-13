@@ -1,0 +1,85 @@
+# B2B 售前平台：反向 HTTPS 代理（最终态；域名 pilot.alpsaga.tech）。
+# 安装顺序见 deploy/README.md 第 3 节 ⑨：
+#   1) 先用 deploy/nginx-b2b-http-bootstrap.conf.example 完成首次签证（certbot webroot，本文件此时不用）；
+#   2) 证书就绪后，用本文件替换 /etc/nginx/sites-available/b2b.conf；
+#   3) sudo nginx -t && sudo systemctl reload nginx
+#
+# 安全口径（T1/T4）：
+#  - 只服务精确域名 pilot.alpsaga.tech；其他 Host（IP 直连、伪造域名）落到默认站点
+#    直接关闭连接（HTTP 444 / HTTPS 拒绝握手），不经过应用、不回显任何内容（防任意 Host 反射）。
+#  - 应用只监听 127.0.0.1:8000；公网唯一入口是本文件的 443，默认站点不代理应用。
+#  - 日志不得记录买方访问凭据与 query：
+#      * 访问日志用 b2b_nocreds 格式：$uri（不含查询串）；不记录 $request 原文；
+#        也不记录 Referer（来源页 URL 可能带 query）；
+#      * 买方凭据路径 /rfq/<token>（token 本身即凭据）单独 access_log off；
+#      * 错误日志收敛到 crit，避免请求行（含 URI/凭据路径）随错误信息落盘；
+#        应用级诊断看 systemd journal（journalctl -u b2b-app）。
+#  - 覆盖外来 X-Forwarded-*（不继承客户端伪造值）；声明 X-Forwarded-Proto: https。
+
+log_format b2b_nocreds '$remote_addr - $remote_user [$time_local] "$request_method $uri $server_protocol" $status $body_bytes_sent "$http_user_agent" $request_time';
+
+# 默认站点：不代理应用；未知 Host 一律关闭连接（HTTP 关连接 / HTTPS 拒绝握手）。
+server {
+    listen 80 default_server;
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;   # nginx ≥ 1.19.4（Ubuntu 24.04 自带 1.24）
+    access_log off;
+    error_log /var/log/nginx/b2b-error.log crit;
+    return 444;
+}
+
+# 精确域名：HTTP 整站跳转 HTTPS（目标域名写死，避免任何 Host 拼接反射）。
+server {
+    listen 80;
+    server_name pilot.alpsaga.tech;
+    access_log /var/log/nginx/b2b-access.log b2b_nocreds;
+    error_log /var/log/nginx/b2b-error.log crit;
+    return 301 https://pilot.alpsaga.tech$request_uri;
+}
+
+# 精确域名：HTTPS 站点（证书由 certbot 维护；续期后 reload nginx 即可）。
+server {
+    listen 443 ssl;
+    server_name pilot.alpsaga.tech;
+
+    ssl_certificate     /etc/letsencrypt/live/pilot.alpsaga.tech/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/pilot.alpsaga.tech/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    access_log /var/log/nginx/b2b-access.log b2b_nocreds;
+    error_log  /var/log/nginx/b2b-error.log crit;
+
+    client_max_body_size 12m;              # 原件上限 10MB（知识/来源文件）+ 表单余量
+
+    # ACME 续期校验（勿删）：80 全站 301 后 CA 跟随跳转到本 443 站点取校验文件；
+    # 必须由 webroot 直读（^~ 优先于下方 location /，不代理进应用）——缺此块时请求
+    # 落入应用代理返回 404（2026-10-13 真机 certbot renew 实际失败点）。
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/b2b-acme;
+        default_type text/plain;
+    }
+
+    # 买方询价链接 /rfq/<token>：token 本身即凭据，禁止写访问日志。
+    location ^~ /rfq/ {
+        access_log off;
+        proxy_pass http://127.0.0.1:8000;  # 应用只监听本机回环
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;              # 保留外部 Host（含端口）
+        proxy_set_header X-Forwarded-Proto $scheme;    # https 声明：Secure Cookie/同源协议
+        proxy_set_header X-Forwarded-For $remote_addr; # 覆盖客户端自带值
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 60s;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;  # 应用只监听本机回环
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;              # 保留外部 Host（含端口）
+        proxy_set_header X-Forwarded-Proto $scheme;    # https 声明：Secure Cookie/同源协议
+        proxy_set_header X-Forwarded-For $remote_addr; # 覆盖客户端自带值
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 60s;
+    }
+}
