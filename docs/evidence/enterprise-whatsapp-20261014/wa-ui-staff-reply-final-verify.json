@@ -1,0 +1,10 @@
+{
+  "status": "Success",
+  "exit_code": 0,
+  "output": "{\"ui_staff_reply_routes_verified\": true, \"messages\": [{\"id\": \"2fceb776fed89600bbb354bd\", \"role\": \"staff\", \"source\": \"staff-reply\", \"status\": \"sent\", \"account_id\": \"0aeb613589f381d2ccabea7f\", \"vendor_id_present\": true}, {\"id\": \"6f08bdc371d6e8e72b1edba2\", \"role\": \"buyer\", \"source\": \"whatsapp_personal\", \"status\": \"\", \"account_id\": \"a03f8c1a059c5e1a924b83ea\", \"vendor_id_present\": true}, {\"id\": \"d2c01e0e245e728c19ee395f\", \"role\": \"staff\", \"source\": \"staff-reply\", \"status\": \"sent\", \"account_id\": \"a03f8c1a059c5e1a924b83ea\", \"vendor_id_present\": true}, {\"id\": \"fd5f2e8a03c9405543ac47f0\", \"role\": \"buyer\", \"source\": \"whatsapp_personal\", \"status\": \"\", \"account_id\": \"0aeb613589f381d2ccabea7f\", \"vendor_id_present\": true}]}\n",
+  "human_evidence": {
+    "source": "direct user reply after corrected product links",
+    "answer": "都收到了",
+    "scope": "two UI staff replies and corresponding phones"
+  }
+}
