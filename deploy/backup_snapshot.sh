@@ -9,10 +9,16 @@
 # 配置），因此不进 b2b 用户可读范围，也不允许明文上传到云——异地方案必须先加密
 # （见 deploy/offsite-backup-r2-plan.md）。
 #
-# 受管桥（WhatsApp 个人版容器，名称固定为 b2b-account-<24 位账号 ID>）：
-# 只处理本库 <数据目录>/connection-runtime/ 下登记过账号对应的容器，绝不触碰其他容器；
-# docker 不可用或容器不存在时告警跳过、不猜不停。本部署形态下应用没有 Docker 权限、
-# 桥在 T5 前不启用（见 deploy/README.md 已知限制），此逻辑待桥真实运行后生效。
+# 受管桥（两类，均只处理本数据目录对应容器，绝不触碰其他容器）：
+# 1) 旧账号容器（WhatsApp 个人版，名称固定 b2b-account-<24 位账号 ID>）：
+#    只处理本库 <数据目录>/connection-runtime/ 下登记过账号对应的容器；
+# 2) 企业专属桥容器（运营预部署，b2b-enterprise-<租户哈希 24hex>）：
+#    由注册表 <数据目录>/connection-runtime/enterprise-bridges.json（或
+#    WHATSAPP_PERSONAL_BRIDGES_FILE 指向的文件）登记；预检用部署工具 --check-registered
+#    核对标签与 sessions/media 卷属于本库数据目录、并区分运行状态——恢复副本/另一数据根
+#    的同名容器或被替换的容器一律失败退出（exit 3）；任何“无法确认”（含 docker inspect
+#    失败）同样失败，绝不宣称一致性成功。
+# 旧账号容器：docker 不可用或容器不存在时告警跳过、不猜不停。本部署形态下应用没有 Docker 权限。
 #
 # 环境变量（由 /etc/b2b/b2b.env 或单元文件提供；均有默认值）：
 #   B2B_APP_UNIT、B2B_APP_DIR、B2B_PY、B2B_DATA_DIR、B2B_BACKUP_ROOT、
@@ -94,6 +100,37 @@ if [ -e "$OUT" ] || [ -L "$OUT" ]; then
   exit 2
 fi
 
+# ── 企业桥注册表预检（在停写之前完成；用部署工具核对归属与运行状态）──────────────
+# 注册表位置与应用的读取口径一致：WHATSAPP_PERSONAL_BRIDGES_FILE 优先，默认取本数据目录。
+# --check-registered 由部署工具核对每个登记容器：标签（bridge=1 + 本企业）、sessions/media
+# 卷必须属于本库数据目录（恢复副本/另一数据根的同名容器会被拒绝），并区分运行状态；
+# 任何无法核对（含 docker inspect 失败）一律失败——绝不把“无法确认”当成“无需停写”。
+ENTERPRISE_REGISTRY="${WHATSAPP_PERSONAL_BRIDGES_FILE:-$RUNTIME_DIR/enterprise-bridges.json}"
+ENTERPRISE_TOOL="$APP_DIR/deploy/provision_enterprise_bridge.py"
+ENTERPRISE_STATES=""
+if [ -e "$ENTERPRISE_REGISTRY" ]; then
+  if [ ! -f "$ENTERPRISE_REGISTRY" ]; then
+    echo "错误：企业桥注册表存在但不是普通文件，拒绝备份：$ENTERPRISE_REGISTRY" >&2
+    exit 3
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "错误：已登记企业桥（$ENTERPRISE_REGISTRY）但 Docker 不可用，无法停写企业桥容器——拒绝在可能半写状态下备份" >&2
+    exit 3
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    echo "错误：已登记企业桥（$ENTERPRISE_REGISTRY）但 Docker 守护进程不可用，无法停写企业桥容器——拒绝在可能半写状态下备份" >&2
+    exit 3
+  fi
+  if [ ! -f "$ENTERPRISE_TOOL" ]; then
+    echo "错误：缺少企业桥注册表工具（$ENTERPRISE_TOOL），无法核对已登记容器的停写范围" >&2
+    exit 3
+  fi
+  if ! ENTERPRISE_STATES="$("$PY" "$ENTERPRISE_TOOL" --check-registered --db "$DB_PATH")"; then
+    echo "错误：企业桥归属/状态核对失败（fail-closed，未停写；恢复副本或被替换的容器不会被动）" >&2
+    exit 3
+  fi
+fi
+
 # ── 停写：应用 → 受管桥 ───────────────────────────────────────────────────
 if [ "$APP_WAS_ACTIVE" = "1" ]; then
   echo "停写窗口：停止 $APP_UNIT"
@@ -102,26 +139,62 @@ else
   echo "提示：$APP_UNIT 原本未运行，不停不启（备份后保持原状）"
 fi
 
-if [ -d "$RUNTIME_DIR" ]; then
+if [ -d "$RUNTIME_DIR" ] || [ -n "$ENTERPRISE_STATES" ]; then
   if ! command -v docker >/dev/null 2>&1; then
     echo "警告：Docker 未安装或不在 PATH，跳过受管桥停写；如桥正在运行，本次备份可能包含半写会话" >&2
   elif ! docker info >/dev/null 2>&1; then
     echo "警告：Docker 不可用，跳过受管桥停写；如桥正在运行，本次备份可能包含半写会话" >&2
   else
-    for account_dir in "$RUNTIME_DIR"/*/; do
-      [ -d "$account_dir" ] || continue
-      account="$(basename "$account_dir")"
-      if ! printf '%s' "$account" | grep -Eq '^[0-9a-f]{24}$'; then
-        continue
+    # 旧账号容器（既有模式；docker 不可用或容器不存在时告警跳过、不猜不停）
+    if [ -d "$RUNTIME_DIR" ]; then
+      for account_dir in "$RUNTIME_DIR"/*/; do
+        [ -d "$account_dir" ] || continue
+        account="$(basename "$account_dir")"
+        if ! printf '%s' "$account" | grep -Eq '^[0-9a-f]{24}$'; then
+          continue
+        fi
+        name="b2b-account-$account"
+        state="$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)"
+        if [ "$state" = "true" ]; then
+          echo "停写窗口：停止受管桥容器 $name"
+          docker stop "$name" >/dev/null
+          STOPPED_BRIDGES="$STOPPED_BRIDGES $name"
+        fi
+      done
+    fi
+    # 企业桥容器（预检已核对归属：标签 + 卷属于本库数据目录；去重；停不下来即失败）
+    while IFS=' ' read -r state name; do
+      [ -n "${name:-}" ] || continue
+      if ! printf '%s' "$name" | grep -Eq '^b2b-enterprise-[0-9a-f]{24}$'; then
+        echo "错误：预检返回了无效容器名，拒绝停写：$name" >&2
+        exit 3
       fi
-      name="b2b-account-$account"
-      state="$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)"
-      if [ "$state" = "true" ]; then
-        echo "停写窗口：停止受管桥容器 $name"
-        docker stop "$name" >/dev/null
-        STOPPED_BRIDGES="$STOPPED_BRIDGES $name"
-      fi
-    done
+      case "$state" in
+        running)
+          case " $STOPPED_BRIDGES " in
+            *" $name "*) continue ;;
+          esac
+          echo "停写窗口：停止企业桥容器 $name"
+          if ! docker stop "$name" >/dev/null; then
+            echo "错误：企业桥容器未能停止，终止本次备份（将恢复原状态）：$name" >&2
+            exit 3
+          fi
+          STOPPED_BRIDGES="$STOPPED_BRIDGES $name"
+          ;;
+        stopped)
+          echo "提示：注册企业桥容器不在运行，无需停写：$name"
+          ;;
+        absent)
+          echo "提示：注册企业桥容器不存在（尚未部署或已移除），无需停写：$name"
+          ;;
+        *)
+          echo "错误：企业桥状态无法识别，拒绝停写：$state $name" >&2
+          exit 3
+          ;;
+      esac
+    done <<EOF
+$ENTERPRISE_STATES
+EOF
   fi
 fi
 

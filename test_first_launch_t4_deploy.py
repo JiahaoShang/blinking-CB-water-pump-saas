@@ -18,8 +18,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -71,7 +73,8 @@ esac
 """
 
 DOCKER_SHIM = """#!/bin/sh
-# 测试假件：FAKE_STATE_DIR/containers/<name>.exists / .running 表示容器状态。
+# 测试假件：FAKE_STATE_DIR/containers/<name>.exists / .running / .inspectfail / .stopfail /
+# .labels_json / .sessions_source / .media_source / .image 表示容器状态与核对输入。
 cmd="$1"
 shift
 dir="${FAKE_STATE_DIR:-/tmp}/containers"
@@ -80,17 +83,44 @@ log="${FAKE_LOG:-/dev/null}"
 case "$cmd" in
   info) exit 0 ;;
   inspect)
-    name=""
-    for a in "$@"; do
-      case "$a" in -*) ;; *) name="$a" ;; esac
-    done
+    template="$2"
+    name="$3"
+    if [ -f "$dir/$name.inspectfail" ]; then
+      echo "Error response from daemon: cannot inspect container $name" >&2
+      exit 1
+    fi
     if [ -f "$dir/$name.exists" ]; then
-      if [ -f "$dir/$name.running" ]; then echo true; else echo false; fi
-      exit 0
+      case "$template" in
+        *Config.Labels*)
+          echo "docker inspect-labels $name" >> "$log"
+          if [ -f "$dir/$name.labels_json" ]; then
+            cat "$dir/$name.labels_json"
+          else
+            printf '%s' '{}'
+          fi
+          exit 0 ;;
+        *Mounts*)
+          sessions=""
+          media=""
+          if [ -f "$dir/$name.sessions_source" ]; then sessions="$(cat "$dir/$name.sessions_source")"; fi
+          if [ -f "$dir/$name.media_source" ]; then media="$(cat "$dir/$name.media_source")"; fi
+          printf '[{"Source":"%s","Destination":"/app/.sessions"},{"Source":"%s","Destination":"/app/.media"}]' "$sessions" "$media"
+          exit 0 ;;
+        *Config.Image*)
+          if [ -f "$dir/$name.image" ]; then cat "$dir/$name.image"; fi
+          exit 0 ;;
+        *)
+          if [ -f "$dir/$name.running" ]; then echo true; else echo false; fi
+          exit 0 ;;
+      esac
     fi
     echo "Error: No such object: $name" >&2
     exit 1 ;;
   stop)
+    if [ -f "$dir/$1.stopfail" ]; then
+      echo "Error response from daemon: cannot stop container: $1" >&2
+      exit 1
+    fi
     echo "docker stop $1" >> "$log"
     rm -f "$dir/$1.running"
     exit 0 ;;
@@ -159,6 +189,12 @@ class DeployScriptTestBase(unittest.TestCase):
         self.app_dir = self.root / "app"
         (self.app_dir / "tools").mkdir(parents=True)
         (self.app_dir / "tools" / "backup_restore.py").write_text(BACKUP_SHIM, encoding="utf-8")
+        # 脚本会调用真实企业桥注册表工具读取登记容器；沙箱里放一份当前源码副本（含依赖模块）。
+        tool_source = REPO / "deploy" / "provision_enterprise_bridge.py"
+        if tool_source.is_file():
+            (self.app_dir / "deploy").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(tool_source, self.app_dir / "deploy" / "provision_enterprise_bridge.py")
+            shutil.copy2(REPO / "channel_runtime.py", self.app_dir / "channel_runtime.py")
         self.data_dir = self.root / "data"
         self.uploads = self.data_dir / "uploads"
         self.uploads.mkdir(parents=True)
@@ -189,6 +225,38 @@ class DeployScriptTestBase(unittest.TestCase):
     def add_bridge_account(self, account: str) -> str:
         (self.data_dir / "connection-runtime" / account).mkdir(parents=True, exist_ok=True)
         return f"b2b-account-{account}"
+
+    def add_enterprise_bridge(self, tenant: str, running: bool = True, label: str = "1",
+                              sessions_root=None, media_root=None, tenant_label=None) -> str:
+        digest = hashlib.sha256(tenant.encode("utf-8")).hexdigest()[:24]
+        name = f"b2b-enterprise-{digest}"
+        self.add_container(name, running=running)
+        containers = self.state / "containers"
+        base = self.data_dir / "connection-runtime" / "enterprise" / digest
+        (containers / f"{name}.labels_json").write_text(json.dumps({
+            "b2b.enterprise.bridge": label,
+            "b2b.enterprise.tenant": tenant if tenant_label is None else tenant_label,
+        }), encoding="utf-8")
+        (containers / f"{name}.sessions_source").write_text(
+            str(sessions_root if sessions_root is not None else base / "sessions"), encoding="utf-8")
+        (containers / f"{name}.media_source").write_text(
+            str(media_root if media_root is not None else base / "media"), encoding="utf-8")
+        (containers / f"{name}.image").write_text("devlikeapro/waha:noweb-2026.9.2", encoding="utf-8")
+        return name
+
+    def write_registry(self, tenants) -> Path:
+        path = self.data_dir / "connection-runtime" / "enterprise-bridges.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        document = {"version": 1, "bridges": {}}
+        for tenant in tenants:
+            digest = hashlib.sha256(tenant.encode("utf-8")).hexdigest()[:24]
+            document["bridges"][tenant] = {
+                "container_name": f"b2b-enterprise-{digest}",
+                "api_base": "http://127.0.0.1:41000",
+                "api_key": "k" * 64,
+            }
+        path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+        return path
 
     def run_script(self, *, with_docker: bool = True, fail_backup: bool = False) -> subprocess.CompletedProcess:
         env = {
@@ -351,6 +419,136 @@ class BackupScriptBehaviorTests(DeployScriptTestBase):
         self.assertEqual(len(find_bundle_dirs(self.backup_root)), 2)  # recent + 本次新备份
 
 
+class EnterpriseBridgeBackupScriptTests(DeployScriptTestBase):
+    """企业桥注册表参与停写：登记后必须能停写（fail-closed），兼容旧账号容器，不触碰无关容器。"""
+
+    def test_registered_running_bridges_stop_once_and_restore(self) -> None:
+        self.activate_app()
+        account_container = self.add_bridge_account("0123456789abcdef01234567")
+        self.add_container(account_container, running=True)
+        alpha = self.add_enterprise_bridge("tenant-alpha", running=True)
+        beta = self.add_enterprise_bridge("tenant-beta", running=True)
+        gamma = self.add_enterprise_bridge("tenant-gamma", running=False)
+        digest_delta = hashlib.sha256("tenant-delta".encode("utf-8")).hexdigest()[:24]
+        delta = f"b2b-enterprise-{digest_delta}"  # 登记但容器不存在（尚未部署/已移除）
+        self.write_registry(["tenant-alpha", "tenant-beta", "tenant-gamma", "tenant-delta"])
+        self.add_container("unrelated-service", running=True)
+
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = self.log_lines()
+        self.assert_order(lines, [
+            "systemctl stop b2b-app",
+            f"docker stop {account_container}",
+            "backup-start",
+            "backup-ok",
+        ])
+        for name in (alpha, beta):
+            self.assert_order(lines, [f"docker inspect-labels {name}", f"docker stop {name}"])
+            self.assertLess(lines.index(f"docker stop {name}"), lines.index("backup-start"),
+                            "企业桥必须在快照之前停写")
+            self.assertEqual(lines.count(f"docker stop {name}"), 1, "注册企业桥不得被重复停止")
+        self.assertNotIn(f"docker stop {gamma}", lines, "未运行的注册桥无需停写")
+        self.assertNotIn(f"docker start {gamma}", lines, "不得启动原本未运行的桥")
+        self.assertNotIn(f"docker stop {delta}", lines, "不存在的注册容器不得被触碰")
+        self.assertNotIn("docker stop unrelated-service", lines, "无关容器不得触碰")
+        self.assertTrue((self.state / "containers" / f"{alpha}.running").exists(), "原本运行的桥必须被恢复")
+        self.assertTrue((self.state / "containers" / f"{beta}.running").exists())
+        self.assertTrue((self.state / "units" / "b2b-app.active").exists())
+        bundles = find_bundle_dirs(self.backup_root)
+        self.assertEqual(len(bundles), 1)
+        registry_copy = bundles[0] / "connection-runtime" / "enterprise-bridges.json"
+        self.assertTrue(registry_copy.is_file(), "企业桥注册表必须进入备份包（connection-runtime 整体纳入）")
+
+    def test_restored_copy_never_stops_original_bridge(self) -> None:
+        """恢复副本（另一数据根）登记的桥不得停原桥：挂载来源与当前数据目录不一致必须失败。"""
+        self.activate_app()
+        digest = hashlib.sha256("tenant-alpha".encode("utf-8")).hexdigest()[:24]
+        original_enterprise = self.root / "original-data" / "connection-runtime" / "enterprise"
+        # 同名容器，但会话/媒体卷来自另一数据根（原库）——恢复副本里可能出现这种注册
+        alpha = self.add_enterprise_bridge(
+            "tenant-alpha", running=True,
+            sessions_root=original_enterprise / digest / "sessions",
+            media_root=original_enterprise / digest / "media")
+        self.write_registry(["tenant-alpha"])
+
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0, "挂载不属于本数据目录时必须拒绝（fail-closed）")
+        self.assertIn("企业桥", result.stderr)
+        lines = self.log_lines()
+        self.assertNotIn(f"docker stop {alpha}", lines, "恢复副本不得停原桥")
+        self.assertNotIn("systemctl stop b2b-app", lines, "预检失败不得先停应用")
+        self.assertTrue((self.state / "containers" / f"{alpha}.running").exists())
+        self.assertEqual(find_bundle_dirs(self.backup_root), [])
+
+    def test_unknown_container_state_fails_closed(self) -> None:
+        """docker inspect 失败不能当作“不在运行”继续宣称已一致停写。"""
+        self.activate_app()
+        alpha = self.add_enterprise_bridge("tenant-alpha", running=True)
+        self.write_registry(["tenant-alpha"])
+        (self.state / "containers" / f"{alpha}.inspectfail").write_text("", encoding="utf-8")
+
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0, "无法确认容器状态时必须失败")
+        self.assertIn("企业桥", result.stderr)
+        lines = self.log_lines()
+        self.assertNotIn(f"docker stop {alpha}", lines)
+        self.assertNotIn("systemctl stop b2b-app", lines, "预检失败不得先停应用")
+        self.assertTrue((self.state / "containers" / f"{alpha}.running").exists())
+        self.assertEqual(find_bundle_dirs(self.backup_root), [])
+
+    def test_enterprise_stop_failure_fails_backup_and_restores_original_state(self) -> None:
+        self.activate_app()
+        alpha = self.add_enterprise_bridge("tenant-alpha", running=True)
+        self.write_registry(["tenant-alpha"])
+        (self.state / "containers" / f"{alpha}.stopfail").write_text("", encoding="utf-8")
+
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0, "企业桥无法停写时必须失败，而不是宣称一致性成功")
+        self.assertIn("企业桥", result.stderr)
+        lines = self.log_lines()
+        self.assertIn("systemctl start b2b-app", lines, "失败后必须恢复原活跃服务")
+        self.assertTrue((self.state / "units" / "b2b-app.active").exists())
+        self.assertEqual(find_bundle_dirs(self.backup_root), [], "停写失败不得留下备份产物")
+        self.assertTrue((self.state / "containers" / f"{alpha}.running").exists(), "未能停止的容器应保持原状")
+
+    def test_label_mismatch_refuses_to_stop_container(self) -> None:
+        self.activate_app()
+        alpha = self.add_enterprise_bridge("tenant-alpha", running=True, label="")
+        self.write_registry(["tenant-alpha"])
+
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("企业桥", result.stderr)
+        lines = self.log_lines()
+        self.assertNotIn(f"docker stop {alpha}", lines, "标签不符的容器必须拒绝停写")
+        self.assertNotIn("systemctl stop b2b-app", lines, "预检失败不得先停应用")
+        self.assertTrue((self.state / "units" / "b2b-app.active").exists())
+        self.assertEqual(find_bundle_dirs(self.backup_root), [])
+
+    def test_registry_with_docker_unavailable_fails_before_stopping_app(self) -> None:
+        self.activate_app()
+        self.add_enterprise_bridge("tenant-alpha", running=True)
+        self.write_registry(["tenant-alpha"])
+
+        result = self.run_script(with_docker=False)
+        self.assertNotEqual(result.returncode, 0, "已登记企业桥时 Docker 不可用必须拒绝备份")
+        self.assertIn("企业桥", result.stderr)
+        self.assertNotIn("systemctl stop b2b-app", self.log_lines(), "预检失败不得先停应用")
+        self.assertTrue((self.state / "units" / "b2b-app.active").exists())
+        self.assertEqual(find_bundle_dirs(self.backup_root), [])
+
+    def test_empty_registry_keeps_legacy_flow(self) -> None:
+        self.activate_app()
+        self.write_registry([])
+
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = self.log_lines()
+        self.assertFalse(any(line.startswith("docker stop") for line in lines))
+        self.assertEqual(len(find_bundle_dirs(self.backup_root)), 1)
+
+
 class SystemdUnitTests(unittest.TestCase):
     def test_backup_service_reads_env_file_and_runs_script(self) -> None:
         unit = (REPO / "deploy" / "systemd" / "b2b-backup.service").read_text(encoding="utf-8")
@@ -480,6 +678,7 @@ class ReleasePackageTests(unittest.TestCase):
             f"{self.package_root}/requirements-knowledge.txt",
             f"{self.package_root}/deploy/backup_snapshot.sh",
             f"{self.package_root}/deploy/make_release.py",
+            f"{self.package_root}/deploy/provision_enterprise_bridge.py",
             f"{self.package_root}/deploy/nginx-b2b.conf.example",
             f"{self.package_root}/deploy/systemd/b2b-app.service",
             f"{self.package_root}/tools/backup_restore.py",

@@ -6761,10 +6761,22 @@ def _whatsapp_personal_session(config: dict) -> str:
 
 
 def _whatsapp_personal_bridge(config: dict) -> tuple[str, str, str]:
-    """桥接三元组（base, api_key, session）——发送与扫码绑定区共用。"""
+    """桥接三元组（base, api_key, session）——发送与扫码绑定区共用。
+
+    企业注册表模式（WHATSAPP_PERSONAL_BRIDGES_FILE 已配置）：地址与密钥只按账号配置里的
+    企业桥引用（bridge_tenant）从私有注册表解析；缺失/无效映射一律拒绝——不回退平台全局
+    WHATSAPP_PERSONAL_BASE / WHATSAPP_PERSONAL_API_KEY，也不把密钥写进配置、页面或日志。
+    """
+    session = _whatsapp_personal_session(config)
+    if os.environ.get("WHATSAPP_PERSONAL_BRIDGES_FILE", "").strip():
+        from channel_runtime import resolve_enterprise_bridge
+        entry = resolve_enterprise_bridge(config.get("bridge_tenant"), session)
+        if not entry:
+            raise ChannelSendError("本企业的专属连接桥未就绪，请联系平台运营方")
+        return entry["api_base"], entry["api_key"], session
     base = str(channel_api_base("whatsapp_personal", config) or "").rstrip("/")
     api_key = os.environ.get("WHATSAPP_PERSONAL_API_KEY", "").strip()
-    return base, api_key, _whatsapp_personal_session(config)
+    return base, api_key, session
 
 
 def whatsapp_personal_session_state(config: dict, timeout: int = 6) -> dict:
@@ -7018,16 +7030,17 @@ def whatsapp_personal_logout_session(config: dict, timeout: int = 15, restart: b
 
 
 def _send_whatsapp_personal(config: dict, external_user_id: str, text: str) -> str:
-    """WhatsApp 个人版（经本机 WAHA 桥）：节奏层 → 已读/输入中 → sendText；返回消息 ID。
+    """WhatsApp 个人版（经 WAHA 桥）：节奏层 → 已读/输入中 → sendText；返回消息 ID。
 
+    桥地址/密钥/会话统一由 _whatsapp_personal_bridge 解析（注册表模式见其说明）。
     环境变量：WHATSAPP_PERSONAL_BASE（默认 http://127.0.0.1:3100）、WHATSAPP_PERSONAL_API_KEY；
     节奏参数：WHATSAPP_PERSONAL_PACING / _MIN_GAP / _MAX_PER_MIN / _MAX_PER_HOUR / _TYPING_*。
     """
-    base = channel_api_base("whatsapp_personal", config)
-    api_key = os.environ.get("WHATSAPP_PERSONAL_API_KEY", "").strip()
+    base, api_key, session = _whatsapp_personal_bridge(config)
     if not api_key:
         raise ChannelSendError("缺少环境变量 WHATSAPP_PERSONAL_API_KEY")
-    session = _whatsapp_personal_session(config)
+    if not base:
+        raise ChannelSendError("桥接地址未配置")
     jid = str(external_user_id or "").strip()
     if "@" not in jid:
         digits = re.sub(r"\D", "", jid)

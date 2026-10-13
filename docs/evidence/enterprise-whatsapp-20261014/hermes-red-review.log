@@ -1,0 +1,47 @@
+.F.F..F..............................................................FF...................................
+======================================================================
+FAIL: test_check_registered_fails_closed_on_foreign_mount_or_label_or_inspect_error (test_channel_runtime.EnterpriseBridgeToolTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 291, in test_check_registered_fails_closed_on_foreign_mount_or_label_or_inspect_error
+    self.check(fake)
+AssertionError: ProvisionError not raised
+
+======================================================================
+FAIL: test_creates_isolated_container_env_file_and_registry (test_channel_runtime.EnterpriseBridgeToolTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 171, in test_creates_isolated_container_env_file_and_registry
+    self.assertIn(media_volume, volumes, '媒体卷必须挂到 WAHA 实际文件目录')
+AssertionError: '/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/enterprise-bridge-tool-05diw417/connection-runtime/enterprise/d10b4f3ef504e2c900c13701/media:/app/.media' not found in ['/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/enterprise-bridge-tool-05diw417/connection-runtime/enterprise/d10b4f3ef504e2c900c13701/sessions:/app/.sessions', '/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/enterprise-bridge-tool-05diw417/connection-runtime/enterprise/d10b4f3ef504e2c900c13701/media:/app/media'] : 媒体卷必须挂到 WAHA 实际文件目录
+
+======================================================================
+FAIL: test_refuses_foreign_container_with_same_name (test_channel_runtime.EnterpriseBridgeToolTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 250, in test_refuses_foreign_container_with_same_name
+    self.provision(fake)
+AssertionError: ProvisionError not raised
+
+======================================================================
+FAIL: test_restored_copy_never_stops_original_bridge (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests)
+恢复副本（另一数据根）登记的桥不得停原桥：挂载来源与当前数据目录不一致必须失败。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_deploy.py", line 476, in test_restored_copy_never_stops_original_bridge
+    self.assertNotEqual(result.returncode, 0, "挂载不属于本数据目录时必须拒绝（fail-closed）")
+AssertionError: 0 == 0 : 挂载不属于本数据目录时必须拒绝（fail-closed）
+
+======================================================================
+FAIL: test_unknown_container_state_fails_closed (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests)
+docker inspect 失败不能当作“不在运行”继续宣称已一致停写。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_deploy.py", line 492, in test_unknown_container_state_fails_closed
+    self.assertNotEqual(result.returncode, 0, "无法确认容器状态时必须失败")
+AssertionError: 0 == 0 : 无法确认容器状态时必须失败
+
+----------------------------------------------------------------------
+Ran 106 tests in 41.293s
+
+FAILED (failures=5)

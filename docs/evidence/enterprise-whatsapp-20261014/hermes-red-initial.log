@@ -1,0 +1,274 @@
+test_creates_isolated_container_env_file_and_registry (test_channel_runtime.EnterpriseBridgeToolTests) ... ERROR
+test_list_registered_returns_managed_names (test_channel_runtime.EnterpriseBridgeToolTests) ... ERROR
+test_rebuild_from_restored_registry_updates_random_address (test_channel_runtime.EnterpriseBridgeToolTests) ... ERROR
+test_refuses_foreign_container_with_same_name (test_channel_runtime.EnterpriseBridgeToolTests) ... ERROR
+test_refuses_unknown_tenant_or_missing_database (test_channel_runtime.EnterpriseBridgeToolTests) ... ERROR
+test_second_run_is_idempotent_and_refreshes_address (test_channel_runtime.EnterpriseBridgeToolTests) ... ERROR
+test_registry_file_present_but_not_configured_keeps_existing_modes (test_channel_runtime.PersonalBridgeLegacyModeTests) ... ERROR
+test_fail_closed_when_registry_file_missing (test_channel_runtime.PersonalBridgeRegistryModeTests) ... ERROR
+test_fail_closed_without_valid_tenant_mapping (test_channel_runtime.PersonalBridgeRegistryModeTests) ... ERROR
+test_resolves_current_tenant_entry_without_docker (test_channel_runtime.PersonalBridgeRegistryModeTests) ... ERROR
+test_isolated_container_config_and_secret_permissions (test_channel_runtime.RuntimeCheck) ... ok
+test_ai_requires_explicit_knowledge_confirmation (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_cross_tenant_owner_rejected (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_identity_and_conversation_scoped_by_account (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_inbound_off_still_saved_and_dedup_scoped (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_independent_customer_transfer_keeps_followup_and_history (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_internal_knowledge_revokes_answer_and_remote_document_immediately (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_invalid_connection_leaves_no_orphan_conversation (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_knowledge_readable_without_module_and_write_still_blocked (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_legacy_reopen_preserves_connection_and_messages (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_member_cannot_read_or_post_to_other_account_history (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_member_only_own_connection_and_revocation (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_nested_reply_cannot_mutate_other_customers_draft (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_non_admin_transfer_rejected (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_reply_uses_original_account_configuration (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_transfer_atomic_and_preserves_history (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_transfer_moves_associated_rfq_and_followup (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_transferred_history_cannot_resume_original_account_ai (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_two_connections_do_not_replace_and_default_ai_off (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_ui_hides_components_and_requires_ai_confirmation (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_ai_requires_explicit_knowledge_confirmation (test_business_channels.BusinessChannelTests) ... ok
+test_cross_tenant_owner_rejected (test_business_channels.BusinessChannelTests) ... ok
+test_identity_and_conversation_scoped_by_account (test_business_channels.BusinessChannelTests) ... ok
+test_inbound_off_still_saved_and_dedup_scoped (test_business_channels.BusinessChannelTests) ... ok
+test_independent_customer_transfer_keeps_followup_and_history (test_business_channels.BusinessChannelTests) ... ok
+test_internal_knowledge_revokes_answer_and_remote_document_immediately (test_business_channels.BusinessChannelTests) ... ok
+test_invalid_connection_leaves_no_orphan_conversation (test_business_channels.BusinessChannelTests) ... ok
+test_legacy_reopen_preserves_connection_and_messages (test_business_channels.BusinessChannelTests) ... ok
+test_member_only_own_connection_and_revocation (test_business_channels.BusinessChannelTests) ... ok
+test_non_admin_transfer_rejected (test_business_channels.BusinessChannelTests) ... ok
+test_reply_uses_original_account_configuration (test_business_channels.BusinessChannelTests) ... ok
+test_transfer_atomic_and_preserves_history (test_business_channels.BusinessChannelTests) ... ok
+test_transfer_moves_associated_rfq_and_followup (test_business_channels.BusinessChannelTests) ... ok
+test_two_connections_do_not_replace_and_default_ai_off (test_business_channels.BusinessChannelTests) ... ok
+ERROR
+test_backup_restore (unittest.loader._FailedTest) ... ERROR
+test_docker_unavailable_still_backs_up_with_warning (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_failed_backup_restores_original_state_and_skips_cleanup (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_failed_backup_with_inactive_app_starts_nothing (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_missing_env_file_warns_and_backs_up_without_ops_config (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_retention_prunes_only_aged_stamp_dirs (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_script_parses_in_sh (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_success_flow_saves_state_and_writes_root_private_bundle (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_success_with_inactive_app_keeps_it_stopped (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_empty_registry_keeps_legacy_flow (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests) ... ok
+test_enterprise_stop_failure_fails_backup_and_restores_original_state (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests) ... FAIL
+test_label_mismatch_refuses_to_stop_container (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests) ... FAIL
+test_registered_running_bridges_stop_once_and_restore (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests) ... FAIL
+test_registry_with_docker_unavailable_fails_before_stopping_app (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests) ... FAIL
+test_bootstrap_config_is_http_only_and_does_not_expose_app (test_first_launch_t4_deploy.NginxConfigTests) ... ok
+test_final_config_access_log_omits_query_and_token_paths (test_first_launch_t4_deploy.NginxConfigTests) ... ok
+test_final_config_host_restriction_and_default_site (test_first_launch_t4_deploy.NginxConfigTests) ... ok
+test_final_config_keeps_acme_webroot_for_renewal (test_first_launch_t4_deploy.NginxConfigTests)
+真机续期阻断回归（2026-10-13）：80 全站 301 后 CA 跟随跳转到 HTTPS 取校验文件， ... ok
+test_final_config_redirect_is_exact_host (test_first_launch_t4_deploy.NginxConfigTests) ... ok
+test_readme_documents_bootstrap_sequence (test_first_launch_t4_deploy.NginxConfigTests) ... ok
+test_build_fails_closed_on_incomplete_source (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_build_succeeds_and_writes_package_checksum (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_extracted_package_imports_and_deploy_script_parses (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_manifest_hashes_match_every_file (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_manifest_sha256sum_file_verifies_all_files (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_package_contains_runtime_assets_and_templates (test_first_launch_t4_deploy.ReleasePackageTests) ... FAIL
+test_package_excludes_data_secrets_git_tests_and_history (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_app_service_keeps_hardening_and_loopback (test_first_launch_t4_deploy.SystemdUnitTests) ... ok
+test_backup_service_reads_env_file_and_runs_script (test_first_launch_t4_deploy.SystemdUnitTests) ... ok
+test_bind_area_rendered_on_channels_page (test_whatsapp_personal.WhatsAppPersonalTests)
+渠道页「WhatsApp（个人版）」卡片渲染扫码绑定区（容器 + 脚本接线）。 ... ok
+test_bind_bridge_down_is_reported_not_crashed (test_whatsapp_personal.WhatsAppPersonalTests)
+桥不可达：状态 JSON → ok=false（HTTP 200）；二维码 → 502；均不抛栈。 ... ok
+test_bind_logout_button_flow (test_whatsapp_personal.WhatsAppPersonalTests)
+「退出登录」：解绑手机（WAHA logout）→ 自动进入扫码态；审计留痕；历史按规则隐藏。 ... ok
+test_bind_session_state_and_qr_endpoints (test_whatsapp_personal.WhatsAppPersonalTests)
+扫码绑定区：状态 JSON（含登录名）/二维码图片；非扫码态 409；未登录重定向。 ... ok
+test_bind_start_dedup_rapid_clicks (test_whatsapp_personal.WhatsAppPersonalTests)
+连点防抖：2.5 秒内第二次启动请求直接返回 busy（不再打桥、不再刷爆）。 ... ok
+test_bind_start_recovers_failed_session (test_whatsapp_personal.WhatsAppPersonalTests)
+FAILED 会话点「重置会话并取码」→ 平台自动重启（不再对 FAILED 干刷 start）。 ... ok
+test_bind_start_session_button (test_whatsapp_personal.WhatsAppPersonalTests)
+「启动会话并取码」：POST 启动 → mock 收到 start → 状态回到扫码态。 ... ok
+test_duplicate_dedup (test_whatsapp_personal.WhatsAppPersonalTests) ... ok
+test_group_broadcast_media_and_outgoing_ignored (test_whatsapp_personal.WhatsAppPersonalTests) ... ok
+test_hmac_strict_when_header_present (test_whatsapp_personal.WhatsAppPersonalTests) ... ok
+test_inbound_text_flow_reply_via_bridge (test_whatsapp_personal.WhatsAppPersonalTests) ... ok
+test_inbox_hides_history_when_disconnected (test_whatsapp_personal.WhatsAppPersonalTests)
+用户要求：未连接（未登录）时不显示历史聊天记录；连接后恢复显示。 ... ok
+test_pacing_notifications_and_caps (test_whatsapp_personal.WhatsAppPersonalTests) ... ok
+test_question_blocks_unrestricted_dify_on_personal_channel (test_whatsapp_personal.WhatsAppPersonalTests)
+没有检索前授权的共享应用不可用于扫码渠道回答。 ... ok
+test_registry_labels_and_secret_status (test_whatsapp_personal.WhatsAppPersonalTests) ... ok
+test_scan_success_auto_enables_channel (test_whatsapp_personal.WhatsAppPersonalTests)
+扫码成功（SCAN_QR_CODE → WORKING）→ 渠道自动启用；单独 WORKING 不打扰手动停用。 ... ok
+test_self_chat_allowed_and_echo_guard (test_whatsapp_personal.WhatsAppPersonalTests) ... ok
+test_self_chat_empty_to_parsed_from_serialized (test_whatsapp_personal.WhatsAppPersonalTests)
+真机回归：app 发出的自聊消息 to 为空 → 用 _serialized 的 chatJid 判定自聊并放行。 ... ok
+test_self_chat_lid_mismatch_detected (test_whatsapp_personal.WhatsAppPersonalTests)
+自聊但 from/to 为不同格式（PN vs LID）→ 依据 SELF_IDS 集合判定为自聊并放行。 ... ok
+test_token_fail_closed (test_whatsapp_personal.WhatsAppPersonalTests) ... ok
+
+======================================================================
+ERROR: test_creates_isolated_container_env_file_and_registry (test_channel_runtime.EnterpriseBridgeToolTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 140, in setUp
+    self.tool = _bridge_tool()
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 32, in _bridge_tool
+    import provision_enterprise_bridge
+ModuleNotFoundError: No module named 'provision_enterprise_bridge'
+
+======================================================================
+ERROR: test_list_registered_returns_managed_names (test_channel_runtime.EnterpriseBridgeToolTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 140, in setUp
+    self.tool = _bridge_tool()
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 32, in _bridge_tool
+    import provision_enterprise_bridge
+ModuleNotFoundError: No module named 'provision_enterprise_bridge'
+
+======================================================================
+ERROR: test_rebuild_from_restored_registry_updates_random_address (test_channel_runtime.EnterpriseBridgeToolTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 140, in setUp
+    self.tool = _bridge_tool()
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 32, in _bridge_tool
+    import provision_enterprise_bridge
+ModuleNotFoundError: No module named 'provision_enterprise_bridge'
+
+======================================================================
+ERROR: test_refuses_foreign_container_with_same_name (test_channel_runtime.EnterpriseBridgeToolTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 140, in setUp
+    self.tool = _bridge_tool()
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 32, in _bridge_tool
+    import provision_enterprise_bridge
+ModuleNotFoundError: No module named 'provision_enterprise_bridge'
+
+======================================================================
+ERROR: test_refuses_unknown_tenant_or_missing_database (test_channel_runtime.EnterpriseBridgeToolTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 140, in setUp
+    self.tool = _bridge_tool()
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 32, in _bridge_tool
+    import provision_enterprise_bridge
+ModuleNotFoundError: No module named 'provision_enterprise_bridge'
+
+======================================================================
+ERROR: test_second_run_is_idempotent_and_refreshes_address (test_channel_runtime.EnterpriseBridgeToolTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 140, in setUp
+    self.tool = _bridge_tool()
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 32, in _bridge_tool
+    import provision_enterprise_bridge
+ModuleNotFoundError: No module named 'provision_enterprise_bridge'
+
+======================================================================
+ERROR: test_registry_file_present_but_not_configured_keeps_existing_modes (test_channel_runtime.PersonalBridgeLegacyModeTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 333, in test_registry_file_present_but_not_configured_keeps_existing_modes
+    tool = _bridge_tool()
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 32, in _bridge_tool
+    import provision_enterprise_bridge
+ModuleNotFoundError: No module named 'provision_enterprise_bridge'
+
+======================================================================
+ERROR: test_fail_closed_when_registry_file_missing (test_channel_runtime.PersonalBridgeRegistryModeTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 261, in setUp
+    self.tool = _bridge_tool()
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 32, in _bridge_tool
+    import provision_enterprise_bridge
+ModuleNotFoundError: No module named 'provision_enterprise_bridge'
+
+======================================================================
+ERROR: test_fail_closed_without_valid_tenant_mapping (test_channel_runtime.PersonalBridgeRegistryModeTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 261, in setUp
+    self.tool = _bridge_tool()
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 32, in _bridge_tool
+    import provision_enterprise_bridge
+ModuleNotFoundError: No module named 'provision_enterprise_bridge'
+
+======================================================================
+ERROR: test_resolves_current_tenant_entry_without_docker (test_channel_runtime.PersonalBridgeRegistryModeTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 261, in setUp
+    self.tool = _bridge_tool()
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_channel_runtime.py", line 32, in _bridge_tool
+    import provision_enterprise_bridge
+ModuleNotFoundError: No module named 'provision_enterprise_bridge'
+
+======================================================================
+ERROR: setUpClass (test_business_channels.EnterpriseBridgeRoutingTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_business_channels.py", line 315, in setUpClass
+    import provision_enterprise_bridge
+ModuleNotFoundError: No module named 'provision_enterprise_bridge'
+
+======================================================================
+ERROR: test_backup_restore (unittest.loader._FailedTest)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_backup_restore
+Traceback (most recent call last):
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/loader.py", line 154, in loadTestsFromName
+    module = __import__(module_name)
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_backup_restore.py", line 16, in <module>
+    import provision_enterprise_bridge  # noqa: E402
+ModuleNotFoundError: No module named 'provision_enterprise_bridge'
+
+
+======================================================================
+FAIL: test_enterprise_stop_failure_fails_backup_and_restores_original_state (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_deploy.py", line 440, in test_enterprise_stop_failure_fails_backup_and_restores_original_state
+    self.assertNotEqual(result.returncode, 0, "企业桥无法停写时必须失败，而不是宣称一致性成功")
+AssertionError: 0 == 0 : 企业桥无法停写时必须失败，而不是宣称一致性成功
+
+======================================================================
+FAIL: test_label_mismatch_refuses_to_stop_container (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_deploy.py", line 454, in test_label_mismatch_refuses_to_stop_container
+    self.assertNotEqual(result.returncode, 0)
+AssertionError: 0 == 0
+
+======================================================================
+FAIL: test_registered_running_bridges_stop_once_and_restore (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_deploy.py", line 411, in test_registered_running_bridges_stop_once_and_restore
+    self.assert_order(lines, [
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_deploy.py", line 263, in assert_order
+    self.assertIn(item, lines, msg=f"缺少调用记录: {item}（实际: {lines}）")
+AssertionError: 'docker stop b2b-account-b2b-account-0123456789abcdef01234567' not found in ['systemctl stop b2b-app', 'backup-start', 'backup-ok', 'systemctl start b2b-app'] : 缺少调用记录: docker stop b2b-account-b2b-account-0123456789abcdef01234567（实际: ['systemctl stop b2b-app', 'backup-start', 'backup-ok', 'systemctl start b2b-app']）
+
+======================================================================
+FAIL: test_registry_with_docker_unavailable_fails_before_stopping_app (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_deploy.py", line 466, in test_registry_with_docker_unavailable_fails_before_stopping_app
+    self.assertNotEqual(result.returncode, 0, "已登记企业桥时 Docker 不可用必须拒绝备份")
+AssertionError: 0 == 0 : 已登记企业桥时 Docker 不可用必须拒绝备份
+
+======================================================================
+FAIL: test_package_contains_runtime_assets_and_templates (test_first_launch_t4_deploy.ReleasePackageTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/test_first_launch_t4_deploy.py", line 622, in test_package_contains_runtime_assets_and_templates
+    self.assertIn(name, self.names, msg=f"发布包缺少: {name}")
+AssertionError: 'b2b-release-t4-test/deploy/provision_enterprise_bridge.py' not found in ['b2b-release-t4-test', 'b2b-release-t4-test/README.md', 'b2b-release-t4-test/RELEASE-MANIFEST.json', 'b2b-release-t4-test/RELEASE-MANIFEST.sha256', 'b2b-release-t4-test/ai_client.py', 'b2b-release-t4-test/app.py', 'b2b-release-t4-test/assets', 'b2b-release-t4-test/assets/brand.png', 'b2b-release-t4-test/business_channel_ui.py', 'b2b-release-t4-test/business_channels.py', 'b2b-release-t4-test/channel_runtime.py', 'b2b-release-t4-test/console_guidance.py', 'b2b-release-t4-test/deploy', 'b2b-release-t4-test/deploy/README.md', 'b2b-release-t4-test/deploy/b2b.env.example', 'b2b-release-t4-test/deploy/backup_snapshot.sh', 'b2b-release-t4-test/deploy/make_release.py', 'b2b-release-t4-test/deploy/nginx-b2b-http-bootstrap.conf.example', 'b2b-release-t4-test/deploy/nginx-b2b.conf.example', 'b2b-release-t4-test/deploy/offsite-backup-r2-plan.md', 'b2b-release-t4-test/deploy/offsite_backup_oss.sh', 'b2b-release-t4-test/deploy/systemd', 'b2b-release-t4-test/deploy/systemd/b2b-app.service', 'b2b-release-t4-test/deploy/systemd/b2b-backup.service', 'b2b-release-t4-test/deploy/systemd/b2b-backup.timer', 'b2b-release-t4-test/deploy/systemd/b2b-offsite-backup.service', 'b2b-release-t4-test/deploy/systemd/b2b-offsite-backup.timer', 'b2b-release-t4-test/enterprise_knowledge.py', 'b2b-release-t4-test/enterprise_knowledge_phase2.py', 'b2b-release-t4-test/enterprise_knowledge_phase2_ui.py', 'b2b-release-t4-test/enterprise_knowledge_ui.py', 'b2b-release-t4-test/inbox_search.py', 'b2b-release-t4-test/knowledge_delivery.py', 'b2b-release-t4-test/knowledge_ingestion.py', 'b2b-release-t4-test/model_settings.py', 'b2b-release-t4-test/reference-client', 'b2b-release-t4-test/reference-client/app.js', 'b2b-release-t4-test/reference-client/chat.css', 'b2b-release-t4-test/reference-client/index.html', 'b2b-release-t4-test/reference-client/product-page.css', 'b2b-release-t4-test/reference-client/product-page.js', 'b2b-release-t4-test/reference-client/style.css', 'b2b-release-t4-test/requirements-knowledge.txt', 'b2b-release-t4-test/static', 'b2b-release-t4-test/static/knowledge-phase2.css', 'b2b-release-t4-test/static/knowledge-phase2.js', 'b2b-release-t4-test/tools', 'b2b-release-t4-test/tools/backup_restore.py', 'b2b-release-t4-test/tools/channels', 'b2b-release-t4-test/tools/channels/outbound_worker.py', 'b2b-release-t4-test/tools/create_admin.py', 'b2b-release-t4-test/tools/pilot_checks', 'b2b-release-t4-test/tools/pilot_checks/check_cors.py', 'b2b-release-t4-test/tools/pilot_checks/check_db_migrations.py', 'b2b-release-t4-test/tools/pilot_checks/check_deepseek_live.py', 'b2b-release-t4-test/tools/pilot_checks/check_first_launch_t2.py', 'b2b-release-t4-test/tools/pilot_checks/check_first_launch_t4.py', 'b2b-release-t4-test/tools/pilot_checks/check_public_permissions.py', 'b2b-release-t4-test/tools/pilot_checks/generate_threshold_review.py', 'b2b-release-t4-test/tools/pilot_checks/restore_drill.py'] : 发布包缺少: b2b-release-t4-test/deploy/provision_enterprise_bridge.py
+
+----------------------------------------------------------------------
+Ran 93 tests in 38.971s
+
+FAILED (failures=5, errors=12)

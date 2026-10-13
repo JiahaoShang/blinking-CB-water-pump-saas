@@ -1,12 +1,18 @@
 """企业账号、对象权限与客户移交：独立企业与双连接真实 SQLite 验证。"""
 import json
+import os
+import sys
 import tempfile
 import unittest
 import threading
 from unittest.mock import patch
 from pathlib import Path
 
-from app import Database
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / 'tools' / 'channels'))
+
+import mock_waha  # noqa: E402
+from app import Database, make_server  # noqa: E402
 
 
 class BusinessChannelTests(unittest.TestCase):
@@ -269,6 +275,228 @@ class BusinessChannelHTTPTests(BusinessChannelTests):
         code, _, _ = self.request('POST', f'/admin/sales/{rfqs[0]}/replies/{reply["id"]}', self.a, {'action':'discard'})
         self.assertEqual(code, 404)
         self.assertEqual(self.db.conn.execute('SELECT status FROM lead_replies WHERE id=?', (reply['id'],)).fetchone()[0], 'draft')
+
+
+class EnterpriseBridgeRoutingTests(unittest.TestCase):
+    """企业专属桥（私有注册表模式）：真实临时库 + 两座独立 mock WAHA 桥，验证按企业路由与密钥隔离。
+
+    平台全局 WHATSAPP_PERSONAL_BASE / _API_KEY 在本类中故意指向假地址/假密钥——注册表模式下
+    它们不得被使用；入站回调仍走“账号令牌 + 会话匹配”。mock 桥为假件，不构成真实渠道验收。
+    """
+
+    BRIDGE_KEY_A = 'bridge-key-a-000000'
+    BRIDGE_KEY_B = 'bridge-key-b-000000'
+    ENV_NAMES = (
+        'WHATSAPP_PERSONAL_TOKEN', 'WHATSAPP_PERSONAL_API_KEY', 'WHATSAPP_PERSONAL_BASE',
+        'WHATSAPP_PERSONAL_HMAC_KEY', 'WHATSAPP_PERSONAL_PACING', 'WHATSAPP_PERSONAL_BRIDGES_FILE',
+        'WHATSAPP_PROVIDER', 'DIFY_QA_URL', 'DIFY_QA_APP_KEY',
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        import channel_runtime
+
+        cls._tmp = tempfile.TemporaryDirectory(prefix='enterprise-routing-')
+        cls.root = Path(cls._tmp.name)
+        cls.db = Database(cls.root / 'app.db')
+        cls.db.seed_demo_users()
+        cls.tenant_a, cls.tenant_b = 'demo-tenant', 'tenant-b'
+        cls.db.ensure_tenant(cls.tenant_b, '企业 B')
+        cls.admin_a = cls.db.authenticate_user('demo-admin@example.invalid', 'demo-admin')
+        cls.admin_b_id = cls.db.create_user(cls.tenant_b, 'admin-b@example.invalid', 'B 管理员', 'admin', 'b-admin-pass-123', actor='system:test')
+        cls.a1 = cls.db.create_business_connection(cls.tenant_a, 'whatsapp_personal', 'WhatsApp', 'A 一号', cls.admin_a['id'], 'demo-admin@example.invalid')
+        cls.a2 = cls.db.create_business_connection(cls.tenant_a, 'whatsapp_personal', 'WhatsApp', 'A 二号', cls.admin_a['id'], 'demo-admin@example.invalid')
+        cls.b1 = cls.db.create_business_connection(cls.tenant_b, 'whatsapp_personal', 'WhatsApp', 'B 一号', cls.admin_b_id, 'admin-b@example.invalid')
+        # 两座独立桥：各自一把密钥；会话名与账号一一对应
+        cls.mock_a = mock_waha.MockWahaServer(api_key=cls.BRIDGE_KEY_A, session_name='business-' + cls.a1)
+        cls.mock_b = mock_waha.MockWahaServer(api_key=cls.BRIDGE_KEY_B, session_name='business-' + cls.b1)
+        # 私有注册表由部署工具写出（应用只读）
+        sys.path.insert(0, str(ROOT / 'deploy'))
+        import provision_enterprise_bridge
+
+        cls.registry = cls.root / 'connection-runtime' / 'enterprise-bridges.json'
+        provision_enterprise_bridge.write_registry_file(cls.registry, {'version': 1, 'bridges': {
+            cls.tenant_a: {'container_name': channel_runtime.enterprise_container_name(cls.tenant_a),
+                           'api_base': cls.mock_a.base_url(), 'api_key': cls.BRIDGE_KEY_A},
+            cls.tenant_b: {'container_name': channel_runtime.enterprise_container_name(cls.tenant_b),
+                           'api_base': cls.mock_b.base_url(), 'api_key': cls.BRIDGE_KEY_B},
+        }})
+        cls._env_backup = {name: os.environ.get(name) for name in cls.ENV_NAMES}
+        for name in cls.ENV_NAMES:
+            os.environ.pop(name, None)
+        os.environ.update({
+            'WHATSAPP_PERSONAL_BRIDGES_FILE': str(cls.registry),
+            'WHATSAPP_PERSONAL_BASE': 'http://127.0.0.1:9',  # 平台全局假桥：不得被使用
+            'WHATSAPP_PERSONAL_API_KEY': 'global-key-must-not-be-used',
+            'WHATSAPP_PERSONAL_TOKEN': 'global-token-must-not-route',
+            'WHATSAPP_PERSONAL_HMAC_KEY': '',
+            'WHATSAPP_PERSONAL_PACING': '0',
+        })
+        # 走真实“启动连接”里的配置落地：注册表模式解析出桥引用/会话，再写回账号配置
+        cls.cfg_a1 = cls._provision(cls.tenant_a, cls.a1)
+        cls.cfg_a2 = cls._provision(cls.tenant_a, cls.a2)
+        cls.cfg_b1 = cls._provision(cls.tenant_b, cls.b1)
+        # 开启 AI 接待（真实流程里的企业选择）：入站消息会按账号配置经本企业桥自动回复。
+        cls.db.set_connection_ai(cls.tenant_a, cls.a1, True, cls.admin_a['id'], confirmed=True)
+        cls.db.set_connection_ai(cls.tenant_b, cls.b1, True, cls.admin_b_id, confirmed=True)
+        cls.server = make_server(cls.root / 'http-server.db', port=0)
+        cls.server.RequestHandlerClass.db.conn.close()
+        cls.server.RequestHandlerClass.db = cls.db
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def _provision(cls, tenant_id, account_id):
+        from channel_runtime import provision_personal_bridge
+
+        config = json.loads(cls.db.get_business_connection(tenant_id, account_id)['config_json'])
+        config = provision_personal_bridge(cls.db.path, account_id, config, tenant_id=tenant_id)
+        cls.db.conn.execute('UPDATE channel_accounts SET config_json=? WHERE tenant_id=? AND id=?',
+                            (json.dumps(config), tenant_id, account_id))
+        cls.db.conn.commit()
+        return config
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
+        cls.mock_a.stop()
+        cls.mock_b.stop()
+        cls.db.conn.close()
+        cls._tmp.cleanup()
+        for name, value in cls._env_backup.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def setUp(self):
+        import app as app_module
+
+        app_module._whatsapp_personal_reset_state()
+
+    # ── 工具 ──
+    def _send(self, config, jid, text):
+        import app as app_module
+
+        return app_module.send_channel_text('whatsapp_personal', config, jid, text)
+
+    def _event(self, text, message_id, session, from_jid='861700000999@c.us', name='客户'):
+        payload = {
+            'id': {'_serialized': message_id},
+            'from': from_jid,
+            'to': '8617555000000@c.us',
+            'fromMe': False,
+            'body': text,
+            'hasMedia': False,
+            '_data': {'notifyName': name},
+        }
+        return {'event': 'message.any', 'session': session, 'payload': payload}
+
+    def _post_webhook(self, token, event):
+        from test_langbot_bridge import json_http
+
+        return json_http(self.server, 'POST', '/api/v1/channels/whatsapp-personal/webhook/' + token, event)
+
+    # ── 用例 ──
+    def test_outbound_routes_to_own_tenant_bridge_with_own_key_and_session(self):
+        before_a, before_b = len(self.mock_a.sent_texts()), len(self.mock_b.sent_texts())
+        self._send(self.cfg_a1, '861700000111@c.us', '甲企业消息')
+        sent_a = self.mock_a.sent_texts()[before_a:]
+        self.assertEqual(len(sent_a), 1)
+        self.assertEqual(sent_a[0]['session'], 'business-' + self.a1)
+        self.assertEqual(sent_a[0]['chatId'], '861700000111@c.us')
+        self.assertEqual(len(self.mock_b.sent_texts()), before_b, '甲企业消息不得落到乙企业桥')
+        self._send(self.cfg_b1, '861700000222@c.us', '乙企业消息')
+        sent_b = self.mock_b.sent_texts()[before_b:]
+        self.assertEqual(len(sent_b), 1)
+        self.assertEqual(sent_b[0]['session'], 'business-' + self.b1)
+        self.assertEqual(len(self.mock_a.sent_texts()), before_a + 1)
+        # 返回的桥三元组只来自注册表，不暴露密钥
+        self.assertEqual(self.cfg_a1['api_base'], self.mock_a.base_url())
+        self.assertEqual(self.cfg_a1['bridge_tenant'], self.tenant_a)
+        self.assertNotIn('api_key', self.cfg_a1)
+
+    def test_same_tenant_two_accounts_use_distinct_sessions(self):
+        before_a, before_b = len(self.mock_a.sent_texts()), len(self.mock_b.sent_texts())
+        self._send(self.cfg_a1, '861700000111@c.us', '账号一')
+        self._send(self.cfg_a2, '861700000112@c.us', '账号二')
+        sessions = [record['session'] for record in self.mock_a.sent_texts()[before_a:]]
+        self.assertEqual(sessions, ['business-' + self.a1, 'business-' + self.a2])
+        self.assertEqual(len(self.mock_b.sent_texts()), before_b)
+
+    def test_callback_token_and_session_routing_per_tenant(self):
+        before_a, before_b = len(self.mock_a.sent_texts()), len(self.mock_b.sent_texts())
+        status, result = self._post_webhook(
+            self.cfg_a1['webhook_token'], self._event('需求：流量 10 m³/h、介质清水', '3EB0ENTA1', 'business-' + self.a1))
+        self.assertEqual(status, 200)
+        self.assertEqual(result['outcome']['action'], 'extracted')
+        sent_a = self.mock_a.sent_texts()[before_a:]
+        self.assertEqual(len(sent_a), 1)
+        self.assertEqual(sent_a[0]['session'], 'business-' + self.a1)
+        self.assertEqual(len(self.mock_b.sent_texts()), before_b)
+        # 同账号令牌 + 另一会话 → 拒绝，且不产生任何发送
+        status, _ = self._post_webhook(
+            self.cfg_a1['webhook_token'], self._event('需求：流量 10 m³/h、介质清水', '3EB0ENTA2', 'business-' + self.a2))
+        self.assertEqual(status, 403)
+        self.assertEqual(len(self.mock_a.sent_texts()), before_a + 1)
+        # 乙企业令牌 + 乙会话 → 路由到乙企业桥（独立密钥）
+        status, result = self._post_webhook(
+            self.cfg_b1['webhook_token'],
+            self._event('需求：流量 8 m³/h', '3EB0ENTB1', 'business-' + self.b1, from_jid='861700000333@c.us'))
+        self.assertEqual(status, 200)
+        self.assertEqual(result['outcome']['action'], 'extracted')
+        sent_b = self.mock_b.sent_texts()[before_b:]
+        self.assertEqual(len(sent_b), 1)
+        self.assertEqual(sent_b[0]['session'], 'business-' + self.b1)
+
+    def test_channel_page_start_uses_own_tenant_bridge_only(self):
+        from test_langbot_bridge import form_request, login
+
+        cookie = login(self.server, 'demo-admin@example.invalid', 'demo-admin')
+        before_a, before_b = self.mock_a.start_calls, self.mock_b.start_calls
+        self.mock_a.set_status('STOPPED')
+        status, _, _ = form_request(self.server, 'POST', '/admin/channels/accounts/' + self.a1 + '/start', {}, cookie)
+        self.assertEqual(status, 303)
+        self.assertEqual(self.mock_a.start_calls, before_a + 1)
+        self.assertEqual(self.mock_b.start_calls, before_b)
+
+    def test_bridge_keys_never_persisted_or_rendered(self):
+        from test_langbot_bridge import form_request, login
+
+        stored = ' '.join(str(row['config_json']) for row in self.db.conn.execute('SELECT config_json FROM channel_accounts').fetchall())
+        for secret in (self.BRIDGE_KEY_A, self.BRIDGE_KEY_B, 'global-key-must-not-be-used'):
+            self.assertNotIn(secret, stored, '密钥不得存进 config_json')
+        self.assertNotIn('api_key', stored)
+        self.assertIn('bridge_tenant', stored)
+        pages = (
+            (login(self.server, 'demo-admin@example.invalid', 'demo-admin'), '/admin/channels'),
+            (login(self.server, 'demo-admin@example.invalid', 'demo-admin'), '/admin/channels/accounts/' + self.a1),
+            (login(self.server, 'admin-b@example.invalid', 'b-admin-pass-123'), '/admin/channels/accounts/' + self.b1),
+        )
+        for cookie, path in pages:
+            status, _, page = form_request(self.server, 'GET', path, None, cookie)
+            self.assertEqual(status, 200, path)
+            for secret in (self.BRIDGE_KEY_A, self.BRIDGE_KEY_B, 'global-key-must-not-be-used'):
+                self.assertNotIn(secret, page, '页面不得出现企业桥密钥：' + path)
+
+    def test_missing_mapping_fails_closed_without_global_fallback(self):
+        import app as app_module
+
+        before_a, before_b = len(self.mock_a.sent_texts()), len(self.mock_b.sent_texts())
+        with self.assertRaises(app_module.ChannelSendError):
+            self._send({'session': 'default'}, '861700000999@c.us', '没有桥引用')
+        with self.assertRaises(app_module.ChannelSendError):
+            self._send({'session': 'business-' + 'f' * 24, 'bridge_tenant': 'tenant-unknown'}, '861700000999@c.us', '未知企业')
+        self.assertEqual(len(self.mock_a.sent_texts()), before_a, '无映射时不得回退到任何桥（含全局假桥）')
+        self.assertEqual(len(self.mock_b.sent_texts()), before_b)
+
+    def test_provision_rejects_account_tenant_mismatch(self):
+        from channel_runtime import provision_personal_bridge
+
+        with self.assertRaises(ValueError):
+            provision_personal_bridge(self.db.path, self.a1, {'session': 'business-' + self.a1}, tenant_id=self.tenant_b)
 
 
 if __name__ == '__main__':

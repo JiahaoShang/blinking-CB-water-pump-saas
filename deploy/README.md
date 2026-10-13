@@ -37,7 +37,9 @@
   data/app.db                            # 业务库（--db 指向此处；库权限 0600）
   data/uploads/                          # 全部原件（B2B_UPLOAD_DIR 指向此处）
   data/app.db.model-secrets/             # 企业自定义模型私有配置（随库名；0700/0600）
-  data/connection-runtime/<账号>/sessions/   # WhatsApp 个人版桥的登录会话卷（随库父目录）
+  data/connection-runtime/<账号>/sessions/            # WhatsApp 个人版桥（单账号模式）登录会话卷
+  data/connection-runtime/enterprise/<租户哈希>/{sessions,media,bridge.env}  # 企业专属桥卷（容器内 /app/.sessions、/app/.media）
+  data/connection-runtime/enterprise-bridges.json      # 企业桥私有注册表（root:b2b 0640；含逐企业密钥）
 /etc/b2b/b2b.env                         # 私有运行配置（root:b2b 0640；密钥只在这里）
 /var/backups/b2b/<YYYYmmdd-HHMMSS>/      # 本机备份快照：root 私有（0700/0600），保留 14 天；异地见第 11 节
 /var/backups/b2b/<时间戳>.export.tar.gz.age(.sha256)  # 异地链密文与校验文件（root 0600，保留 14 天）
@@ -55,7 +57,8 @@
 | 知识原件（knowledge_sources） | `data/uploads/kb-*` | `enterprise_knowledge.py` | 是 |
 | 批次原件（kb2_sources，含嵌套） | `data/uploads/phase2/kb2-*` | `enterprise_knowledge_phase2.py` | 是 |
 | 企业模型私有配置 | `data/app.db.model-secrets/`（0700/0600） | `model_settings.py EnterpriseModels` | 是（备份目录 `model-secrets/`，恢复映射为恢复目录下 `<库名>.model-secrets`） |
-| 渠道桥登录状态（WhatsApp 个人版 WAHA 会话卷） | `data/connection-runtime/<账号ID>/sessions/`（docker 卷挂载） | `channel_runtime.py provision_personal_bridge` | 是（目录 `connection-runtime/`）。备份脚本自动停写“本库登记账号”的 `b2b-account-*` 容器；**本部署形态下桥未启用（见第 10 节），T5 前不要开放** |
+| 渠道桥登录状态（WhatsApp 个人版 WAHA 会话卷） | `data/connection-runtime/<账号ID>/sessions/`（docker 卷挂载） | `channel_runtime.py provision_personal_bridge` | 是（目录 `connection-runtime/` 整体）。备份脚本自动停写“本库登记账号”的 `b2b-account-*` 与企业桥 `b2b-enterprise-*`（注册表登记 + 归属核对）；企业桥按第 12 节验收后再启用 |
+| 企业专属桥注册表与运行目录（含逐企业密钥与媒体卷） | `data/connection-runtime/enterprise-bridges.json`（root:b2b 0640）与 `data/connection-runtime/enterprise/<租户哈希>/{sessions,media,bridge.env}` | `deploy/provision_enterprise_bridge.py`（root，第 12 节）；应用经 `WHATSAPP_PERSONAL_BRIDGES_FILE` 只读 | 是（随 `connection-runtime/` 整体；恢复后重跑部署工具按恢复的注册表重建并更新随机端口） |
 | 受限运维配置（密钥） | `/etc/b2b/b2b.env`（root:b2b 0640） | 单元 `EnvironmentFile` | 是（`ops-config/b2b.env`；恢复时按原相对路径保留；**禁止明文上传云端**） |
 | 后台作业状态（无需单独文件：全部在库表内） | `kb_sync_state`、`knowledge_processing`、`kb2_sources.status/processing_owner`、`messages.delivery_status='queued'` | `knowledge_delivery.py`、`enterprise_knowledge*.py`、`tools/channels/outbound_worker.py` | 是（随数据库快照） |
 | 服务日志 | systemd journal（stdout/stderr）；诊断日志 `data/whatsapp_personal_events.log`、`data/whatsapp_personal_start_audit.log`（代码目录内、非业务状态） | `app.py _append_private_log` | 不纳入备份（诊断用途）；journald 按系统策略轮转；代码目录内写入的约束见第 10 节 |
@@ -213,7 +216,8 @@ sudo certbot renew --dry-run --run-deploy-hooks
 **一致性边界（不伪装原子快照）**：`tools/backup_restore.py` 的数据库快照是事务一致的；原件与私有目录在快照之后顺序复制、无全局锁。并发上传/处理中可能出现“库中行与文件不完全匹配”。要得到互相匹配的一整套（库 + 全部原件 + 模型配置 + 桥登录状态 + 运维配置），必须**先停止写入**——`deploy/backup_snapshot.sh` 即该停写流程：
 
 - 以 root 运行（systemd `b2b-backup.service`，读取 `/etc/b2b/b2b.env`）；**产物 root 私有**（目录 0700/文件 0600）——包内含密钥材料，不进 b2b 用户可读范围。
-- 先保存原活跃状态：只停止原本在运行的 `b2b-app` 与“本库 `connection-runtime/` 登记账号”的受管桥容器（`b2b-account-<24 位 ID>`）；备份后只把原本活跃的恢复回去；**任何失败都经 trap 恢复原状**，不会出现“应用被停掉而备份没做成”。
+- 先保存原活跃状态：只停止原本在运行的 `b2b-app`、本库登记账号的受管桥容器（`b2b-account-<24 位 ID>`）与注册表登记的企业桥容器（`b2b-enterprise-<租户哈希>`）；备份后只把原本活跃的恢复回去；**任何失败都经 trap 恢复原状**，不会出现“应用被停掉而备份没做成”。
+- 企业桥停写预检（fail-closed）：脚本调用 `provision_enterprise_bridge.py --check-registered` 核对登记容器的标签与 sessions/media 卷**属于本库数据目录**、并区分运行状态。由其他数据根（含恢复副本）提供的同名容器、被替换的容器、docker inspect 失败等“无法确认”情形一律**失败退出（exit 3）**，不宣称一致性成功，也绝不误停另一数据根（生产）的桥；预检在停应用之前完成，失败不打断既有服务。
 - 运维配置 `/etc/b2b/b2b.env` 随包 `ops-config/`（文件缺失时告警继续，不阻断业务数据备份）。
 - 自动备份：`b2b-backup.timer` 每日 03:30（错过则开机补跑）；保留天数由 `B2B_BACKUP_KEEP_DAYS`（默认 14）控制，只清理本工具创建的 `YYYYmmdd-HHMMSS` 目录。
 - 手工执行（root；同样先停应用）：
@@ -272,7 +276,7 @@ python3 -m unittest -v test_first_launch_t4 test_first_launch_t4_deploy
 ## 10. 已知限制与未闭项（如实）
 
 - **未在真实 Linux 执行过**：本目录的 systemd/nginx/脚本在本机（macOS）只做过语法与逻辑校验（含外部命令假件的脚本测试）+ 隔离演练；首装必须按第 3 节 ⑩ 在服务器上跑一遍并记录结果（`systemd-analyze verify`、`nginx -t`、`b2b-backup.service` 真跑、HTTPS 与默认站点检查）。
-- **WhatsApp 个人版桥在本部署形态下不可用**：应用以非 root `b2b` 用户运行，无 Docker socket 访问权限（也**不**默认加 docker 组、不放开 socket）；`channel_runtime.py` 的容器启动/会话读取在服务器上会失败。桥在本轮及 T5 前一律不启用；接入方式（专用 root 助手单元 / socket 代理 / 其他）留 T5 专项评估后再定。
+- **WhatsApp 个人版桥的接入形态**：应用以非 root `b2b` 用户运行，无 Docker socket 访问权限（也**不**默认加 docker 组、不放开 socket）——桥容器一律由运营以 root 预部署（pilot-t4：每企业一个 `b2b-enterprise-<租户哈希>` 容器，见第 12 节）；应用只经 HTTP 与私有注册表连接。`channel_runtime.py` 的单账号容器模式在服务器上因无 Docker 权限会失败（保留兼容，不用于本部署）。**第 12 节流程在本机只做过假件逻辑测试，未在真实 Linux/Docker/WAHA 上执行；须经独立审查与真机验收后才可对外启用。**
 - **代码内诊断日志写入受加固限制**：`app.py` 把 `data/whatsapp_personal_events.log`、`data/whatsapp_personal_start_audit.log` 写在**代码目录**；单元加固（`ProtectSystem=strict` + `ReadWritePaths=/var/lib/b2b`）下代码目录只读，这些写入静默失败（调用处 try/except 吞掉）。不影响业务数据、审计与备份（都在 `/var/lib/b2b` 与库表内）；是否需要 `B2B_LOG_DIR` 之类改造留 T5 决定。
 - 单实例 + 本地 SQLite：短时维护可接受（试点前提）；高可用/多实例/外部对象存储属后续架构决策（ADR-07/08），不因本目录新增。
 - 桥容器（WhatsApp 个人版）需要 Docker 与足够内存（官方建议 ≥2C4G，容量按实际实测）；其登录会话恢复后如状态异常，按 `/admin/channels` 页面重新扫码（属运营动作，T5 专项验收）。
@@ -342,4 +346,30 @@ systemctl list-timers b2b-offsite-backup.timer
 **真机验收清单（Codex 复跑）**：① `bash -n` 脚本 + `systemd-analyze verify` 单元（上 b）；② 首次手工运行退出码 0，journal 出现 ①–⑧ 与 sha256 一致行，产物为 root 私有（0700/0600）；③ 云侧 `backups/<时间戳>/` 恰好两个对象，服务器另目录下载 `sha256sum -c` 通过；④ 负例抽查：临时改名 ossutil 配置→预检拒绝（2）、断网→云端预检失败拒绝（14）；⑤ `list-timers` 显示下次触发时间。
 
 **边界**：不启用任何云端删除；生命周期/保留策略待用户确认后另行处理；Mac 端解密（`age -d` 私钥）+ `restore-check` 仍是闭环演练的另一半；本链不代替第 5/6 节的恢复演练。
+
+## 12. 企业专属 WhatsApp 桥（运营预部署，pilot-t4）
+
+**状态**：代码与部署工具已实现，本机以假件做过判别性测试（注册表/密钥隔离/停写归属/恢复重建）；**未在真实 Linux/Docker/WAHA 上执行过、未部署**。可承载账号数按实测另定（不设内存硬配额、不承诺容量）。
+
+- 每企业一个固定容器 `b2b-enterprise-<租户哈希 24hex>`（NOWEB 引擎），只监听 `127.0.0.1` 随机端口；Swagger（`WHATSAPP_SWAGGER_ENABLED=false`）与 Dashboard（`WAHA_DASHBOARD_ENABLED=false`）关闭。
+- 运行目录：`/var/lib/b2b/data/connection-runtime/enterprise/<租户哈希>/{sessions,media,bridge.env}`；容器内挂载 `/app/.sessions` 与 `/app/.media`；`WHATSAPP_FILES_FOLDER=/app/.media`、`WHATSAPP_FILES_LIFETIME=0` 停止 WAHA 的媒体自动删除（**企业媒体保留时长规则仍待 T6 确认**；这里只停止自动删，不代表承诺长期保留）。
+- 部署（root；`<租户ID>` 用平台内真实租户 ID 替换；企业须已存在，否则拒绝创建）：
+
+```sh
+sudo /opt/b2b/venv/bin/python3 /opt/b2b/app/deploy/provision_enterprise_bridge.py \
+  --tenant <租户ID> --db /var/lib/b2b/data/app.db
+# 可选：--image 传不可变 digest（默认 devlikeapro/waha:noweb-2026.9.2）
+```
+
+- 工具生成逐企业独立密钥（只进 `bridge.env`，0600，环境变量方式注入容器、不进命令行）并原子更新私有注册表 `enterprise-bridges.json`（root:b2b 0640；先写临时文件再替换）；**不自动创建/启动任何 WhatsApp 会话**（扫码由企业在渠道页完成）。幂等：重复运行不重建容器；核对容器标签/卷/镜像不符时拒绝复用。
+- 应用侧：在 `/etc/b2b/b2b.env` 配置 `WHATSAPP_PERSONAL_BRIDGES_FILE=/var/lib/b2b/data/connection-runtime/enterprise-bridges.json` 后，发送与扫码只按“账号配置里的企业引用（tenant ID）”解析该注册表；缺失/无效映射一律拒绝、不回退平台全局桥。密钥不写入数据库配置、页面或日志。
+- 备份/恢复：备份脚本自动停写注册表登记且**归属本数据目录**的企业桥（停不下来或无法核对即失败退出）；`connection-runtime/`（注册表、env、sessions、media）随备份包整体恢复。恢复后按恢复的注册表重建容器（地址为随机端口，注册表会被更新）：
+
+```sh
+sudo /opt/b2b/venv/bin/python3 /opt/b2b/app/deploy/provision_enterprise_bridge.py \
+  --tenant <租户ID> --db <恢复目录>/app.db
+```
+
+- **安全演练边界（必须遵守）**：禁止同一 WhatsApp 账号同时在源桥与恢复副本上登录。在恢复环境验证时：先停原桥容器（`sudo docker stop b2b-enterprise-<租户哈希>`），在同一主机演练时还须将原容器改为明确的暂存名称（保留原卷，演练后还原），才能用原名称创建挂载恢复目录的新容器；仅停止而保留同名原容器会因挂载不符被拒绝。创建/复用时 `--image` 必须沿用原桥的镜像引用或 digest。再验证恢复桥；或只做只读核对（`--check-registered` / `restore-check`）而不启动任何会话——本工具与备份脚本都不自动创建/启动会话。在恢复副本上直接跑 `backup_snapshot.sh` 会因登记容器“卷不属于本数据目录”而被拒绝停写（fail-closed），不会误停生产桥。
+- 真机验收（独立执行；未通过前不得视为已上线）：`--check-registered` 与 docker 实际一致；企业扫码后收发链路可用；两企业互不串桥；备份停写与恢复重建各跑一轮；网络暴露面复查（仅 `127.0.0.1`）。
 

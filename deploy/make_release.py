@@ -66,9 +66,10 @@ INCLUDE_PATTERNS = (
     "assets/*",
     "reference-client/*",
     "static/*",
-    # 部署模板（systemd/nginx/env 样例/备份脚本）与运维工具
+    # 部署模板（systemd/nginx/env 样例/备份脚本/企业桥预部署工具）与运维工具
     "deploy/*",
     "deploy/systemd/*",
+    "deploy/provision_enterprise_bridge.py",
     "tools/backup_restore.py",
     "tools/create_admin.py",
     "tools/pilot_checks/*",
@@ -83,6 +84,7 @@ REQUIRED_GLOBS = (
     "static/*",
     "deploy/*",
     "deploy/systemd/*",
+    "deploy/provision_enterprise_bridge.py",
     "tools/pilot_checks/*",
 )
 

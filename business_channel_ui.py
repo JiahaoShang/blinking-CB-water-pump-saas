@@ -176,7 +176,7 @@ class BusinessChannelUI:
                     if action == 'start':
                         if not a['legacy']:
                             from channel_runtime import provision_personal_bridge
-                            config = provision_personal_bridge(self.db.path, account_id, config)
+                            config = provision_personal_bridge(self.db.path, account_id, config, tenant_id=self.tenant_id)
                             self.db.conn.execute('UPDATE channel_accounts SET config_json=? WHERE tenant_id=? AND id=?', (json.dumps(config), self.tenant_id, account_id))
                             self.db.conn.commit()
                         config.setdefault('webhook_token', __import__('os').environ.get('WHATSAPP_PERSONAL_TOKEN', ''))
