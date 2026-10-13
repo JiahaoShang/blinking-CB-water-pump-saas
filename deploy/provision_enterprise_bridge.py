@@ -3,7 +3,8 @@
 """企业专属 WhatsApp 个人版桥（WAHA）预部署工具（root）。
 
 为单个企业在单台服务器上创建固定容器 b2b-enterprise-<租户哈希 24hex>：
-- NOWEB 引擎、只监听 127.0.0.1 上的随机端口、关闭 Swagger（WHATSAPP_SWAGGER_ENABLED）与
+- NOWEB 引擎、只映射到 127.0.0.1：创建时随机选取一个空闲宿主端口并固定发布
+  （-p 127.0.0.1:<端口>:3000，重启不再重分配）、关闭 Swagger（WHATSAPP_SWAGGER_ENABLED）与
   Dashboard（WAHA_DASHBOARD_ENABLED）；
 - 登录会话与媒体卷位于 <库父目录>/connection-runtime/enterprise/<哈希>/{sessions,media}；
   容器内分别挂到 /app/.sessions 与 /app/.media，并以 WHATSAPP_FILES_FOLDER=/app/.media、
@@ -14,7 +15,7 @@
 - 不自动创建/启动任何 WhatsApp 会话（扫码由企业在界面完成）；不设置内存硬配额，也不承诺账号容量。
 
 幂等：重复运行不重建容器；复用前校验容器标签/挂载/镜像确认是本工具为该企业创建的桥。
-备份恢复后重跑本工具即可按恢复的注册表重建容器，并将随机端口可能变化的地址更新回注册表。
+备份恢复后重跑本工具即可按恢复的注册表重建容器（重建时重新选取固定端口），并把实际映射地址更新回注册表。
 备份停写预检用 --check-registered：核对登记容器属于本库数据目录（标签/卷）及运行状态，不符即失败。
 
 用法（root）：
@@ -31,6 +32,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -312,6 +314,21 @@ def check_registered(db_path, registry_path=None):
     return results
 
 
+def _allocate_loopback_port():
+    """为新建容器随机选取一个 127.0.0.1 空闲 TCP 端口（绑定 0 端口探测后立即释放）。
+
+    端口随后固定发布（-p 127.0.0.1:<端口>:3000）：写入容器配置后重启不再重分配（旧的动态映射
+    `127.0.0.1::3000` 会在停启后漂移，注册表地址随之失真）；若发布前被并发占用，docker run
+    会以端口冲突失败——fail-closed，不产出半成品登记。
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(('127.0.0.1', 0))
+            return int(probe.getsockname()[1])
+    except OSError as error:
+        raise ProvisionError(f'无法选取 127.0.0.1 空闲端口：{error}') from None
+
+
 def provision_tenant(tenant_id, db_path, image=DEFAULT_IMAGE, registry_path=None):
     """为企业创建/复用专属桥容器并登记私有注册表；返回摘要（绝不含密钥）。"""
     tenant_id = str(tenant_id or '').strip()
@@ -343,10 +360,11 @@ def provision_tenant(tenant_id, db_path, image=DEFAULT_IMAGE, registry_path=None
         api_key = existing_key or (entry['api_key'] if entry else '') or secrets.token_hex(32)
         if existing_key != api_key:
             _write_env_file(env_file, api_key)
+        host_port = _allocate_loopback_port()  # 固定发布：动态映射停启会重分配、注册表地址会漂移
         _docker_ok(run_docker([
             'run', '-d', '--name', name, '--restart', 'unless-stopped',
             '--add-host', 'host.docker.internal:host-gateway',
-            '-p', '127.0.0.1::3000', '--env-file', str(env_file),
+            '-p', f'127.0.0.1:{host_port}:3000', '--env-file', str(env_file),
             '-v', str(workdir / 'sessions') + ':' + SESSIONS_TARGET,
             '-v', str(workdir / 'media') + ':' + MEDIA_TARGET,
             '--label', LABEL_MARKER + '=1',

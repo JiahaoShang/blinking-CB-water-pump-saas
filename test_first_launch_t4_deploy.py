@@ -8,7 +8,7 @@
 - deploy/systemd：备份单元读取 /etc/b2b/b2b.env；应用单元保持既有加固与非 root 运行。
 - deploy/nginx-*.conf.example：HTTP-only 引导 → nginx -t → certbot → 443 最终配置；
   默认站点关闭连接（444）且不代理应用；精确 server_name 防空 Host 反射；
-  访问日志不记录 query/凭据（b2b_nocreds 格式 + /rfq/ 关闭访问日志）。
+  访问日志不记录 query/凭据（b2b_nocreds 格式 + /rfq/ 与租户 WhatsApp（个人版）webhook 令牌路径关闭访问日志）。
 - deploy/make_release.py：从当前源码白名单导出发布包 + 逐文件 sha256 清单；
   不包含业务 data/、密钥、.git、测试与历史资料原件。
 
@@ -170,6 +170,18 @@ def find_bundle_dirs(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
     return sorted(p for p in root.iterdir() if p.is_dir() and re.fullmatch(r"\d{8}-\d{6}", p.name))
+
+
+def nginx_location_block(server_block: str, marker: str) -> str:
+    """从 server 块中取出 marker 起至首个右花括号的 location 块（所涉 location 均无嵌套块）。"""
+    start = server_block.index(marker)
+    return server_block[start: server_block.index("}", start) + 1]
+
+
+def nginx_directive_lines(location_block: str) -> list[str]:
+    """规范取 location 块内的指令行：跳过 location 头、去注释（含行内）、去空行与收尾括号。"""
+    lines = [line.split("#", 1)[0].strip() for line in location_block.splitlines()[1:]]
+    return [line for line in lines if line and line != "}"]
 
 
 class DeployScriptTestBase(unittest.TestCase):
@@ -615,6 +627,31 @@ class NginxConfigTests(unittest.TestCase):
         self.assertIn("access_log off;", conf[index:index + 400], "/rfq/ 凭据路径必须关闭访问日志")
         self.assertIn("error_log", conf)
         self.assertIn("crit", conf, "错误日志收敛到 crit，避免请求行（含 URI）落盘")
+
+    def test_final_config_whatsapp_personal_webhook_suppresses_access_log_and_keeps_proxy(self) -> None:
+        """租户 WhatsApp（个人版）webhook 令牌在路径里（2026-10-14 真机核对：令牌出现在访问日志）：
+        `/api/v1/channels/whatsapp-personal/webhook/<token>` 与 b2b_nocreds 记录的 `$uri` 叠加
+        ⇒ 令牌随每条事件写盘。修复=单独 `^~` location 关闭访问日志，且转发口径与应用代理
+        （`location /`）逐行一致——请求仍进应用（app.py 实际路由：前缀 + 16~96 位 [A-Za-z0-9_-] 令牌，
+        字符集不含“/”，前缀 location 恰好覆盖整条令牌路径）。
+        真实生效以服务器 nginx -t + 部署后日志核对为准（deploy/README.md ⑨/⑩）。
+        """
+        conf = FINAL_NGINX.read_text(encoding="utf-8")
+        named_block = conf.split("server {")[-1]  # 443 精确域名站点（与既有用例同取法）
+        marker = "location ^~ /api/v1/channels/whatsapp-personal/webhook/"
+        self.assertEqual(named_block.count(marker), 1, "443 站点必须有且仅有一处该 webhook location（^~ 前缀）")
+        block = nginx_location_block(named_block, marker)
+        body = nginx_directive_lines(block)
+        self.assertIn("access_log off;", body, "webhook 令牌路径必须关闭访问日志（$uri 会把 /webhook/<token> 写盘）")
+        app_proxy = nginx_directive_lines(nginx_location_block(named_block, "location / {"))
+        self.assertEqual([line for line in body if line != "access_log off;"], app_proxy,
+                         "除 access_log off 外，webhook location 必须与既有应用代理逐行一致（同 proxy_pass/头/超时）")
+        app_source = (REPO / "app.py").read_text(encoding="utf-8")
+        self.assertIn('r"/api/v1/channels/whatsapp-personal/webhook/([A-Za-z0-9_-]{16,96})"', app_source,
+                      "app.py 实际路由变化：nginx 前缀 location 须同步复核")
+        blocks = conf.split("server {")
+        self.assertNotIn("whatsapp-personal", blocks[1], "默认站点不得涉及该路径（保持 444 口径）")
+        self.assertNotIn("whatsapp-personal", blocks[2], "80 跳转站点不得涉及该路径（保持整站跳转口径）")
 
     def test_bootstrap_config_is_http_only_and_does_not_expose_app(self) -> None:
         conf = BOOTSTRAP_NGINX.read_text(encoding="utf-8")

@@ -4,12 +4,13 @@
 覆盖：
 - 既有模式（未设 WHATSAPP_PERSONAL_BRIDGES_FILE）行为不变（多会话直连 / 单账号容器）；
 - 企业注册表模式（channel_runtime）：按 tenant 解析、fail-closed、不调用 Docker、密钥不进 config；
-- deploy/provision_enterprise_bridge.py：幂等创建/重建、标签与卷校验防误复用、注册表原子写与受限权限。
+- deploy/provision_enterprise_bridge.py：幂等创建/重建、新容器固定回环端口发布、标签与卷校验防误复用、注册表原子写与受限权限。
 Docker 用进程内假件；本文件不构成真实渠道验收。
 """
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -70,7 +71,7 @@ class FakeDocker:
     def __init__(self, port=41000):
         self.calls = []
         self.containers = {}
-        self.port = port
+        self.port = port  # 未固定端口容器（修复前的动态映射）docker port 报告的回落值
         self.inspect_error = ''  # 非空时任何 inspect 都失败（模拟 Docker 守护进程不可用）
 
     def __call__(self, args, timeout=None):
@@ -98,6 +99,7 @@ class FakeDocker:
             name = args[args.index('--name') + 1]
             mounts = []
             labels = {}
+            host_port = None
             for index, item in enumerate(args):
                 if item == '-v':
                     source, _, destination = args[index + 1].partition(':')
@@ -105,7 +107,12 @@ class FakeDocker:
                 if item == '--label':
                     key, _, value = args[index + 1].partition('=')
                     labels[key] = value
-            self.containers[name] = {'running': True, 'labels': labels, 'mounts': mounts, 'image': args[-1]}
+                if item == '-p':
+                    mapping = re.fullmatch(r'127\.0\.0\.1:(\d{1,5}):3000', args[index + 1])
+                    if mapping:
+                        host_port = mapping.group(1)
+            self.containers[name] = {'running': True, 'labels': labels, 'mounts': mounts,
+                                     'image': args[-1], 'host_port': host_port}
             return SimpleNamespace(returncode=0, stdout='faked-container-id\n', stderr='')
         if command == 'start':
             state = self.containers.setdefault(args[1], {'labels': {}, 'mounts': [], 'image': '', 'running': False})
@@ -115,7 +122,9 @@ class FakeDocker:
             state = self.containers.get(args[1])
             if not state or not state['running']:
                 return SimpleNamespace(returncode=1, stdout='', stderr='container not running')
-            return SimpleNamespace(returncode=0, stdout=f'127.0.0.1:{self.port}\n', stderr='')
+            # 固定发布的容器回报创建时写入的端口；未固定的回落 self.port（模拟修复前动态映射的实际值）
+            host_port = state.get('host_port') or self.port
+            return SimpleNamespace(returncode=0, stdout=f'127.0.0.1:{host_port}\n', stderr='')
         return SimpleNamespace(returncode=0, stdout='', stderr='')
 
 
@@ -153,16 +162,25 @@ class EnterpriseBridgeToolTests(unittest.TestCase):
         with patch.object(self.tool, 'run_docker', fake):
             return self.tool.provision_tenant(TENANT, self.db)
 
+    def published_port(self, fake, run_index=0):
+        """取本工具第 run_index 次 docker run 的宿主端口映射，并断言其为固定数字回环形态。"""
+        run = [call for call in fake.calls if call[0] == 'run'][run_index]
+        mapping = run[run.index('-p') + 1]
+        match = re.fullmatch(r'127\.0\.0\.1:(\d{1,5}):3000', mapping)
+        self.assertIsNotNone(match, f'发布映射必须为固定数字回环端口（收到：{mapping!r}）')
+        return match.group(1)
+
     def test_creates_isolated_container_env_file_and_registry(self):
         fake = FakeDocker(port=41001)
         summary = self.provision(fake)
         self.assertEqual(summary['container'], self.name)
-        self.assertEqual(summary['api_base'], 'http://127.0.0.1:41001')
+        fixed_port = self.published_port(fake)
+        self.assertEqual(summary['api_base'], 'http://127.0.0.1:' + fixed_port)
         self.assertIn('noweb-2026.9.2', summary['image'])
         run = next(call for call in fake.calls if call[0] == 'run')
         joined = ' '.join(run)
         self.assertIn(self.name, run)
-        self.assertIn('127.0.0.1::3000', run)
+        self.assertNotIn('127.0.0.1::3000', joined, '不得再使用动态宿主端口（停启会重分配）')
         volumes = [run[index + 1] for index, item in enumerate(run) if item == '-v']
         # 路径按真实形态比较（/var 与 /private/var 等符号链接前缀在不同环境下形态不同）
         sessions_volume = os.path.realpath(self.workdir / 'sessions') + ':/app/.sessions'
@@ -193,19 +211,45 @@ class EnterpriseBridgeToolTests(unittest.TestCase):
         document = json.loads(self.registry.read_text())
         self.assertEqual(document['version'], 1)
         self.assertEqual(document['bridges'][TENANT]['container_name'], self.name)
-        self.assertEqual(document['bridges'][TENANT]['api_base'], 'http://127.0.0.1:41001')
+        self.assertEqual(document['bridges'][TENANT]['api_base'], 'http://127.0.0.1:' + fixed_port)
         self.assertEqual(document['bridges'][TENANT]['api_key'], key)
         self.assertEqual(self.registry.stat().st_mode & 0o777, 0o640)
         self.assertEqual((self.root / 'connection-runtime').stat().st_mode & 0o007, 0)
         self.assertEqual((self.root / 'connection-runtime' / 'enterprise').stat().st_mode & 0o007, 0)
+
+    def test_new_container_publishes_fixed_host_port_and_registry_reflects_it(self):
+        """修复回归锁：新容器固定发布数字宿主端口（旧的 127.0.0.1::3000 动态映射停启会重分配）。"""
+        fake = FakeDocker(port=41001)
+        summary = self.provision(fake)
+        run = next(call for call in fake.calls if call[0] == 'run')
+        mapping = run[run.index('-p') + 1]
+        match = re.fullmatch(r'127\.0\.0\.1:(\d{1,5}):3000', mapping)
+        self.assertIsNotNone(match, f'必须固定发布数字宿主端口（收到：{mapping!r}）')
+        port = int(match.group(1))
+        self.assertGreaterEqual(port, 1)
+        self.assertLessEqual(port, 65535)
+        self.assertNotIn('127.0.0.1::3000', ' '.join(run), '不得再使用空的动态宿主端口')
+        self.assertEqual(summary['api_base'], f'http://127.0.0.1:{port}')
+        document = json.loads(self.registry.read_text())
+        self.assertEqual(document['bridges'][TENANT]['api_base'], f'http://127.0.0.1:{port}',
+                         '注册表必须反映固定发布端口')
+        # 同一容器停/启不重选端口：注册表地址稳定、不得重建容器
+        fake.containers[self.name]['running'] = False
+        second = self.provision(fake)
+        self.assertEqual(second['action'], 'started')
+        self.assertEqual(second['api_base'], f'http://127.0.0.1:{port}')
+        self.assertFalse(second['registry_changed'], '端口未变化时不得改写注册表地址')
+        self.assertEqual(len([call for call in fake.calls if call[0] == 'run']), 1, '不得自动重建容器')
 
     def test_second_run_is_idempotent_and_refreshes_address(self):
         fake = FakeDocker(port=41001)
         self.provision(fake)
         first_key = json.loads(self.registry.read_text())['bridges'][TENANT]['api_key']
         calls_after_first = len(fake.calls)
+        # 模拟修复前创建的动态端口容器：停机重启后宿主端口实际变化，仅经 docker port 报告
+        fake.containers[self.name].pop('host_port', None)
         fake.port = 41002
-        fake.containers[self.name]['running'] = False  # 停机/重建后端口实际变化
+        fake.containers[self.name]['running'] = False
         second = self.provision(fake)
         self.assertEqual(second['action'], 'started')
         self.assertEqual(second['api_base'], 'http://127.0.0.1:41002')
@@ -228,9 +272,10 @@ class EnterpriseBridgeToolTests(unittest.TestCase):
         fake = FakeDocker(port=45123)
         summary = self.provision(fake)
         self.assertEqual(summary['action'], 'created')
-        self.assertEqual(summary['api_base'], 'http://127.0.0.1:45123')
+        rebuild_port = self.published_port(fake)  # 重建时重新随机选取并固定发布
+        self.assertEqual(summary['api_base'], 'http://127.0.0.1:' + rebuild_port)
         document = json.loads(self.registry.read_text())
-        self.assertEqual(document['bridges'][TENANT]['api_base'], 'http://127.0.0.1:45123')
+        self.assertEqual(document['bridges'][TENANT]['api_base'], 'http://127.0.0.1:' + rebuild_port)
         self.assertEqual(document['bridges'][TENANT]['api_key'], restored_key, '恢复后重建不得轮换密钥')
         self.assertEqual((self.workdir / 'sessions' / 'state.bin').read_bytes(), b'login-state')
 
