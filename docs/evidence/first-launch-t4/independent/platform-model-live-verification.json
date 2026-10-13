@@ -1,0 +1,50 @@
+{
+  "grounded": {
+    "mode": "deepseek",
+    "model": "deepseek-flash",
+    "status": "grounded",
+    "answer": "Isolated delivery fact\nIsolation test only: delivery takes 3 working days.",
+    "citations": [
+      {
+        "kind": "knowledge",
+        "title": "Isolated delivery fact",
+        "form_label": "文章",
+        "version": "v1",
+        "version_id": "a7042fb77203f76ad138b800",
+        "item_id": "50d060e92756284249455465",
+        "quote": "Isolated delivery fact\nIsolation test only: delivery takes 3 working days.",
+        "filename": "Isolated delivery fact",
+        "location": "知识条目 · v1（文章）",
+        "published_at": "2026-10-13T15:29:36+00:00"
+      }
+    ],
+    "reason": "",
+    "expected_version": "a7042fb77203f76ad138b800",
+    "calls": [
+      {
+        "http_response_received": true,
+        "finish_reason": "stop",
+        "content_chars": 18,
+        "reasoning_chars": 136,
+        "usage": {
+          "prompt_tokens": 280,
+          "completion_tokens": 40,
+          "total_tokens": 320,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 32
+          },
+          "prompt_cache_hit_tokens": 0,
+          "prompt_cache_miss_tokens": 280
+        }
+      }
+    ],
+    "isolation_evidence": "Task4Base.setUp temporary database; production database not opened"
+  },
+  "negative_and_health": "{\"temporary_db\": true, \"status\": \"no_evidence\", \"citations\": [], \"error_kind\": \"\", \"candidate_count\": 1}\nHTTPS 200\n",
+  "real_calls_total": 3,
+  "initial_probe": "invalid_output; cause not established; later business calls passed",
+  "secret_values_in_report": false
+}
