@@ -58,7 +58,7 @@
 | 批次原件（kb2_sources，含嵌套） | `data/uploads/phase2/kb2-*` | `enterprise_knowledge_phase2.py` | 是 |
 | 企业模型私有配置 | `data/app.db.model-secrets/`（0700/0600） | `model_settings.py EnterpriseModels` | 是（备份目录 `model-secrets/`，恢复映射为恢复目录下 `<库名>.model-secrets`） |
 | 渠道桥登录状态（WhatsApp 个人版 WAHA 会话卷） | `data/connection-runtime/<账号ID>/sessions/`（docker 卷挂载） | `channel_runtime.py provision_personal_bridge` | 是（目录 `connection-runtime/` 整体）。备份脚本自动停写“本库登记账号”的 `b2b-account-*` 与企业桥 `b2b-enterprise-*`（注册表登记 + 归属核对）；企业桥按第 12 节验收后再启用 |
-| 企业专属桥注册表与运行目录（含逐企业密钥与媒体卷） | `data/connection-runtime/enterprise-bridges.json`（root:b2b 0640）与 `data/connection-runtime/enterprise/<租户哈希>/{sessions,media,bridge.env}` | `deploy/provision_enterprise_bridge.py`（root，第 12 节）；应用经 `WHATSAPP_PERSONAL_BRIDGES_FILE` 只读 | 是（随 `connection-runtime/` 整体；恢复后重跑部署工具按恢复的注册表重建并更新随机端口） |
+| 企业专属桥注册表与运行目录（含逐企业密钥与媒体卷） | `data/connection-runtime/enterprise-bridges.json`（root:b2b 0640）与 `data/connection-runtime/enterprise/<租户哈希>/{sessions,media,bridge.env}` | `deploy/provision_enterprise_bridge.py`（root，第 12 节）；应用经 `WHATSAPP_PERSONAL_BRIDGES_FILE` 只读 | 是（随 `connection-runtime/` 整体；恢复后重跑部署工具按恢复的注册表重建：重新随机选取固定端口并更新注册表） |
 | 受限运维配置（密钥） | `/etc/b2b/b2b.env`（root:b2b 0640） | 单元 `EnvironmentFile` | 是（`ops-config/b2b.env`；恢复时按原相对路径保留；**禁止明文上传云端**） |
 | 后台作业状态（无需单独文件：全部在库表内） | `kb_sync_state`、`knowledge_processing`、`kb2_sources.status/processing_owner`、`messages.delivery_status='queued'` | `knowledge_delivery.py`、`enterprise_knowledge*.py`、`tools/channels/outbound_worker.py` | 是（随数据库快照） |
 | 服务日志 | systemd journal（stdout/stderr）；诊断日志 `data/whatsapp_personal_events.log`、`data/whatsapp_personal_start_audit.log`（代码目录内、非业务状态） | `app.py _append_private_log` | 不纳入备份（诊断用途）；journald 按系统策略轮转；代码目录内写入的约束见第 10 节 |
@@ -351,7 +351,7 @@ systemctl list-timers b2b-offsite-backup.timer
 
 **状态**：代码与部署工具已实现，本机以假件做过判别性测试（注册表/密钥隔离/停写归属/恢复重建）；**未在真实 Linux/Docker/WAHA 上执行过、未部署**。可承载账号数按实测另定（不设内存硬配额、不承诺容量）。
 
-- 每企业一个固定容器 `b2b-enterprise-<租户哈希 24hex>`（NOWEB 引擎），只监听 `127.0.0.1` 随机端口；Swagger（`WHATSAPP_SWAGGER_ENABLED=false`）与 Dashboard（`WAHA_DASHBOARD_ENABLED=false`）关闭。
+- 每企业一个固定容器 `b2b-enterprise-<租户哈希 24hex>`（NOWEB 引擎），只监听 `127.0.0.1`：容器创建时随机选取一个空闲宿主端口并固定发布（`-p 127.0.0.1:<端口>:3000`），端口在容器生命周期内固定、重启不再重分配；Swagger（`WHATSAPP_SWAGGER_ENABLED=false`）与 Dashboard（`WAHA_DASHBOARD_ENABLED=false`）关闭。
 - 运行目录：`/var/lib/b2b/data/connection-runtime/enterprise/<租户哈希>/{sessions,media,bridge.env}`；容器内挂载 `/app/.sessions` 与 `/app/.media`；`WHATSAPP_FILES_FOLDER=/app/.media`、`WHATSAPP_FILES_LIFETIME=0` 停止 WAHA 的媒体自动删除（**企业媒体保留时长规则仍待 T6 确认**；这里只停止自动删，不代表承诺长期保留）。
 - 部署（root；`<租户ID>` 用平台内真实租户 ID 替换；企业须已存在，否则拒绝创建）：
 
@@ -363,7 +363,7 @@ sudo /opt/b2b/venv/bin/python3 /opt/b2b/app/deploy/provision_enterprise_bridge.p
 
 - 工具生成逐企业独立密钥（只进 `bridge.env`，0600，环境变量方式注入容器、不进命令行）并原子更新私有注册表 `enterprise-bridges.json`（root:b2b 0640；先写临时文件再替换）；**不自动创建/启动任何 WhatsApp 会话**（扫码由企业在渠道页完成）。幂等：重复运行不重建容器；核对容器标签/卷/镜像不符时拒绝复用。
 - 应用侧：在 `/etc/b2b/b2b.env` 配置 `WHATSAPP_PERSONAL_BRIDGES_FILE=/var/lib/b2b/data/connection-runtime/enterprise-bridges.json` 后，发送与扫码只按“账号配置里的企业引用（tenant ID）”解析该注册表；缺失/无效映射一律拒绝、不回退平台全局桥。密钥不写入数据库配置、页面或日志。
-- 备份/恢复：备份脚本自动停写注册表登记且**归属本数据目录**的企业桥（停不下来或无法核对即失败退出）；`connection-runtime/`（注册表、env、sessions、media）随备份包整体恢复。恢复后按恢复的注册表重建容器（地址为随机端口，注册表会被更新）：
+- 备份/恢复：备份脚本自动停写注册表登记且**归属本数据目录**的企业桥（停不下来或无法核对即失败退出）；`connection-runtime/`（注册表、env、sessions、media）随备份包整体恢复。恢复后按恢复的注册表重建容器（重建时重新随机选取固定端口，注册表会被更新）：
 
 ```sh
 sudo /opt/b2b/venv/bin/python3 /opt/b2b/app/deploy/provision_enterprise_bridge.py \
