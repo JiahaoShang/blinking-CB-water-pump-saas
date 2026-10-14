@@ -1,0 +1,474 @@
+test_corrupt_credentials_fail_closed (test_model_settings.EnterpriseModelTests) ... ok
+test_endpoint_rejects_credentials_and_private_hosts (test_model_settings.EnterpriseModelTests) ... ok
+test_failure_never_uses_platform (test_model_settings.EnterpriseModelTests) ... ok
+test_legacy_official_config_normalized_on_read_without_rewriting (test_model_settings.EnterpriseModelTests)
+旧官方配置（如 deepseek-chat）读取时规范化为 flash；不改写旧文件、不动凭据。 ... ok
+test_official_custom_request_forced_and_third_party_protocol_unchanged (test_model_settings.EnterpriseModelTests)
+官方自定义端点请求套用固定三参数；第三方兼容端点保留原协议（不塞 DeepSeek 专用字段）。 ... ok
+test_switch_is_enterprise_scoped_and_persistent (test_model_settings.EnterpriseModelTests) ... ok
+test_real_provider_routing_connect_disconnect_and_other_tenant (test_model_settings.ModelSettingsHTTPTests) ... ok
+test_roles_and_failed_connect_keep_previous_service (test_model_settings.ModelSettingsHTTPTests) ... ok
+test_app_log_and_status_show_forced_model_despite_config_override (test_ai_deepseek.DeepSeekBoundaryTests)
+公开状态（设置页）与调用日志的 model 必须与实际请求一致：都显示 deepseek-flash。 ... ok
+test_commercial_question_never_calls_model (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_deepseek_configuration_failures_are_explicit (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_extraction_auth_failed_marks_configuration_and_hides_provider (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_extraction_drops_invalid_units_unknown_fields_and_ambiguous_values (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_extraction_empty_unit_flow_stays_unknown_and_buyer_can_fill_it (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_extraction_invalid_json_is_503_then_same_key_retry_recovers (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_extraction_rate_limited_and_server_error_are_retryable_statuses (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_extraction_success_feeds_candidate_card_and_keeps_confirmation_gate (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_extraction_timeout_is_503_then_retry_recovers (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_interface_journey_message_confirm_recommend_question_in_deepseek_mode (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_knowledge_evidence_selection_vendor_contract (test_ai_deepseek.DeepSeekBoundaryTests)
+select_knowledge_evidence 的请求/响应契约：本地 HTTP 模拟厂商协议，验证载荷与既有字段选择同口径。 ... ok
+test_max_tokens_official_default_1024_and_explicit_limits_respected (test_ai_deepseek.DeepSeekBoundaryTests)
+官方默认 1024（低思考真实 512 截断后适配）；显式参数与环境上限一律尊重，不静默忽略。 ... ok
+test_model_diagnostics_are_in_settings_and_not_dashboard (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_normalize_extraction_rejects_empty_unit_for_flow_head_temperature (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_normalize_extraction_rejects_unknown_units_and_normalizes_supported_forms (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_official_channel_params_force_flash_enabled_low_against_bypass_paths (test_ai_deepseek.DeepSeekBoundaryTests)
+环境变量、直接构造与运行期修改都不能把官方通道切到其他模型或关闭/调整思考。 ... ok
+test_pilot_live_check_script_against_mock (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_question_conflict_routing_blocked_when_asked_field_not_published (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_question_conflict_with_multiple_asked_fields_is_held_for_review (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_question_correct_field_selection_answers_asked_field (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_question_field_detection_boundaries_and_guard_rules (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_question_model_failure_keeps_question_and_creates_no_fake_answer_or_task (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_question_never_answers_unapproved_field (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_question_selection_answers_from_published_snapshot_only (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_question_wrong_field_selection_is_answered_from_asked_field (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_rules_mode_is_default_reproducible_and_makes_no_model_calls (test_ai_deepseek.DeepSeekBoundaryTests) ... ok
+test_truncated_length_response_is_failure_and_reasoning_content_stays_out (test_ai_deepseek.DeepSeekBoundaryTests)
+finish_reason=length 不得当作成功答案；reasoning_content 不进页面响应、日志或后续请求。 ... ok
+test_mixed_batch_settings_rejected_without_partial_writes (test_knowledge_phase2_source_ownership.BatchSettingsOwnershipTests)
+混合批次（一件已换版、一件仍是当前原件）：整批拒绝，不做部分写入。 ... ok
+test_old_batch_settings_rejected_before_writes (test_knowledge_phase2_source_ownership.BatchSettingsOwnershipTests) ... ok
+test_settings_after_failed_replacement_rejected_until_identity (test_knowledge_phase2_source_ownership.BatchSettingsOwnershipTests)
+失败换版批次（新原件未认领身份）：保存设置先拒绝；补人工正文认领身份后可保存。 ... ok
+test_current_source_check_edit_and_batch_publication_work (test_knowledge_phase2_source_ownership.CurrentSourceUsabilityTests) ... ok
+test_explicit_history_restore_remains_usable (test_knowledge_phase2_source_ownership.CurrentSourceUsabilityTests) ... ok
+test_publish_context_points_to_current_original (test_knowledge_phase2_source_ownership.CurrentSourceUsabilityTests) ... ok
+test_cross_tenant_checks_hold (test_knowledge_phase2_source_ownership.OldBatchOwnershipTests) ... ok
+test_old_batch_publish_rejected_and_everything_preserved (test_knowledge_phase2_source_ownership.OldBatchOwnershipTests) ... ok
+test_old_source_edit_check_and_exclude_rejected_without_writes (test_knowledge_phase2_source_ownership.OldBatchOwnershipTests) ... ok
+test_old_source_manual_paragraph_and_retry_rejected (test_knowledge_phase2_source_ownership.OldBatchOwnershipTests) ... ok
+test_worker_scan_does_not_touch_current_draft (test_knowledge_phase2_source_ownership.OldBatchOwnershipTests) ... ok
+test_fields_page_links_current_batch_publication_and_template_management (test_knowledge_phase2_source_ownership.SourceOwnershipHttpTests) ... ok
+test_legacy_item_page_has_contextual_fields_entry (test_knowledge_phase2_source_ownership.SourceOwnershipHttpTests) ... ok
+test_material_pages_point_to_current_draft_batch (test_knowledge_phase2_source_ownership.SourceOwnershipHttpTests) ... ok
+test_old_batch_publish_over_http_rejected_with_message (test_knowledge_phase2_source_ownership.SourceOwnershipHttpTests) ... ok
+test_stale_batch_publish_step_shows_superseded_gate (test_knowledge_phase2_source_ownership.SourceOwnershipHttpTests) ... ok
+test_z_current_batch_publication_over_http_works (test_knowledge_phase2_source_ownership.SourceOwnershipHttpTests) ... ok
+test_normal_draft_publish_still_freezes_current_fields (test_knowledge_phase2_history_restore.HistoryRestorePublishTests)
+普通（非恢复）草稿：发布仍冻结当前字段行（既有口径不变）。 ... ok
+test_restore_initializes_working_set_and_post_restore_edit_flows (test_knowledge_phase2_history_restore.HistoryRestorePublishTests)
+B2-B11：恢复历史版本即用恢复点快照初始化字段工作集；恢复后的明确编辑（改值+再核对） ... ok
+test_restored_draft_publish_keeps_restored_field_snapshot (test_knowledge_phase2_history_restore.HistoryRestorePublishTests)
+恢复点字段快照（2200/已核对）不被最新全局字段行（2400）静默覆盖。 ... ok
+test_field_change_after_publication_blocks_old_evidence (test_knowledge_phase2_ai_gates.FieldEvidenceGateTests)
+生成期间/发布后字段值变化：旧快照证据在模型之后复核被拒。 ... ok
+test_zero_and_false_are_valid_evidence_with_gates (test_knowledge_phase2_ai_gates.FieldEvidenceGateTests)
+0 与「否」是有效值可进入候选；未核对 / 不允许客户引用 / 无来源 / 未填 被排除。 ... ok
+test_after_model_revocation_blocks_topic_evidence (test_knowledge_phase2_ai_gates.StubModelGateTests)
+模型等待期间撤权 → 旧证据被拦（按资料不足处理）。 ... ok
+test_after_model_version_replacement_blocks_old_topic_evidence (test_knowledge_phase2_ai_gates.StubModelGateTests)
+模型等待期间来源发新版 → 旧出处的证据被拦。 ... ok
+test_stub_model_field_citation_identity (test_knowledge_phase2_ai_gates.StubModelGateTests)
+字段证据的引用身份：服务端原文 + 真实版本；0/否有效。 ... ok
+test_stub_model_only_receives_eligible_evidence_and_citation_is_exact (test_knowledge_phase2_ai_gates.StubModelGateTests) ... ok
+test_after_model_catches_topic_expiry (test_knowledge_phase2_ai_gates.TopicEvidenceFilterTests)
+B2-B07：模型后复核必须校验主题自身到期（生成期间到期 → 拒绝旧证据）。 ... ok
+test_eligible_topic_paragraphs_only_after_item_and_topic_authorization (test_knowledge_phase2_ai_gates.TopicEvidenceFilterTests)
+主题与来源均对外+授权后，已核对段落进入候选；来源仅内部 / 主题未授权不进入。 ... ok
+test_mixed_topic_returns_only_eligible_paragraphs (test_knowledge_phase2_ai_gates.TopicEvidenceFilterTests)
+混合主题（合格段 + 来源不合格段）：只返回合格段。 ... ok
+test_paragraph_pin_never_silently_upgrades_after_new_material_version (test_knowledge_phase2_ai_gates.TopicEvidenceFilterTests)
+来源资料发新版后：旧出处段按不合格过滤（不静默换版），成员显式重新核对后恢复候选。 ... ok
+test_registered_only_source_never_available_for_ai (test_knowledge_phase2_ai_gates.TopicEvidenceFilterTests)
+仅登记原件（没有可核对正文）不供 AI：即使被手工钉住也按不合格过滤。 ... ok
+test_renew_cannot_pin_to_history_or_missing_text (test_knowledge_phase2_ai_gates.TopicEvidenceFilterTests)
+重新核对只在当前内容里找：文字已从当前资料消失时明确失败（不猜测出处）。 ... ok
+test_unchecked_paragraph_and_internal_or_unauthorized_topic_are_excluded (test_knowledge_phase2_ai_gates.TopicEvidenceFilterTests)
+未核对段落不进入候选（发布闸门之外的防御性复核）；主题「仅内部」或未授权整条不进入。 ... ok
+test_unified_entry_reads_topic_only_tenant (test_knowledge_phase2_ai_gates.UnifiedEntryCandidateTests) ... ok
+test_unified_entry_without_any_candidate_keeps_local_and_skips_model (test_knowledge_phase2_ai_gates.UnifiedEntryCandidateTests)
+没有任何合格候选时保持既有行为：不进入知识问答、不做多余模型调用。 ... ok
+test_fallback_injects_submitter_field_without_request_submit (test_knowledge_phase2_batch_publish_confirm.BatchPublishConfirmComponentTests) ... ok
+test_publish_confirm_flow_preserves_action_and_skips_save (test_knowledge_phase2_batch_publish_confirm.BatchPublishConfirmComponentTests) ... ok
+test_internal_batch_publish_available_and_save_unaffected (test_knowledge_phase2_batch_publish_confirm.BatchPublishConfirmHttpTests) ... ok
+test_publish_form_confirm_attributes_on_form_not_button (test_knowledge_phase2_batch_publish_confirm.BatchPublishConfirmHttpTests) ... ok
+test_unconfirmed_external_ai_publish_rejected_then_confirm_succeeds (test_knowledge_phase2_batch_publish_confirm.BatchPublishConfirmHttpTests) ... ok
+test_model_fault_goes_to_existing_error_entry_and_retry_recovers (test_first_launch_t2.T2ChannelFaultEntryTests) ... ok
+test_item_field_citation_links_to_item_detail_page_and_is_reachable (test_first_launch_t2.T2QACitationLinkTests) ... ok
+test_topic_citation_links_to_topic_detail_page_and_is_reachable (test_first_launch_t2.T2QACitationLinkTests) ... ok
+test_rate_limited_and_invalid_output_also_return_503_without_fake_answer (test_first_launch_t2.T2WebsiteTopicFaultTests) ... ok
+test_topic_timeout_returns_503_preserves_input_and_same_key_retry_recovers (test_first_launch_t2.T2WebsiteTopicFaultTests) ... ok
+test_backup_accepts_nested_phase2_relative_source_path (test_first_launch_t4.BackupCoverageTests)
+T0 登记的旧边界：source_documents 中 data/uploads/phase2/... 嵌套相对路径必须被受理。 ... ok
+test_backup_fails_when_kb2_original_missing (test_first_launch_t4.BackupCoverageTests) ... ok
+test_backup_fails_when_knowledge_original_escapes_uploads (test_first_launch_t4.BackupCoverageTests) ... ok
+test_backup_fails_when_knowledge_original_is_symlink (test_first_launch_t4.BackupCoverageTests) ... ok
+test_backup_fails_when_knowledge_original_missing (test_first_launch_t4.BackupCoverageTests) ... ok
+test_backup_fails_when_knowledge_original_tampered (test_first_launch_t4.BackupCoverageTests) ... ok
+test_backup_fails_when_source_document_is_symlink (test_first_launch_t4.BackupCoverageTests) ... ok
+test_cli_backup_and_restore_roundtrip (test_first_launch_t4.CliRoundtripTests) ... ok
+test_connection_runtime_included_and_restored (test_first_launch_t4.PersistentStateCoverageTests) ... ok
+test_model_secrets_included_and_remapped_on_restore (test_first_launch_t4.PersistentStateCoverageTests) ... ok
+test_roundtrip_counts_cover_all_source_tables (test_first_launch_t4.PersistentStateCoverageTests) ... ok
+test_restore_accepts_legacy_bundle_layout (test_first_launch_t4.RestoreMappingTests)
+旧格式包（无 origin 记录）：按文件名 + 哈希尽力重建知识原件映射。 ... ok
+test_restore_refuses_existing_destination (test_first_launch_t4.RestoreMappingTests) ... ok
+test_restore_rejects_bundle_containing_symlink (test_first_launch_t4.RestoreMappingTests) ... ok
+test_restore_remaps_absolute_paths_and_keeps_legacy_relative (test_first_launch_t4.RestoreMappingTests) ... ok
+test_backup_fails_when_source_row_escapes_with_dotdot (test_first_launch_t4.SourcePathEscapeHardeningTests) ... ok
+test_backup_rejects_symlinked_uploads_root (test_first_launch_t4.SourcePathEscapeHardeningTests) ... ok
+test_ops_config_file_included_and_restored (test_first_launch_t4.SourcePathEscapeHardeningTests) ... ok
+test_ops_config_rejects_directory_or_symlink (test_first_launch_t4.SourcePathEscapeHardeningTests) ... ok
+test_resolve_stored_file_rejects_dotdot_forms (test_first_launch_t4.SourcePathEscapeHardeningTests) ... ok
+test_restore_fails_closed_on_dotdot_registered_path (test_first_launch_t4.SourcePathEscapeHardeningTests) ... ok
+test_restore_rejects_symlinked_bundle_root (test_first_launch_t4.SourcePathEscapeHardeningTests) ... ok
+test_configured_upload_dir_receives_new_source_files (test_first_launch_t4.UploadDirConfigTests) ... ok
+test_knowledge_import_lands_in_configured_upload_dir (test_first_launch_t4.UploadDirConfigTests) ... ok
+test_legacy_relative_path_resolves_to_configured_upload_dir (test_first_launch_t4.UploadDirConfigTests) ... ok
+test_resolve_stored_file_rejects_escape_and_symlink (test_first_launch_t4.UploadDirConfigTests) ... ok
+test_docker_unavailable_still_backs_up_with_warning (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_failed_backup_restores_original_state_and_skips_cleanup (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_failed_backup_with_inactive_app_starts_nothing (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_missing_env_file_warns_and_backs_up_without_ops_config (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_retention_prunes_only_aged_stamp_dirs (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_script_parses_in_sh (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_success_flow_saves_state_and_writes_root_private_bundle (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_success_with_inactive_app_keeps_it_stopped (test_first_launch_t4_deploy.BackupScriptBehaviorTests) ... ok
+test_empty_registry_keeps_legacy_flow (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests) ... ok
+test_enterprise_stop_failure_fails_backup_and_restores_original_state (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests) ... ok
+test_label_mismatch_refuses_to_stop_container (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests) ... ok
+test_registered_running_bridges_stop_once_and_restore (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests) ... ok
+test_registry_with_docker_unavailable_fails_before_stopping_app (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests) ... ok
+test_restored_copy_never_stops_original_bridge (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests)
+恢复副本（另一数据根）登记的桥不得停原桥：挂载来源与当前数据目录不一致必须失败。 ... ok
+test_unknown_container_state_fails_closed (test_first_launch_t4_deploy.EnterpriseBridgeBackupScriptTests)
+docker inspect 失败不能当作“不在运行”继续宣称已一致停写。 ... ok
+test_bootstrap_config_is_http_only_and_does_not_expose_app (test_first_launch_t4_deploy.NginxConfigTests) ... ok
+test_final_config_access_log_omits_query_and_token_paths (test_first_launch_t4_deploy.NginxConfigTests) ... ok
+test_final_config_host_restriction_and_default_site (test_first_launch_t4_deploy.NginxConfigTests) ... ok
+test_final_config_keeps_acme_webroot_for_renewal (test_first_launch_t4_deploy.NginxConfigTests)
+真机续期阻断回归（2026-10-13）：80 全站 301 后 CA 跟随跳转到 HTTPS 取校验文件， ... ok
+test_final_config_langbot_webhook_suppresses_access_log_and_keeps_proxy (test_first_launch_t4_deploy.NginxConfigTests)
+LangBot 桥 webhook 令牌在路径里（app.py 路由与个人版同形：前缀 + 16~96 位 [A-Za-z0-9_-] 令牌）： ... ok
+test_final_config_redirect_is_exact_host (test_first_launch_t4_deploy.NginxConfigTests) ... ok
+test_final_config_whatsapp_personal_webhook_suppresses_access_log_and_keeps_proxy (test_first_launch_t4_deploy.NginxConfigTests)
+租户 WhatsApp（个人版）webhook 令牌在路径里（2026-10-14 真机核对：令牌出现在访问日志）： ... ok
+test_readme_documents_bootstrap_sequence (test_first_launch_t4_deploy.NginxConfigTests) ... ok
+test_build_fails_closed_on_incomplete_source (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_build_succeeds_and_writes_package_checksum (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_extracted_package_imports_and_deploy_script_parses (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_manifest_hashes_match_every_file (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_manifest_sha256sum_file_verifies_all_files (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_package_contains_runtime_assets_and_templates (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_package_excludes_data_secrets_git_tests_and_history (test_first_launch_t4_deploy.ReleasePackageTests) ... ok
+test_app_service_keeps_hardening_and_loopback (test_first_launch_t4_deploy.SystemdUnitTests) ... ok
+test_backup_service_reads_env_file_and_runs_script (test_first_launch_t4_deploy.SystemdUnitTests) ... ok
+test_age_failure_removes_partial_ciphertext_and_never_uploads (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_app_restore_failure_blocks_encryption_and_upload (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_app_restore_retry_after_inner_failure_then_continues (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_cloud_verify_mismatch_fails_and_keeps_evidence (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_existing_cloud_object_refused_without_upload (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+云端已有对象（默认表格输出的真实行）→ 拒绝覆盖：只做一次 ls、不执行任何 cp、退出 14。 ... FAIL
+test_ls_failure_fail_closed_no_upload (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+云端预检 ls 以非零退出（2.4.0 实核的 403 口径）→ fail-closed 退出 14；不执行任何上传。 ... FAIL
+test_ops_secret_never_uploaded_in_plaintext (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_precheck_tolerates_user_reported_compact_footer (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+服务器用户回传的空桶尾行为 `Object Number is:0`（无空格）；官方二进制实核为 `Object Number is: 0`。 ... FAIL
+test_preflight_rejects_missing_ossutil_binary (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_preflight_rejects_secret_key_as_recipient (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_retention_prunes_only_aged_export_and_verify_items (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_script_parses_in_bash (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_snapshot_failure_no_upload_and_app_restored (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_snapshot_success_but_missing_bundle_is_rejected (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_success_flow_uploads_cipher_and_checksum_then_verifies (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_success_with_inactive_app_starts_nothing (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_upload_failure_nonzero_keeps_local_artifacts_and_app_running (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_wait_for_local_backup_finishes_then_proceeds (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+test_wait_for_local_backup_timeout_refuses_to_start (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... ok
+test_patch_build_succeeds_with_checksum_file (test_first_launch_t4_offsite.PatchPackageTests) ... ok
+test_patch_contains_only_task_files (test_first_launch_t4_offsite.PatchPackageTests) ... ok
+test_patch_manifest_matches_files (test_first_launch_t4_offsite.PatchPackageTests) ... ok
+test_patch_template_carries_acme_webroot_fix (test_first_launch_t4_offsite.PatchPackageTests) ... ok
+test_existing_pinned_out_refused_before_stopping_app (test_first_launch_t4_offsite.SnapshotOutPinningTests) ... ok
+test_pinned_out_is_created_exactly_at_given_path (test_first_launch_t4_offsite.SnapshotOutPinningTests) ... ok
+test_relative_pinned_out_refused (test_first_launch_t4_offsite.SnapshotOutPinningTests) ... ok
+test_offsite_service_unit_wiring (test_first_launch_t4_offsite.SystemdUnitAndDocsTests) ... ok
+test_offsite_timer_unit_wiring (test_first_launch_t4_offsite.SystemdUnitAndDocsTests) ... ok
+test_readme_documents_offsite_chain_install (test_first_launch_t4_offsite.SystemdUnitAndDocsTests) ... ok
+test_editor_leave_dialog_dynamic_behavior (test_enterprise_knowledge_review23.DynamicDomTests) ... ok
+test_import_leave_dialog_dynamic_behavior (test_enterprise_knowledge_review23.DynamicDomTests) ... ok
+test_nav_fold_dynamic_behavior (test_enterprise_knowledge_review23.DynamicDomTests) ... ok
+test_search_clear_dynamic_behavior (test_enterprise_knowledge_review23.DynamicDomTests) ... ok
+test_editor_shape_switch_preserves_content (test_enterprise_knowledge_final_fixes.DynamicDomTests) ... ok
+test_nav_server_active_subview_wins_stored_closed (test_enterprise_knowledge_final_fixes.DynamicDomTests) ... ok
+test_save_submit_clears_unload_guard (test_enterprise_knowledge_final_fixes.DynamicDomTests) ... ok
+
+======================================================================
+FAIL: test_app_restore_retry_after_inner_failure_then_continues (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/test_first_launch_t4_offsite.py", line 754, in test_app_restore_retry_after_inner_failure_then_continues
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 12 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-2xb1exqt/backups/20261014-201213；云端目标 oss://bucket-t4-oss/backups/20261014-201213/；本地保留 14 天。
+① 停写快照：调用 /private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-2xb1exqt/backups/20261014-201213
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-2xb1exqt/backups/20261014-201213
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-2xb1exqt/backups/20261014-201213（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+② 确认应用已恢复运行
+已恢复应用运行：b2b-app
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-2xb1exqt/backups/20261014-201213.export.tar.gz.age
+警告：应用未能恢复启动（请人工处理）：b2b-app
+警告：快照流程后 b2b-app 未处于运行状态，尝试恢复（快照脚本本应已恢复，此为兜底）…
+/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/offsite_backup_oss.sh: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-2xb1exqt/shims/age: /Users/jiahaoshang/.codex/worktrees/196c/b2b: bad interpreter: No such file or directory
+tar: Write error
+tar: Error exit delayed from previous errors.
+错误：age 加密失败；已清理不完整密文；未上传任何内容（本地快照保留：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-2xb1exqt/backups/20261014-201213）。
+
+
+======================================================================
+FAIL: test_cloud_verify_mismatch_fails_and_keeps_evidence (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/test_first_launch_t4_offsite.py", line 627, in test_cloud_verify_mismatch_fails_and_keeps_evidence
+    self.assertEqual(result.returncode, 16, result.stdout + result.stderr)
+AssertionError: 12 != 16 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-75_ffwkb/backups/20261014-201214；云端目标 oss://bucket-t4-oss/backups/20261014-201214/；本地保留 14 天。
+① 停写快照：调用 /private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-75_ffwkb/backups/20261014-201214
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-75_ffwkb/backups/20261014-201214
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-75_ffwkb/backups/20261014-201214（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-75_ffwkb/backups/20261014-201214.export.tar.gz.age
+/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/offsite_backup_oss.sh: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-75_ffwkb/shims/age: /Users/jiahaoshang/.codex/worktrees/196c/b2b: bad interpreter: No such file or directory
+tar: Write error
+tar: Error exit delayed from previous errors.
+错误：age 加密失败；已清理不完整密文；未上传任何内容（本地快照保留：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-75_ffwkb/backups/20261014-201214）。
+
+
+======================================================================
+FAIL: test_existing_cloud_object_refused_without_upload (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+云端已有对象（默认表格输出的真实行）→ 拒绝覆盖：只做一次 ls、不执行任何 cp、退出 14。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/test_first_launch_t4_offsite.py", line 589, in test_existing_cloud_object_refused_without_upload
+    self.assertEqual(result.returncode, 14, result.stdout + result.stderr)
+AssertionError: 12 != 14 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-t51td_ig/backups/20261014-201215；云端目标 oss://bucket-t4-oss/backups/20261014-201215/；本地保留 14 天。
+① 停写快照：调用 /private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-t51td_ig/backups/20261014-201215
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-t51td_ig/backups/20261014-201215
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-t51td_ig/backups/20261014-201215（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-t51td_ig/backups/20261014-201215.export.tar.gz.age
+/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/offsite_backup_oss.sh: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-t51td_ig/shims/age: /Users/jiahaoshang/.codex/worktrees/196c/b2b: bad interpreter: No such file or directory
+tar: Write error
+tar: Error exit delayed from previous errors.
+错误：age 加密失败；已清理不完整密文；未上传任何内容（本地快照保留：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-t51td_ig/backups/20261014-201215）。
+
+
+======================================================================
+FAIL: test_ls_failure_fail_closed_no_upload (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+云端预检 ls 以非零退出（2.4.0 实核的 403 口径）→ fail-closed 退出 14；不执行任何上传。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/test_first_launch_t4_offsite.py", line 605, in test_ls_failure_fail_closed_no_upload
+    self.assertEqual(result.returncode, 14, result.stdout + result.stderr)
+AssertionError: 12 != 14 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-_enl4hp_/backups/20261014-201215；云端目标 oss://bucket-t4-oss/backups/20261014-201215/；本地保留 14 天。
+① 停写快照：调用 /private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-_enl4hp_/backups/20261014-201215
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-_enl4hp_/backups/20261014-201215
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-_enl4hp_/backups/20261014-201215（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-_enl4hp_/backups/20261014-201215.export.tar.gz.age
+/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/offsite_backup_oss.sh: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-_enl4hp_/shims/age: /Users/jiahaoshang/.codex/worktrees/196c/b2b: bad interpreter: No such file or directory
+tar: Write error
+tar: Error exit delayed from previous errors.
+错误：age 加密失败；已清理不完整密文；未上传任何内容（本地快照保留：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-_enl4hp_/backups/20261014-201215）。
+
+
+======================================================================
+FAIL: test_ops_secret_never_uploaded_in_plaintext (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/test_first_launch_t4_offsite.py", line 681, in test_ops_secret_never_uploaded_in_plaintext
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 12 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-dnzvzyyi/backups/20261014-201216；云端目标 oss://bucket-t4-oss/backups/20261014-201216/；本地保留 14 天。
+① 停写快照：调用 /private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-dnzvzyyi/backups/20261014-201216
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-dnzvzyyi/backups/20261014-201216
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-dnzvzyyi/backups/20261014-201216（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-dnzvzyyi/backups/20261014-201216.export.tar.gz.age
+/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/offsite_backup_oss.sh: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-dnzvzyyi/shims/age: /Users/jiahaoshang/.codex/worktrees/196c/b2b: bad interpreter: No such file or directory
+tar: Write error
+tar: Error exit delayed from previous errors.
+错误：age 加密失败；已清理不完整密文；未上传任何内容（本地快照保留：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-dnzvzyyi/backups/20261014-201216）。
+
+
+======================================================================
+FAIL: test_precheck_tolerates_user_reported_compact_footer (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+服务器用户回传的空桶尾行为 `Object Number is:0`（无空格）；官方二进制实核为 `Object Number is: 0`。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/test_first_launch_t4_offsite.py", line 622, in test_precheck_tolerates_user_reported_compact_footer
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 12 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-mx349cqx/backups/20261014-201217；云端目标 oss://bucket-t4-oss/backups/20261014-201217/；本地保留 14 天。
+① 停写快照：调用 /private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-mx349cqx/backups/20261014-201217
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-mx349cqx/backups/20261014-201217
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-mx349cqx/backups/20261014-201217（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-mx349cqx/backups/20261014-201217.export.tar.gz.age
+/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/offsite_backup_oss.sh: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-mx349cqx/shims/age: /Users/jiahaoshang/.codex/worktrees/196c/b2b: bad interpreter: No such file or directory
+tar: Write error
+tar: Error exit delayed from previous errors.
+错误：age 加密失败；已清理不完整密文；未上传任何内容（本地快照保留：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-mx349cqx/backups/20261014-201217）。
+
+
+======================================================================
+FAIL: test_retention_prunes_only_aged_export_and_verify_items (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/test_first_launch_t4_offsite.py", line 738, in test_retention_prunes_only_aged_export_and_verify_items
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 12 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bshy9wh9/backups/20261014-201217；云端目标 oss://bucket-t4-oss/backups/20261014-201217/；本地保留 14 天。
+① 停写快照：调用 /private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bshy9wh9/backups/20261014-201217
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bshy9wh9/backups/20261014-201217
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bshy9wh9/backups/20261014-201217（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bshy9wh9/backups/20261014-201217.export.tar.gz.age
+/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/offsite_backup_oss.sh: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bshy9wh9/shims/age: /Users/jiahaoshang/.codex/worktrees/196c/b2b: bad interpreter: No such file or directory
+tar: Write error
+tar: Error exit delayed from previous errors.
+错误：age 加密失败；已清理不完整密文；未上传任何内容（本地快照保留：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bshy9wh9/backups/20261014-201217）。
+
+
+======================================================================
+FAIL: test_success_flow_uploads_cipher_and_checksum_then_verifies (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/test_first_launch_t4_offsite.py", line 641, in test_success_flow_uploads_cipher_and_checksum_then_verifies
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 12 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-hg9w2fpp/backups/20261014-201219；云端目标 oss://bucket-t4-oss/backups/20261014-201219/；本地保留 14 天。
+① 停写快照：调用 /private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-hg9w2fpp/backups/20261014-201219
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-hg9w2fpp/backups/20261014-201219
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-hg9w2fpp/backups/20261014-201219（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-hg9w2fpp/backups/20261014-201219.export.tar.gz.age
+/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/offsite_backup_oss.sh: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-hg9w2fpp/shims/age: /Users/jiahaoshang/.codex/worktrees/196c/b2b: bad interpreter: No such file or directory
+tar: Write error
+tar: Error exit delayed from previous errors.
+错误：age 加密失败；已清理不完整密文；未上传任何内容（本地快照保留：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-hg9w2fpp/backups/20261014-201219）。
+
+
+======================================================================
+FAIL: test_success_with_inactive_app_starts_nothing (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/test_first_launch_t4_offsite.py", line 709, in test_success_with_inactive_app_starts_nothing
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 12 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-z9pmq7j2/backups/20261014-201220；云端目标 oss://bucket-t4-oss/backups/20261014-201220/；本地保留 14 天。
+① 停写快照：调用 /private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/backup_snapshot.sh
+提示：b2b-app 原本未运行，不停不启（备份后保持原状）
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-z9pmq7j2/backups/20261014-201220
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-z9pmq7j2/backups/20261014-201220
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-z9pmq7j2/backups/20261014-201220（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-z9pmq7j2/backups/20261014-201220.export.tar.gz.age
+/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/offsite_backup_oss.sh: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-z9pmq7j2/shims/age: /Users/jiahaoshang/.codex/worktrees/196c/b2b: bad interpreter: No such file or directory
+tar: Write error
+tar: Error exit delayed from previous errors.
+错误：age 加密失败；已清理不完整密文；未上传任何内容（本地快照保留：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-z9pmq7j2/backups/20261014-201220）。
+
+
+======================================================================
+FAIL: test_upload_failure_nonzero_keeps_local_artifacts_and_app_running (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/test_first_launch_t4_offsite.py", line 576, in test_upload_failure_nonzero_keeps_local_artifacts_and_app_running
+    self.assertEqual(result.returncode, 15, result.stdout + result.stderr)
+AssertionError: 12 != 15 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bzd76zp8/backups/20261014-201220；云端目标 oss://bucket-t4-oss/backups/20261014-201220/；本地保留 14 天。
+① 停写快照：调用 /private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bzd76zp8/backups/20261014-201220
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bzd76zp8/backups/20261014-201220
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bzd76zp8/backups/20261014-201220（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bzd76zp8/backups/20261014-201220.export.tar.gz.age
+/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/offsite_backup_oss.sh: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bzd76zp8/shims/age: /Users/jiahaoshang/.codex/worktrees/196c/b2b: bad interpreter: No such file or directory
+tar: Write error
+tar: Error exit delayed from previous errors.
+错误：age 加密失败；已清理不完整密文；未上传任何内容（本地快照保留：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-bzd76zp8/backups/20261014-201220）。
+
+
+======================================================================
+FAIL: test_wait_for_local_backup_finishes_then_proceeds (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/test_first_launch_t4_offsite.py", line 789, in test_wait_for_local_backup_finishes_then_proceeds
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 12 != 0 : 检测到 b2b-backup.service 正在运行，等待其完成（最多 30 秒）…
+本机备份已结束，继续异地链。
+异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6ices96y/backups/20261014-201221；云端目标 oss://bucket-t4-oss/backups/20261014-201221/；本地保留 14 天。
+① 停写快照：调用 /private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6ices96y/backups/20261014-201221
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6ices96y/backups/20261014-201221
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6ices96y/backups/20261014-201221（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6ices96y/backups/20261014-201221.export.tar.gz.age
+/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe/deploy/offsite_backup_oss.sh: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6ices96y/shims/age: /Users/jiahaoshang/.codex/worktrees/196c/b2b: bad interpreter: No such file or directory
+tar: Write error
+tar: Error exit delayed from previous errors.
+错误：age 加密失败；已清理不完整密文；未上传任何内容（本地快照保留：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6ices96y/backups/20261014-201221）。
+
+
+----------------------------------------------------------------------
+Ran 175 tests in 67.104s
+
+FAILED (failures=11)

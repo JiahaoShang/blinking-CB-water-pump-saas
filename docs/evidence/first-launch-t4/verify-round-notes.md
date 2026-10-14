@@ -3,6 +3,8 @@
 - 日期：2026-10-13（本地，UTC+8）
 - 对象：对照 `/tmp/b2b-t4-extra-review.txt`（已归档 `docs/evidence/first-launch-t4/independent/path-escape-review.txt`）复核修复轮 `fix-round-*` 的全部修复项。
 - 状态：**制作方复核通过；非独立验收——不标 T4 通过、不标独立验收通过**。服务器端（Linux systemd/nginx/HTTPS/发布包安装）验收未执行（见 `deploy/README.md` 第 3 节 ⑩，待 Workbench）。
+
+> **退役说明（2026-10-14）**：下文①所用探针 `verify-round-probe.py` 已按[历史一次性测试脚本清理记录](../../历史一次性测试脚本清理记录.md)退役删除；该结果仅为当轮回放证据，不代表当前复跑步骤；当前覆盖入口为 `test_first_launch_t4.py` 的 `SourcePathEscapeHardeningTests`。
 - 隔离：全部使用系统临时目录/临时库；仓库 `data/` 复核前后未变（uploads 5147 文件、phase2 0）；未调用真实模型、未连外部账号、未读取密钥；未提交/未推送。
 
 ## 一、修复内容核对（复核轮未改代码与测试，关键文件哈希与 fix-round 记录一致）

@@ -1,0 +1,29 @@
+test_success_flow_uploads_cipher_and_checksum_then_verifies (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests) ... FAIL
+
+======================================================================
+FAIL: test_success_flow_uploads_cipher_and_checksum_then_verifies (test_first_launch_t4_offsite.OffsiteScriptBehaviorTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/before/test_first_launch_t4_offsite.py", line 641, in test_success_flow_uploads_cipher_and_checksum_then_verifies
+    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+AssertionError: 12 != 0 : 异地备份开始：本次快照固定为 /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6x1guz08/backups/20261014-201614；云端目标 oss://bucket-t4-oss/backups/20261014-201614/；本地保留 14 天。
+① 停写快照：调用 /private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/before/deploy/backup_snapshot.sh
+停写窗口：停止 b2b-app
+快照：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6x1guz08/backups/20261014-201614
+备份完成: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6x1guz08/backups/20261014-201614
+覆盖：RFQ 0 条；原件已核验 0 个文件（登记行：产品 0 / 知识 0 / 批次 0）；模型配置无；连接运行状态无；运维配置有
+一致性边界：数据库为事务一致快照；原件与私有目录在快照后顺序复制。要得到互相匹配的一整套，请先停止应用与渠道桥（见 deploy/backup_snapshot.sh）。
+备份完成：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6x1guz08/backups/20261014-201614（保留 14 天；异地方案见 deploy/offsite-backup-r2-plan.md）
+已恢复服务：b2b-app
+② 确认应用已恢复运行
+③ 加密：tar | age -R（公钥）→ /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6x1guz08/backups/20261014-201614.export.tar.gz.age
+/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/before/deploy/offsite_backup_oss.sh: /var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6x1guz08/shims/age: /Users/jiahaoshang/.codex/worktrees/196c/b2b: bad interpreter: No such file or directory
+tar: Write error
+tar: Error exit delayed from previous errors.
+错误：age 加密失败；已清理不完整密文；未上传任何内容（本地快照保留：/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/t4-offsite-6x1guz08/backups/20261014-201614）。
+
+
+----------------------------------------------------------------------
+Ran 1 test in 1.919s
+
+FAILED (failures=1)

@@ -1,0 +1,43 @@
+{
+  "exact_tracked_delete_count": 22,
+  "untracked_orphan_removed": true,
+  "protected_tracked_files_unchanged": 623,
+  "all_original_other_untracked_files_unchanged": true,
+  "all_71_regression_modules_unchanged": true,
+  "all_6_browser_helpers_unchanged": true,
+  "app_and_deploy_unchanged": true,
+  "fixed_doc_links_checked": [
+    {
+      "file": "design/enterprise-knowledge-topic-prototype/REVIEW.md",
+      "target": "../../docs/历史一次性测试脚本清理记录.md"
+    },
+    {
+      "file": "docs/README.md",
+      "target": "历史一次性测试脚本清理记录.md"
+    },
+    {
+      "file": "design/enterprise-knowledge-phase2-prototype/REVIEW.md",
+      "target": "../../docs/历史一次性测试脚本清理记录.md"
+    },
+    {
+      "file": "docs/evidence/first-launch-t4/verify-round-notes.md",
+      "target": "../../历史一次性测试脚本清理记录.md"
+    },
+    {
+      "file": "docs/evidence/first-launch-t4/ossutil-240-ls-evidence/00-notes.md",
+      "target": "../../../历史一次性测试脚本清理记录.md"
+    },
+    {
+      "file": "design/enterprise-knowledge-phase2-prototype/README.md",
+      "target": "../../docs/历史一次性测试脚本清理记录.md"
+    },
+    {
+      "file": "docs/evidence/first-launch-t4/ossutil-precheck-fix-notes.md",
+      "target": "../../历史一次性测试脚本清理记录.md"
+    },
+    {
+      "file": "design/enterprise-knowledge-topic-prototype/README.md",
+      "target": "../../docs/历史一次性测试脚本清理记录.md"
+    }
+  ]
+}

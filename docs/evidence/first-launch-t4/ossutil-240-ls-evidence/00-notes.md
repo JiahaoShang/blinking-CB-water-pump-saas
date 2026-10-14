@@ -3,6 +3,8 @@
 本目录是“T4 异地链预检 `-s` 修复”的官方 CLI 实核材料。全部来自官方发布物与本机 mock 端点，
 **未连接任何真实云服务、未使用任何真实密钥**（ossutil 配置为一次性 dummy 值 + 本机回环 endpoint）。
 
+> **退役说明（2026-10-14）**：本目录的 `mock_oss_server2.py`、`case6-harness.sh`、`e2e-run.sh` 已按[历史一次性测试脚本清理记录](../../../历史一次性测试脚本清理记录.md)退役删除。下文命令与输出记录仅说明当轮证据如何产生，属历史留档，不作当前操作步骤；当前异地备份验证入口为 `test_first_launch_t4_offsite.py`（使用其自身夹具）。
+
 ## 官方下载与校验（官方源 2026-10-13 实下载）
 
 - 下载页（官方）：https://help.aliyun.com/zh/oss/developer-reference/ossutil-overview/

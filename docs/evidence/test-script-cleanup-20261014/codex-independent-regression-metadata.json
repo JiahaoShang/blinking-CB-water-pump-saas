@@ -1,0 +1,22 @@
+{
+  "targets": [
+    "test_model_settings",
+    "test_ai_deepseek",
+    "test_knowledge_phase2_source_ownership",
+    "test_knowledge_phase2_history_restore",
+    "test_knowledge_phase2_ai_gates",
+    "test_knowledge_phase2_batch_publish_confirm",
+    "test_first_launch_t2",
+    "test_first_launch_t4",
+    "test_first_launch_t4_deploy",
+    "test_first_launch_t4_offsite",
+    "test_enterprise_knowledge_review23.DynamicDomTests",
+    "test_enterprise_knowledge_final_fixes.DynamicDomTests"
+  ],
+  "isolated_cwd": "/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/codex-after-nwwqk8xe",
+  "interpreter": "/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-history-test-cleanup-kg5l1gb_/python-env/bin/python",
+  "exit_code": 1,
+  "discovery_equal": true,
+  "test_modules": 71,
+  "test_ids_count": 894
+}
