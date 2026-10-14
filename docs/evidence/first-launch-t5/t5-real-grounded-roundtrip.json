@@ -1,0 +1,29 @@
+{
+  "invocation_status": "Success",
+  "exit_code": 0,
+  "results": {
+    "marker": "T4/T5测试-有据-1791957892",
+    "question": "T4/T5测试-有据-1791957892 What are the T4/T5 test service hours?",
+    "transport": "real WhatsApp/HTTPS callbacks",
+    "question_message_id": "fd6d5a64b6dcd79404eb7f10",
+    "conversation_id": "b51c88792fa1859ee2f90c15",
+    "answer_id": "850c7feb296f7e10e214e033",
+    "answer_status": "grounded",
+    "answer_text": "T4/T5 synthetic service hours\nT4/T5 test service hours: Tuesday through Thursday, 10:00-16:00. This is synthetic acceptance data only.",
+    "citations": [
+      {
+        "kind": "knowledge",
+        "title": "T4/T5 synthetic service hours",
+        "form_label": "文章",
+        "version": "v1",
+        "version_id": "d63cb1120841dada0644fc26",
+        "item_id": "d0723ee1a5e2e1b482fd4db1",
+        "quote": "T4/T5 synthetic service hours\nT4/T5 test service hours: Tuesday through Thursday, 10:00-16:00. This is synthetic acceptance data only.",
+        "filename": "T4/T5 synthetic service hours",
+        "location": "知识条目 · v1（文章）",
+        "published_at": "2026-10-14T05:55:15+00:00"
+      }
+    ],
+    "receiver_A_count": 1
+  }
+}

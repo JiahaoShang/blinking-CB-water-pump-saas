@@ -1,0 +1,22 @@
+test_nonweb_sent_notice_objective_and_delivered_only_after_receipt (test_first_launch_t5.T5DeliveryNoticeTests) ... ok
+test_platform_reply_area_hint_objective (test_first_launch_t5.T5DeliveryNoticeTests) ... ok
+test_native_rfq_link_entry_sends_via_existing_bus (test_first_launch_t5.T5NativeRfqEntryTests) ... ok
+test_native_rfq_link_gates_unchanged (test_first_launch_t5.T5NativeRfqEntryTests) ... ok
+test_two_connections_do_not_replace_and_default_ai_off (test_business_channels.BusinessChannelTests) ... ok
+test_ai_requires_explicit_knowledge_confirmation (test_business_channels.BusinessChannelTests) ... ok
+test_identity_and_conversation_scoped_by_account (test_business_channels.BusinessChannelTests) ... ok
+test_inbound_off_still_saved_and_dedup_scoped (test_business_channels.BusinessChannelTests) ... ok
+test_transfer_moves_associated_rfq_and_followup (test_business_channels.BusinessChannelTests) ... ok
+test_member_cannot_read_or_post_to_other_account_history (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_transferred_history_cannot_resume_original_account_ai (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_callback_token_and_session_routing_per_tenant (test_business_channels.EnterpriseBridgeRoutingTests) ... ok
+test_outbound_routes_to_own_tenant_bridge_with_own_key_and_session (test_business_channels.EnterpriseBridgeRoutingTests) ... ok
+test_rfq_link_and_form_roundtrip (test_v1_channels.ChannelPipelineTests) ... ok
+test_dispatch_retry_idempotent_and_delivered_receipt (test_v1_channels.OutboundBusTests) ... ok
+test_inbox_retry_button_flow_and_list_badge (test_v1_channels.OutboundBusTests) ... ok
+test_duplicate_dedup (test_whatsapp_personal.WhatsAppPersonalTests) ... ok
+
+----------------------------------------------------------------------
+Ran 17 tests in 10.310s
+
+OK

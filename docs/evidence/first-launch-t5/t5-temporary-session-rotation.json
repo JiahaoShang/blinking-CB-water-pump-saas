@@ -1,0 +1,7 @@
+{
+  "invocation_status": "Success",
+  "exit_code": 0,
+  "results": {
+    "temporary_ui_sessions_revoked": 2
+  }
+}

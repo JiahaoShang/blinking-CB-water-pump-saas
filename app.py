@@ -11436,7 +11436,9 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
         conversation = self.db.get_conversation(self.tenant_id, conversation_id)
         if not section or not conversation or not self._inbox_conversation_in_section(section, conversation):
             raise ValueError("会话不存在或不属于这个渠道")
-        if section["kind"] != "platform":
+        # 已有原生发送渠道（如 WhatsApp 个人桥）与 LangBot 平台轨一样经出站总线发送；
+        # 网站聊天没有外发通道，保持拒绝。发送权限/停止主动联系/企业边界门控保留。
+        if section["kind"] not in ("platform", "native"):
             raise ValueError("该渠道的发送通道尚未开通")
         if conversation["stop_proactive_contact"]:
             self.redirect(f"/admin/inbox/{slug}/{conversation_id}?notice=link_stopped")
@@ -11597,10 +11599,12 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
                 return
         send_allowed = self.db.can_send_conversation(self.tenant_id, conversation_id, self.user_id)
         is_web = section["kind"] == "web"
+        # 出站总线记录的是「渠道已受理」（sent=渠道返回受理号，不代表送达）；送达只在真实回执推进
+        # delivery_status='delivered' 后显示。提示不宣称「直达买方」。
         sent_html = (
             "<div class='notice'>回复已发送——买方在网站聊天窗口里可见。</div>"
             if is_web
-            else f"<div class='notice'>回复已发送——已经由 {esc(label)} 直达买方。</div>"
+            else f"<div class='notice'>回复已发送——{esc(label)} 渠道已接受发送，送达尚未确认。</div>"
         )
         notices = {
             "sent": sent_html,
@@ -11661,7 +11665,8 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
         if lead_row:
             chips.append(f"<a class='chip' href='/admin/leads/{esc(lead_row['id'])}'>关联线索</a>")
         rfq_pill_html = ""
-        if section["kind"] == "platform" and send_allowed:
+        # 与 POST /rfq-link 门禁同口径：平台轨与已有原生渠道都提供入口；网站聊天没有入口。
+        if section["kind"] in ("platform", "native") and send_allowed:
             rfq_pill_html = (
                 f"<form class='inline' method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/rfq-link'>"
                 f"<button class='qpill' title='给买方发送询价填写链接'>{svg_icon('file')}发送询价单</button></form>"
@@ -11700,7 +11705,7 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
         elif section["kind"] == "native":
             hint = f"回复将经 {esc(label)} 发送；发送通道未就绪时消息会标记「发送失败」并支持重试。"
         else:
-            hint = f"回复将经 {esc(label)} 直达买方；发送失败会标记并可重试。"
+            hint = f"回复将经 {esc(label)} 发送；发送失败会标记并可重试。"
         composer = f"<form class='chat-composer' method='post' action='/admin/inbox/{slug}/{esc(conversation_id)}/reply'><textarea name='body' required maxlength='4000' placeholder='输入回复内容…'></textarea><button>发送</button></form>" if send_allowed else "<div class='muted-block'>你可以查看转交历史；如需通过原业务账号回复，请联系管理员授予该账号使用权限。</div>"
         if not send_allowed:
             hint = '原账号的连接和发送权限保持独立。'

@@ -1,0 +1,72 @@
+{
+  "status": "Success",
+  "exit_code": 0,
+  "results": {
+    "release": "/opt/b2b/releases/b2b-release-20261014-enterprise-wa-r2",
+    "accounts": [
+      {
+        "id": "0aeb613589f381d2ccabea7f",
+        "tenant_id": "pilot-t4",
+        "channel": "whatsapp_personal",
+        "platform": "WhatsApp",
+        "status": "enabled",
+        "ai_enabled": 0,
+        "configured_fields": [
+          "api_base",
+          "bridge_tenant",
+          "callback_url",
+          "session",
+          "webhook_token"
+        ],
+        "bot_configured": false
+      },
+      {
+        "id": "a03f8c1a059c5e1a924b83ea",
+        "tenant_id": "pilot-t4",
+        "channel": "whatsapp_personal",
+        "platform": "WhatsApp",
+        "status": "enabled",
+        "ai_enabled": 0,
+        "configured_fields": [
+          "api_base",
+          "bridge_tenant",
+          "callback_url",
+          "session",
+          "webhook_token"
+        ],
+        "bot_configured": false
+      }
+    ],
+    "wa_sessions": [
+      {
+        "name": "business-0aeb613589f381d2ccabea7f",
+        "status": "WORKING",
+        "identity_hash": "7a4f99d3d09d"
+      },
+      {
+        "name": "business-a03f8c1a059c5e1a924b83ea",
+        "status": "WORKING",
+        "identity_hash": "a6ee495b58b8"
+      }
+    ],
+    "test_conversations": [
+      {
+        "id": "69ff63e7d8bfc1c9718e61a4",
+        "tenant_id": "pilot-t4",
+        "source": "whatsapp_personal",
+        "channel_account_id": "0aeb613589f381d2ccabea7f",
+        "ai_paused": 0,
+        "messages": 4
+      },
+      {
+        "id": "b51c88792fa1859ee2f90c15",
+        "tenant_id": "pilot-t4",
+        "source": "whatsapp_personal",
+        "channel_account_id": "a03f8c1a059c5e1a924b83ea",
+        "ai_paused": 0,
+        "messages": 5
+      }
+    ],
+    "https_status": 200
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "invocation_status": "Success",
+  "exit_code": 0,
+  "results": {
+    "manual_messages": [
+      {
+        "id": "55b63724916a8581ad0fc2e3",
+        "role": "staff",
+        "source": "staff-reply",
+        "delivery_status": "sent",
+        "channel_account_id": "a03f8c1a059c5e1a924b83ea",
+        "vendor_id_present": 1
+      },
+      {
+        "id": "b5f4e20eba22e0cb0e9b54cf",
+        "role": "buyer",
+        "source": "whatsapp_personal",
+        "delivery_status": "",
+        "channel_account_id": "0aeb613589f381d2ccabea7f",
+        "vendor_id_present": 1
+      }
+    ],
+    "rfqs": [],
+    "leads": [],
+    "ai_paused": 1,
+    "rfq_link_routes": [
+      {
+        "id": "8c884a77e3dfab9251f8ce74",
+        "role": "assistant",
+        "source": "rfq-link",
+        "delivery_status": "sent",
+        "channel_account_id": "a03f8c1a059c5e1a924b83ea",
+        "vendor_id_present": 1
+      },
+      {
+        "id": "d823783a82ce107b85f5b0a2",
+        "role": "buyer",
+        "source": "whatsapp_personal",
+        "delivery_status": "",
+        "channel_account_id": "0aeb613589f381d2ccabea7f",
+        "vendor_id_present": 1
+      }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "invocation_status": "Success",
+  "exit_code": 0,
+  "results": {
+    "fixture_user_id": "2dc1f8ce8ba310b2571431a1",
+    "synthetic_knowledge_id": "d0723ee1a5e2e1b482fd4db1",
+    "version": 1,
+    "ai_changed": false,
+    "credentials_permissions": "0o600"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "invocation_status": "Success",
+  "exit_code": 0,
+  "results": {
+    "transport": "direct cloud HTTPS using session from actual temporary-admin UI login; browser APIRequest client timed out, not counted as pass",
+    "http_status": 303,
+    "already_sent_noop": true,
+    "attempts_before": 2,
+    "attempts_after": 2,
+    "receiver_A_count": 1
+  }
+}

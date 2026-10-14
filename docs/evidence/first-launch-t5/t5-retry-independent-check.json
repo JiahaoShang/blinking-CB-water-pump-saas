@@ -1,0 +1,14 @@
+{
+  "invocation_status": "Success",
+  "exit_code": 0,
+  "results": {
+    "outbound": {
+      "id": "6c64a884cb4c33ac85df76fa",
+      "delivery_status": "sent",
+      "delivery_attempts": 2,
+      "delivery_error": "",
+      "vendor_id_present": 1
+    },
+    "receiver_A_count": 1
+  }
+}

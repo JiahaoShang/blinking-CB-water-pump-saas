@@ -1,0 +1,70 @@
+{
+  "invocation_status": "Success",
+  "exit_code": 0,
+  "results": {
+    "reconnected_ui_reply_routes": [
+      {
+        "id": "32782639ca6bbc9a9bc981a5",
+        "role": "staff",
+        "source": "staff-reply",
+        "delivery_status": "sent",
+        "channel_account_id": "a03f8c1a059c5e1a924b83ea",
+        "vendor_id_present": 1
+      },
+      {
+        "id": "bd38d61ab1df040f10f81e0a",
+        "role": "buyer",
+        "source": "whatsapp_personal",
+        "delivery_status": "",
+        "channel_account_id": "0aeb613589f381d2ccabea7f",
+        "vendor_id_present": 1
+      }
+    ],
+    "temporary_users": [
+      {
+        "id": "2dc1f8ce8ba310b2571431a1",
+        "active": 0
+      },
+      {
+        "id": "6266e1319579757a9e26bf9a",
+        "active": 0
+      }
+    ],
+    "temporary_sessions_remaining": 0,
+    "temporary_connection_grants_remaining": 0,
+    "synthetic_knowledge_status": "disabled",
+    "test_rfq_links_active": 0,
+    "cloud_temporary_credential_deleted": true,
+    "account_states": [
+      {
+        "id": "0aeb613589f381d2ccabea7f",
+        "status": "enabled",
+        "ai_enabled": 0
+      },
+      {
+        "id": "a03f8c1a059c5e1a924b83ea",
+        "status": "enabled",
+        "ai_enabled": 0
+      }
+    ],
+    "conversation_states": [
+      {
+        "id": "69ff63e7d8bfc1c9718e61a4",
+        "ai_paused": 0
+      },
+      {
+        "id": "b51c88792fa1859ee2f90c15",
+        "ai_paused": 0
+      }
+    ],
+    "rfqs": [
+      {
+        "id": "b50f1b627e96bb448b6239fe",
+        "conversation_id": "b51c88792fa1859ee2f90c15",
+        "quantity": "3",
+        "current_revision": 2
+      }
+    ],
+    "https_login": 200
+  }
+}

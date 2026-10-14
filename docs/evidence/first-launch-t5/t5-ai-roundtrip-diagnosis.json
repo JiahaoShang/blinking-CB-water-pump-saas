@@ -1,0 +1,39 @@
+{
+  "invocation_status": "Success",
+  "exit_code": 0,
+  "results": {
+    "marker": "T4/T5测试-1791957603",
+    "question": "T4/T5测试-1791957603 What are the T4/T5 test service hours?",
+    "sent_from": "0aeb613589f381d2ccabea7f",
+    "target_account": "a03f8c1a059c5e1a924b83ea",
+    "transport": "real WAHA/WhatsApp/HTTPS callbacks",
+    "provider_accepted": true,
+    "result": "awaiting_answer_or_receiver_ingress",
+    "inbound_present": true,
+    "question_message_id": "6cf18a6a94e563f0695e4576",
+    "conversation_id": "b51c88792fa1859ee2f90c15",
+    "answer": [
+      {
+        "answer_status": "needs_human",
+        "answer_text": "目前没有可引用的已发布产品资料，我还不能确认这个问题。",
+        "citations_json": "[]"
+      }
+    ],
+    "subsequent_test_messages": [
+      {
+        "role": "assistant",
+        "content": "目前没有可引用的已发布产品资料，我还不能确认这个问题。\n\n如需工程师人工核实，请回复「人工」。",
+        "source": "unresolved-question",
+        "delivery_status": "sent",
+        "delivery_error": ""
+      },
+      {
+        "role": "buyer",
+        "content": "目前没有可引用的已发布产品资料，我还不能确认这个问题。\n\n如需工程师人工核实，请回复「人工」。",
+        "source": "whatsapp_personal",
+        "delivery_status": "",
+        "delivery_error": ""
+      }
+    ]
+  }
+}

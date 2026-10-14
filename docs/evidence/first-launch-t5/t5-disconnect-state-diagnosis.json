@@ -1,0 +1,28 @@
+{
+  "invocation_status": "Success",
+  "exit_code": 0,
+  "results": {
+    "sessions": [
+      {
+        "name": "business-0aeb613589f381d2ccabea7f",
+        "status": "WORKING"
+      },
+      {
+        "name": "business-a03f8c1a059c5e1a924b83ea",
+        "status": "SCAN_QR_CODE"
+      }
+    ],
+    "accounts": [
+      {
+        "id": "0aeb613589f381d2ccabea7f",
+        "status": "enabled",
+        "ai_enabled": 0
+      },
+      {
+        "id": "a03f8c1a059c5e1a924b83ea",
+        "status": "disabled",
+        "ai_enabled": 0
+      }
+    ]
+  }
+}

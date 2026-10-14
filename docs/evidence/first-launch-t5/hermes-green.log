@@ -1,0 +1,169 @@
+# hermes-green.log — T5 最小回归 GREEN（修复后，隔离副本）
+# 命令 1：python3 test_first_launch_t5.py -v
+# 命令 2：python3 test_v1_channels.py -v / test_business_channels.py -v / test_whatsapp_personal.py -v / test_langbot_bridge.py -v（依次执行）
+# 隔离副本：$TMPDIR/b2b-t5-green（由修复后的源工作树复制；未含 .git/data/dist；不触碰原树）
+# 源 HEAD：4c78ae4e8f3aeacc81129e400f851177058ae646（工作树含本次最小修复与新增测试，均未提交）
+# 判定：新增 4 项全过；相关回归 100 项全过（29+40+20+11）。
+
+===== 命令 1：test_first_launch_t5.py -v =====
+test_nonweb_sent_notice_objective_and_delivered_only_after_receipt (__main__.T5DeliveryNoticeTests) ... ok
+test_platform_reply_area_hint_objective (__main__.T5DeliveryNoticeTests) ... ok
+test_native_rfq_link_entry_sends_via_existing_bus (__main__.T5NativeRfqEntryTests) ... ok
+test_native_rfq_link_gates_unchanged (__main__.T5NativeRfqEntryTests) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 2.889s
+
+OK
+
+===== 命令 2：相关回归（四个既有测试文件）=====
+===== test_v1_channels =====
+test_channels_page_admin_only_render_and_actions (__main__.ChannelConsoleTests) ... ok
+test_inbox_pages_and_permission (__main__.ChannelConsoleTests) ... ok
+test_member_management_module_checkbox (__main__.ChannelConsoleTests) ... ok
+test_nav_modules_and_channels_entry (__main__.ChannelConsoleTests) ... ok
+test_secrets_status_without_leaking_values (__main__.ChannelConsoleTests) ... ok
+test_audit_labels_cover_channel_actions (__main__.ChannelDataTests) ... ok
+test_channel_account_upsert_unique_isolation_and_audit (__main__.ChannelDataTests) ... ok
+test_channel_identity_binding_and_message_dedupe (__main__.ChannelDataTests) ... ok
+test_rfq_form_token_and_ai_pause_switch (__main__.ChannelDataTests) ... ok
+test_schema_fresh_and_legacy_migration (__main__.ChannelDataTests) ... ok
+test_mock_twilio_send_inbound_signature_and_status (__main__.ChannelMockTests) ... ok
+test_requirement_confirm_and_match (__main__.ChannelPipelineTests) ... ok
+test_rfq_form_field_states_follow_settings (__main__.ChannelPipelineTests) ... ok
+test_rfq_link_and_form_roundtrip (__main__.ChannelPipelineTests) ... ok
+test_staff_reply_from_inbox_reaches_channel (__main__.ChannelPipelineTests) ... ok
+test_inbox_ai_toggle_and_question_suppression (__main__.ConversationInboxTests) ... ok
+test_inbox_detail_labels_and_responders (__main__.ConversationInboxTests) ... ok
+test_inbox_lists_filter_and_preview (__main__.ConversationInboxTests) ... ok
+test_inbox_nav_platform_modules (__main__.ConversationInboxTests)
+侧栏收件箱子模块=来源平台：网站聊天 + Telegram（有数据）+ 其他来源 + WhatsApp（原生常显）。 ... ok
+test_inbox_permissions_isolation (__main__.ConversationInboxTests) ... ok
+test_inbox_reply_channel_delivery_gated (__main__.ConversationInboxTests) ... ok
+test_inbox_reply_web_and_buyer_visibility (__main__.ConversationInboxTests) ... ok
+test_inbox_rfq_pill_in_composer_foot (__main__.ConversationInboxTests)
+用户反馈修订：发送询价单=输入区底部小气泡（不越出对话框边线），顶部工具条不再重复；网站聊天无此气泡。 ... ok
+test_dispatch_idempotent_for_sent_messages (__main__.OutboundBusTests) ... ok
+test_dispatch_retry_idempotent_and_delivered_receipt (__main__.OutboundBusTests) ... ok
+test_inbox_retry_button_flow_and_list_badge (__main__.OutboundBusTests) ... ok
+test_outbound_worker_flush_stuck_queue (__main__.OutboundBusTests) ... ok
+test_proactive_gate_in_bus_entry (__main__.OutboundBusTests) ... ok
+test_sales_reply_via_channel_success_failure_retry_and_gates (__main__.OutboundBusTests) ... ok
+
+----------------------------------------------------------------------
+Ran 29 tests in 5.683s
+
+OK
+EXIT_CODE=0
+===== test_business_channels =====
+test_ai_requires_explicit_knowledge_confirmation (__main__.BusinessChannelHTTPTests) ... ok
+test_cross_tenant_owner_rejected (__main__.BusinessChannelHTTPTests) ... ok
+test_identity_and_conversation_scoped_by_account (__main__.BusinessChannelHTTPTests) ... ok
+test_inbound_off_still_saved_and_dedup_scoped (__main__.BusinessChannelHTTPTests) ... ok
+test_independent_customer_transfer_keeps_followup_and_history (__main__.BusinessChannelHTTPTests) ... ok
+test_internal_knowledge_revokes_answer_and_remote_document_immediately (__main__.BusinessChannelHTTPTests) ... ok
+test_invalid_connection_leaves_no_orphan_conversation (__main__.BusinessChannelHTTPTests) ... ok
+test_knowledge_readable_without_module_and_write_still_blocked (__main__.BusinessChannelHTTPTests) ... ok
+test_legacy_reopen_preserves_connection_and_messages (__main__.BusinessChannelHTTPTests) ... ok
+test_member_cannot_read_or_post_to_other_account_history (__main__.BusinessChannelHTTPTests) ... ok
+test_member_only_own_connection_and_revocation (__main__.BusinessChannelHTTPTests) ... ok
+test_nested_reply_cannot_mutate_other_customers_draft (__main__.BusinessChannelHTTPTests) ... ok
+test_non_admin_transfer_rejected (__main__.BusinessChannelHTTPTests) ... ok
+test_reply_uses_original_account_configuration (__main__.BusinessChannelHTTPTests) ... ok
+test_transfer_atomic_and_preserves_history (__main__.BusinessChannelHTTPTests) ... ok
+test_transfer_moves_associated_rfq_and_followup (__main__.BusinessChannelHTTPTests) ... ok
+test_transferred_history_cannot_resume_original_account_ai (__main__.BusinessChannelHTTPTests) ... ok
+test_two_connections_do_not_replace_and_default_ai_off (__main__.BusinessChannelHTTPTests) ... ok
+test_ui_hides_components_and_requires_ai_confirmation (__main__.BusinessChannelHTTPTests) ... ok
+test_ai_requires_explicit_knowledge_confirmation (__main__.BusinessChannelTests) ... ok
+test_cross_tenant_owner_rejected (__main__.BusinessChannelTests) ... ok
+test_identity_and_conversation_scoped_by_account (__main__.BusinessChannelTests) ... ok
+test_inbound_off_still_saved_and_dedup_scoped (__main__.BusinessChannelTests) ... ok
+test_independent_customer_transfer_keeps_followup_and_history (__main__.BusinessChannelTests) ... ok
+test_internal_knowledge_revokes_answer_and_remote_document_immediately (__main__.BusinessChannelTests) ... ok
+test_invalid_connection_leaves_no_orphan_conversation (__main__.BusinessChannelTests) ... ok
+test_legacy_reopen_preserves_connection_and_messages (__main__.BusinessChannelTests) ... ok
+test_member_only_own_connection_and_revocation (__main__.BusinessChannelTests) ... ok
+test_non_admin_transfer_rejected (__main__.BusinessChannelTests) ... ok
+test_reply_uses_original_account_configuration (__main__.BusinessChannelTests) ... ok
+test_transfer_atomic_and_preserves_history (__main__.BusinessChannelTests) ... ok
+test_transfer_moves_associated_rfq_and_followup (__main__.BusinessChannelTests) ... ok
+test_two_connections_do_not_replace_and_default_ai_off (__main__.BusinessChannelTests) ... ok
+test_bridge_keys_never_persisted_or_rendered (__main__.EnterpriseBridgeRoutingTests) ... ok
+test_callback_token_and_session_routing_per_tenant (__main__.EnterpriseBridgeRoutingTests) ... ok
+test_channel_page_start_uses_own_tenant_bridge_only (__main__.EnterpriseBridgeRoutingTests) ... ok
+test_missing_mapping_fails_closed_without_global_fallback (__main__.EnterpriseBridgeRoutingTests) ... ok
+test_outbound_routes_to_own_tenant_bridge_with_own_key_and_session (__main__.EnterpriseBridgeRoutingTests) ... ok
+test_provision_rejects_account_tenant_mismatch (__main__.EnterpriseBridgeRoutingTests) ... ok
+test_same_tenant_two_accounts_use_distinct_sessions (__main__.EnterpriseBridgeRoutingTests) ... ok
+
+----------------------------------------------------------------------
+Ran 40 tests in 23.506s
+
+OK
+EXIT_CODE=0
+===== test_whatsapp_personal =====
+test_bind_area_rendered_on_channels_page (__main__.WhatsAppPersonalTests)
+渠道页「WhatsApp（个人版）」卡片渲染扫码绑定区（容器 + 脚本接线）。 ... ok
+test_bind_bridge_down_is_reported_not_crashed (__main__.WhatsAppPersonalTests)
+桥不可达：状态 JSON → ok=false（HTTP 200）；二维码 → 502；均不抛栈。 ... ok
+test_bind_logout_button_flow (__main__.WhatsAppPersonalTests)
+「退出登录」：解绑手机（WAHA logout）→ 自动进入扫码态；审计留痕；历史按规则隐藏。 ... ok
+test_bind_session_state_and_qr_endpoints (__main__.WhatsAppPersonalTests)
+扫码绑定区：状态 JSON（含登录名）/二维码图片；非扫码态 409；未登录重定向。 ... ok
+test_bind_start_dedup_rapid_clicks (__main__.WhatsAppPersonalTests)
+连点防抖：2.5 秒内第二次启动请求直接返回 busy（不再打桥、不再刷爆）。 ... ok
+test_bind_start_recovers_failed_session (__main__.WhatsAppPersonalTests)
+FAILED 会话点「重置会话并取码」→ 平台自动重启（不再对 FAILED 干刷 start）。 ... ok
+test_bind_start_session_button (__main__.WhatsAppPersonalTests)
+「启动会话并取码」：POST 启动 → mock 收到 start → 状态回到扫码态。 ... ok
+test_duplicate_dedup (__main__.WhatsAppPersonalTests) ... ok
+test_group_broadcast_media_and_outgoing_ignored (__main__.WhatsAppPersonalTests) ... ok
+test_hmac_strict_when_header_present (__main__.WhatsAppPersonalTests) ... ok
+test_inbound_text_flow_reply_via_bridge (__main__.WhatsAppPersonalTests) ... ok
+test_inbox_hides_history_when_disconnected (__main__.WhatsAppPersonalTests)
+用户要求：未连接（未登录）时不显示历史聊天记录；连接后恢复显示。 ... ok
+test_pacing_notifications_and_caps (__main__.WhatsAppPersonalTests) ... ok
+test_question_blocks_unrestricted_dify_on_personal_channel (__main__.WhatsAppPersonalTests)
+没有检索前授权的共享应用不可用于扫码渠道回答。 ... ok
+test_registry_labels_and_secret_status (__main__.WhatsAppPersonalTests) ... ok
+test_scan_success_auto_enables_channel (__main__.WhatsAppPersonalTests)
+扫码成功（SCAN_QR_CODE → WORKING）→ 渠道自动启用；单独 WORKING 不打扰手动停用。 ... ok
+test_self_chat_allowed_and_echo_guard (__main__.WhatsAppPersonalTests) ... ok
+test_self_chat_empty_to_parsed_from_serialized (__main__.WhatsAppPersonalTests)
+真机回归：app 发出的自聊消息 to 为空 → 用 _serialized 的 chatJid 判定自聊并放行。 ... ok
+test_self_chat_lid_mismatch_detected (__main__.WhatsAppPersonalTests)
+自聊但 from/to 为不同格式（PN vs LID）→ 依据 SELF_IDS 集合判定为自聊并放行。 ... ok
+test_token_fail_closed (__main__.WhatsAppPersonalTests) ... ok
+
+----------------------------------------------------------------------
+Ran 20 tests in 1.965s
+
+OK
+EXIT_CODE=0
+===== test_langbot_bridge =====
+test_channel_save_generates_stable_token (__main__.LangBotBridgeTests)
+保存配置：首次生成 webhook_token，再次保存保持稳定。 ... ok
+test_duplicate_event_processed_once (__main__.LangBotBridgeTests) ... ok
+test_inbox_and_channel_page_show_platform_fields (__main__.LangBotBridgeTests)
+收件箱展示（含平台/用户ID）；渠道接入页展示 LangBot 卡片与收信地址。 ... ok
+test_inbox_platform_modules_connected_and_empty_state (__main__.LangBotBridgeTests)
+来源平台重构：LangBot 已接入（启用）的平台即使无消息也显示模块（空态指引）；未启用的不显示。 ... ok
+test_missing_api_key_fails_closed (__main__.LangBotBridgeTests) ... ok
+test_platform_label_normalization_and_name_fallback (__main__.LangBotBridgeTests)
+适配器名归一化（TelegramAdapter/telegram→Telegram）与无姓名回退（「Telegram 用户 <ID>」）。 ... ok
+test_platform_label_normalization_weixin (__main__.LangBotBridgeTests)
+微信系适配器名归一：openclaw-weixin / WeChatPad / 类名风格 → 「微信」。 ... ok
+test_question_asks_human_via_channel (__main__.LangBotBridgeTests)
+提问样文本（资料外）→ 转人工提示直达渠道。 ... ok
+test_staff_reply_failure_visible_and_retry (__main__.LangBotBridgeTests)
+卖家回复直达；发送失败可见（含原因）+ 一键重试成功。 ... ok
+test_webhook_receives_stores_and_skips_pipeline (__main__.LangBotBridgeTests)
+收信：落库 + 平台字段落档 + 自动分流回复经 LangBot 发送 + skip_pipeline=true。 ... ok
+test_wrong_token_and_disabled_channel_fail_closed (__main__.LangBotBridgeTests) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 1.311s
+
+OK
+EXIT_CODE=0

@@ -1,0 +1,10 @@
+{
+  "tested_snapshot_matches_delivery": {
+    "app.py": "765e2a04002e781b66f321ff5a728a79ddf25e0d730535b1ab265c42b2069132",
+    "test_first_launch_t5.py": "4559c5160e730c04aacc94cb8fcba923d22fdf05e43a06ec2c8267be39b1adde"
+  },
+  "independent_tests": 17,
+  "independent_exit_code": 0,
+  "cleanup_exit_code": 0,
+  "unrelated_regression_not_repeated": true
+}
