@@ -1,0 +1,48 @@
+# hermes-green.log — F-6/T5-N02 公开 RFQ 头部身份最小回归 GREEN（修复后，隔离副本）
+# 命令（均在副本目录内执行；解释器=原工作树 .venv-knowledge/bin/python，Python 3.9.6）：
+#   1) "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/.venv-knowledge/bin/python" -m unittest test_public_rfq_header -v
+#   2) 同上，-m unittest test_first_launch_t5 -v
+#   3) 同上，-m unittest test_v1_channels.ChannelPipelineTests -v
+# 隔离副本：$TMPDIR/b2b-t5-rfqheader-green（由修复后的源工作树复制；排除 .git/data/.venv*/dist/__pycache__；不触碰原树）
+# 源 HEAD：1d08b76af0f1e132a044716a6a67af275a6ccbdb（含本次未提交最小修复与新增测试）
+# 判定：12 项全部通过、0 跳过，三个命令退出码均为 0；无外部调用（rules 模式/本机 mock，不触网）。
+
+===== 命令 1：test_public_rfq_header -v =====
+test_form_validation_failure_keeps_tenant_header (test_public_rfq_header.PublicRfqHeaderTests)
+填写页：未勾选联系确认 / 缺必填字段的 400 页仍显示所属企业。 ... ok
+test_invalid_revoked_and_nonchannel_links_are_neutral (test_public_rfq_header.PublicRfqHeaderTests)
+无效/已撤销/非渠道令牌：GET 与 POST 均 404 + 中性品牌，不泄露企业名。 ... ok
+test_submit_and_revision_pages_show_tenant_header (test_public_rfq_header.PublicRfqHeaderTests)
+提交成功页、再次打开（修订入口）与修订成功页均显示所属企业。 ... ok
+test_valid_links_show_own_tenant_current_name (test_public_rfq_header.PublicRfqHeaderTests)
+A/B 两条有效链接各自显示所属企业名称；改名后显示现名；请求参数不参与身份。 ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.609s
+
+OK
+EXIT1=0
+
+===== 命令 2：test_first_launch_t5 -v =====
+test_nonweb_sent_notice_objective_and_delivered_only_after_receipt (test_first_launch_t5.T5DeliveryNoticeTests) ... ok
+test_platform_reply_area_hint_objective (test_first_launch_t5.T5DeliveryNoticeTests) ... ok
+test_native_rfq_link_entry_sends_via_existing_bus (test_first_launch_t5.T5NativeRfqEntryTests) ... ok
+test_native_rfq_link_gates_unchanged (test_first_launch_t5.T5NativeRfqEntryTests) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 2.858s
+
+OK
+EXIT2=0
+
+===== 命令 3：test_v1_channels.ChannelPipelineTests -v =====
+test_requirement_confirm_and_match (test_v1_channels.ChannelPipelineTests) ... ok
+test_rfq_form_field_states_follow_settings (test_v1_channels.ChannelPipelineTests) ... ok
+test_rfq_link_and_form_roundtrip (test_v1_channels.ChannelPipelineTests) ... ok
+test_staff_reply_from_inbox_reaches_channel (test_v1_channels.ChannelPipelineTests) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 1.288s
+
+OK
+EXIT3=0

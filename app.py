@@ -4783,8 +4783,16 @@ BASE_CSS = """:root{--ink:#f7f4ff;--muted:#a8a2b8;--line:#29223c;--accent:#8b5cf
 a{color:#c4b5fd;text-decoration:none}a:hover{color:#ede9fe;text-decoration:none}header{position:sticky;top:0;z-index:10;background:rgba(8,7,15,.88);backdrop-filter:blur(18px);border-bottom:1px solid rgba(139,92,246,.18);color:var(--ink);padding:17px 32px;display:flex;justify-content:space-between;align-items:center;gap:22px}header strong{font-size:18px;letter-spacing:.08em}header nav{display:flex;gap:4px;align-items:center;justify-content:flex-end;flex-wrap:wrap}header nav a{color:var(--muted);padding:7px 10px;border-radius:9px;white-space:nowrap;flex-shrink:0}header nav a:hover{background:rgba(139,92,246,.12);color:var(--ink)}main{max-width:1240px;margin:0 auto;padding:54px 28px 80px}h1{font-size:38px;line-height:1.15;letter-spacing:-.035em;margin:0 0 8px}h2{font-size:21px;letter-spacing:-.02em;margin:0 0 14px}h3{font-size:16px;margin:20px 0 8px}.muted{color:var(--muted)}.notice{padding:13px 15px;border-radius:12px;background:rgba(103,232,197,.1);border:1px solid rgba(103,232,197,.22);color:#9af2da;margin:0 0 20px}.error{padding:13px 15px;border-radius:12px;background:rgba(255,143,163,.1);border:1px solid rgba(255,143,163,.23);color:#ffb1c0;margin:0 0 20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}.metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:18px}.metric{font-size:38px;font-weight:750;line-height:1.1;margin:8px 0;color:#fff}.action-card{display:block;color:var(--ink);transition:transform .2s ease,border-color .2s ease,background .2s ease}.action-card:hover{text-decoration:none;border-color:rgba(168,85,247,.75);background:rgba(32,24,52,.95);transform:translateY(-2px)}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 18px 45px rgba(0,0,0,.2);backdrop-filter:blur(12px)}.toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:26px}button,.button{border:0;border-radius:10px;padding:10px 15px;background:linear-gradient(135deg,var(--accent),var(--accent-strong));color:#fff;font-weight:700;cursor:pointer;display:inline-block;box-shadow:0 8px 24px rgba(139,92,246,.24)}button:hover,.button:hover{filter:brightness(1.08);transform:translateY(-1px)}button.secondary,.button.secondary{background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.35);color:#ddd6fe;box-shadow:none}button.warn,.button.warn{background:rgba(246,197,106,.12);border:1px solid rgba(246,197,106,.35);color:var(--warn);box-shadow:none}button.danger,.button.danger{background:rgba(255,143,163,.1);border:1px solid rgba(255,143,163,.35);color:var(--danger);box-shadow:none}form.inline{display:inline}label{display:block;font-weight:700;margin:10px 0 5px;color:#ded8ed}input,select,textarea{width:100%;padding:10px 11px;border:1px solid #3a3152;border-radius:10px;font:inherit;color:var(--ink);background:#0f0d19}input::placeholder,textarea::placeholder{color:#716a85}input:focus,select:focus,textarea:focus{outline:2px solid rgba(168,85,247,.35);border-color:var(--accent)}textarea{min-height:76px;resize:vertical}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px}.full{grid-column:1/-1}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}.badge{display:inline-flex;align-items:center;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:700;background:rgba(139,92,246,.13);border:1px solid rgba(139,92,246,.24);color:#d8ccff}.badge.published,.badge.approved{background:rgba(103,232,197,.1);border-color:rgba(103,232,197,.25);color:#9af2da}.badge.pending_review{background:rgba(246,197,106,.1);border-color:rgba(246,197,106,.25);color:#f7d991}.badge.withdrawn{background:rgba(255,143,163,.1);border-color:rgba(255,143,163,.25);color:#ffb1c0}.field-state{font-size:12px;color:var(--muted)}.source{display:flex;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)}.product-hero{background:linear-gradient(135deg,#17112d 0%,#31206a 52%,#5627a4 100%);color:white;border:1px solid rgba(196,181,253,.22);border-radius:22px;padding:36px;margin-bottom:20px;box-shadow:0 22px 60px rgba(69,35,132,.25)}.product-hero .eyebrow{text-transform:uppercase;letter-spacing:.14em;font-size:12px;opacity:.8}.product-hero h1{font-size:42px;margin:4px 0 8px}.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:24px}.kv div{background:rgba(8,7,15,.24);border:1px solid rgba(255,255,255,.14);padding:13px;border-radius:12px}.kv b{display:block;font-size:12px;opacity:.75}.kv span{font-size:19px;font-weight:700}.footer-note{margin-top:28px;padding:14px 16px;border-left:3px solid #a78bfa;background:rgba(167,139,250,.08);color:#c4b5fd;border-radius:0 10px 10px 0}.brand-mark{display:inline-block;width:10px;height:10px;margin-right:10px;border-radius:3px 8px 3px 8px;background:linear-gradient(135deg,#c4b5fd,#7c3aed);box-shadow:0 0 18px rgba(168,85,247,.75);transform:rotate(45deg)}.brand-logo{display:inline-block;width:22px;height:22px;padding:2px;margin-right:9px;background:#fff;border-radius:7px;object-fit:contain;vertical-align:-5px}@media(max-width:700px){header{padding:15px 18px;align-items:flex-start;flex-direction:column}header nav{justify-content:flex-start;overflow:auto;flex-wrap:nowrap;width:100%;padding-bottom:2px}main{padding:34px 14px 60px}.form-grid{grid-template-columns:1fr}.full{grid-column:auto}h1{font-size:30px}.product-hero h1{font-size:34px}table{font-size:13px}main table{display:block;overflow-x:auto;max-width:100%}}"""
 
 
-def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh", public: bool = False) -> str:
-    header_html = "<header><strong>Industrial Pump Supplier <small>· DEMO</small></strong><nav><a href='#specifications'>Specifications / 参数</a><a href='#downloads'>Documents / 资料</a><a href='#product-rfq'>RFQ / 询价</a></nav></header>" if public else f"<header><strong><img class='brand-logo' src='/assets/brand.png' alt=''>Growave</strong><nav><a href='/admin'>{'管理概览' if lang == 'zh' else 'Overview'}</a><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/admin/sales'>{'销售工作台' if lang == 'zh' else 'Sales desk'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>"
+def layout(title: str, body: str, active: str = "产品管理", lang: str = "zh", public: bool = False, public_brand: str | None = None) -> str:
+    # 公开 RFQ 头部身份（正式化清单 F-6）：调用方传入企业名（有效链接=该询价所属企业当前名称）
+    # 或中性品牌（无效/撤销链接）时，头部只显示该名称：不带任何产品区块锚点导航，也不出现固定演示身份。
+    # 未传 public_brand 的其余公开页（公开产品页/错误页）保持原头部，本轮不改。
+    if public and public_brand is not None:
+        header_html = f"<header><strong>{esc(public_brand)}</strong></header>"
+    elif public:
+        header_html = "<header><strong>Industrial Pump Supplier <small>· DEMO</small></strong><nav><a href='#specifications'>Specifications / 参数</a><a href='#downloads'>Documents / 资料</a><a href='#product-rfq'>RFQ / 询价</a></nav></header>"
+    else:
+        header_html = f"<header><strong><img class='brand-logo' src='/assets/brand.png' alt=''>Growave</strong><nav><a href='/admin'>{'管理概览' if lang == 'zh' else 'Overview'}</a><a href='/admin/products'>{'产品管理' if lang == 'zh' else 'Products'}</a><a href='/admin/tasks'>{'人工任务' if lang == 'zh' else 'Tasks'}</a><a href='/admin/rfqs'>{'RFQ询价' if lang == 'zh' else 'RFQs'}</a><a href='/admin/sales'>{'销售工作台' if lang == 'zh' else 'Sales desk'}</a><a href='/inquiry'>{'买方询盘' if lang == 'zh' else 'Buyer inquiry'}</a><a href='/admin/products?lang={'en' if lang == 'zh' else 'zh'}'>{'English' if lang == 'zh' else '中文'}</a></nav></header>"
     # 公开页禁止把完整 URL（含可能的查询参数）经 Referer 传给外部资源；交接码只走 fragment，
     # 本就不发送给服务器也不进 Referer，这里的策略是对公开页的额外防护。
     referrer_meta = "<meta name='referrer' content='no-referrer'>" if public else ""
@@ -8089,6 +8097,8 @@ RFQ_FIELD_STATES = ("required", "optional", "hidden")
 # 字段 → 建询价入参键（create 用 region；text 来自表单/接口）与内容键（revise/落库 destination）。
 RFQ_FIELD_INPUT_KEYS = {"email": "contact_email", "phone": "contact_phone", "quantity": "quantity", "destination": "region", "notes": "notes"}
 RFQ_FIELD_CONTENT_KEYS = {"email": "contact_email", "phone": "contact_phone", "quantity": "quantity", "destination": "destination", "notes": "notes"}
+# 公开 RFQ 头部的对外身份（正式化清单 F-6）：有效链接显示所属企业当前名称；无效/撤销链接一律中性品牌，不泄露企业名。
+PUBLIC_RFQ_NEUTRAL_BRAND = "Growave"
 
 # ── V1-09 销售工作台增量：跟进节点（首版固定三项；企业自定义暂缓）与回复渠道 ──
 LEAD_MILESTONE_DEFS = (("tech_confirmed", "技术确认"), ("sample", "样品准备"), ("quote", "报价准备"))
@@ -8437,6 +8447,12 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
         row = self.db.conn.execute("SELECT name FROM tenants WHERE id=?", (self.tenant_id,)).fetchone()
         return row["name"] if row and row["name"] else self.tenant_id
 
+    def public_rfq_brand(self, tenant_id: str) -> str:
+        """公开 RFQ 头部的显示名（F-6）：读该询价记录所属企业的当前名称；查无名称时用中性品牌。"""
+        row = self.db.conn.execute("SELECT name FROM tenants WHERE id=?", (tenant_id,)).fetchone()
+        name = ((row["name"] if row else "") or "").strip()
+        return name or PUBLIC_RFQ_NEUTRAL_BRAND
+
     def has_module(self, module: str) -> bool:
         """当前请求上下文的模块权限：管理员=全模块；员工=已授权模块集合（V1-01）。"""
         if self.user_role == "admin":
@@ -8553,6 +8569,12 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
         rfq_link_match = re.fullmatch(r"/rfq/([A-Za-z0-9_-]{16,96})", path)
         if rfq_link_match:
             self.public_rfq_form(rfq_link_match.group(1))
+            return
+        if path == "/rfq" or path.startswith("/rfq/"):
+            # 令牌形态不合法（空/过短/超长/含正则外字符）的 /rfq/ 路径也不是有效公开链接：
+            # 交给既有「链接无效」路径返回同一中性 404，不落入本函数末尾的通用 404
+            # （那会渲染带后台导航的页头）；有效令牌已由上面的正则先行分流。
+            self.public_rfq_form(path[len("/rfq"):].lstrip("/"))
             return
         public_product_match = re.fullmatch(r"/api/v1/public/products/([a-zA-Z0-9-]+)", path)
         if public_product_match:
@@ -9436,6 +9458,11 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
         rfq_submit_match = re.fullmatch(r"/rfq/([A-Za-z0-9_-]{16,96})", path)
         if rfq_submit_match:
             self.public_rfq_submit(rfq_submit_match.group(1), parse_multipart(self))
+            return
+        if path == "/rfq" or path.startswith("/rfq/"):
+            # 同 GET：形态不合法的令牌路径返回与未签发令牌一致的「链接无效」中性 404；
+            # 先读请求体，保持与有效令牌提交相同的连接与表单处理次序。
+            self.public_rfq_submit(path[len("/rfq"):].lstrip("/"), parse_multipart(self))
             return
         if path.startswith("/admin/") and not self.authorize_admin(path, "POST"):
             return
@@ -11337,7 +11364,7 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
         """公开 RFQ 填写页（令牌即凭据；可重复打开，再次提交更新同一张询价单）。"""
         record, conversation, channel = self._rfq_link_context(token)
         if not record or not conversation:
-            self.send_html(layout("链接不可用", "<div class='error'>链接无效或已撤销；请联系与您沟通的卖家重新获取。</div>", public=True), 404)
+            self.send_html(layout("链接不可用", "<div class='error'>链接无效或已撤销；请联系与您沟通的卖家重新获取。</div>", public=True, public_brand=PUBLIC_RFQ_NEUTRAL_BRAND), 404)
             return
         tenant_id = record["tenant_id"]
         conversation_id = conversation["id"]
@@ -11360,13 +11387,13 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
 <div class='toolbar'><div><h1>填写询价信息</h1><div class='muted'>提交后进入卖家的销售工作台；本链接可重复打开、随时修改。</div></div></div>
 <section class='card'>{render_rfq_link_form(field_config, values, error, existing_short)}</section>
 """
-        self.send_html(layout("填写询价信息", body, public=True), status)
+        self.send_html(layout("填写询价信息", body, public=True, public_brand=self.public_rfq_brand(record["tenant_id"])), status)
 
     def public_rfq_submit(self, token: str, form: dict) -> None:
         """公开 RFQ 填写页提交：首次提交建单；再次提交更新同一张单（版本 +1）。"""
         record, conversation, channel = self._rfq_link_context(token)
         if not record or not conversation:
-            self.send_html(layout("链接不可用", "<div class='error'>链接无效或已撤销；请联系与您沟通的卖家重新获取。</div>", public=True), 404)
+            self.send_html(layout("链接不可用", "<div class='error'>链接无效或已撤销；请联系与您沟通的卖家重新获取。</div>", public=True, public_brand=PUBLIC_RFQ_NEUTRAL_BRAND), 404)
             return
         tenant_id = record["tenant_id"]
         conversation_id = conversation["id"]
@@ -11413,7 +11440,7 @@ class Handler(BusinessChannelUI, KnowledgeUI, BaseHTTPRequestHandler):
 <section class='card'><p>您的询价信息已提交（编号 {esc(rfq_id[:8])}）。</p>
 <p class='muted'>您可以随时重新打开本链接更新内容；更新会保存到同一张询价单。</p></section>
 """
-        self.send_html(layout("已提交", body, public=True), 200)
+        self.send_html(layout("已提交", body, public=True, public_brand=self.public_rfq_brand(record["tenant_id"])), 200)
 
     def deliver_latest_task_message(self, task_id: str, source: str) -> None:
         """任务操作后把最新一条消息投递到渠道（网站聊天会话无外发通道，直接忽略）。"""

@@ -1,0 +1,37 @@
+# hermes-malformed-red.log — F-6/T5-N02 追加窄回归 RED（修复前，隔离副本）
+# 生成时间：2026-10-14 15:23 CST；执行者：Hermes（本轮仅改 app.py 与 test_public_rfq_header.py）
+# 现象（独立真实浏览器复核）：/rfq/t5-invalid-link（15 字符）不匹配既有令牌路由正则
+#   /rfq/([A-Za-z0-9_-]{16,96})，落入通用处理，仍渲染旧页头（带后台导航），未走「链接无效」中性 404。
+#   本回归用真实 HTTP 复现 GET/POST 的短/空/畸形令牌路径（窄口径，不涉表单字段语义）。
+# 命令（隔离副本目录内执行）：
+#   "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/.venv-knowledge/bin/python" -m unittest \
+#     test_public_rfq_header.PublicRfqHeaderTests.test_malformed_token_paths_return_same_neutral_404 -v
+# 隔离副本：/Users/jiahaoshang/.hermes/cache/scratch/b2b-t5-rfq-malformed-red
+#   （rsync 自源工作树；排除 .git/data/.venv*/node_modules/dist/__pycache__；不触碰原树 data/）
+# 源 HEAD：1d08b76af0f1e132a044716a6a67af275a6ccbdb（工作树含未提交改动；本轮不提交任何内容）
+# 副本 app.py sha256：136e7b0095c7e7b951407199f87d8d9fceb94e3a407d7fa6ff6d0b098c67c370（未含本修复）
+# 副本 test_public_rfq_header.py sha256：fda7b53188cb8aadc4561add52f75b9a7d79597854484f30d59dc68db057297e
+# 判定：新增窄用例按预期失败（exit=1）——GET /rfq/t5-invalid-link 返回 404，但页头为通用
+#   「Growave + 后台导航」页头，而非中性「<header><strong>Growave</strong></header>」。
+# 注：失败信息中的页面片段已截断（见测试内 clip），不含整页 HTML 与任何真实凭据。
+
+test_malformed_token_paths_return_same_neutral_404 (test_public_rfq_header.PublicRfqHeaderTests)
+令牌形态不合法（空/过短/非法字符/过长）的 /rfq/ 路径：GET 与 POST 均与 ... FAIL
+
+======================================================================
+FAIL: test_malformed_token_paths_return_same_neutral_404 (test_public_rfq_header.PublicRfqHeaderTests)
+令牌形态不合法（空/过短/非法字符/过长）的 /rfq/ 路径：GET 与 POST 均与
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/jiahaoshang/.hermes/cache/scratch/b2b-t5-rfq-malformed-red/test_public_rfq_header.py", line 234, in test_malformed_token_paths_return_same_neutral_404
+    self.assert_neutral_404(status, page, f"形态不合法 GET {path}")
+  File "/Users/jiahaoshang/.hermes/cache/scratch/b2b-t5-rfq-malformed-red/test_public_rfq_header.py", line 104, in assert_neutral_404
+    self.assert_header(page, "Growave", label)
+  File "/Users/jiahaoshang/.hermes/cache/scratch/b2b-t5-rfq-malformed-red/test_public_rfq_header.py", line 89, in assert_header
+    self.fail(f"{label}头部应为 {expected!r}；实际：{clip(header)}")
+AssertionError: 形态不合法 GET /rfq/t5-invalid-link头部应为 '<header><strong>Growave</strong></header>'；实际：<header><strong><img class='brand-logo' src='/assets/brand.png' alt=''>Growave</strong><nav><a href='/admin'>管理概览</a><a href='/admin/products'>产品管理</a><a href='/admin/tasks'>人工任务</a><a href='/admin/rfqs'>RFQ询价</a><a href…[HTML 截断]
+
+----------------------------------------------------------------------
+Ran 1 test in 0.576s
+
+FAILED (failures=1)

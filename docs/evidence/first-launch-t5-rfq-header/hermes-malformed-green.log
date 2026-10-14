@@ -1,0 +1,59 @@
+# hermes-malformed-green.log — F-6/T5-N02 追加窄回归 GREEN（修复后，隔离副本）
+# 生成时间：2026-10-14 15:23 CST；执行者：Hermes（本轮仅改 app.py 与 test_public_rfq_header.py）
+# 修复：do_GET/do_POST 在既有令牌正则 (/rfq/([A-Za-z0-9_-]{16,96})) 之后各加最小前缀守卫——
+#   path == "/rfq" 或 startswith("/rfq/") 的其余路径交给既有 public_rfq_form/public_rfq_submit
+#   的「链接无效」分支（404 + 中性 Growave），不再落入通用 404；有效令牌路由与非 RFQ 页面不受影响。
+# 命令（均在隔离副本目录内执行；解释器=原工作树 .venv-knowledge/bin/python，Python 3.9.6）：
+#   1) "…/.venv-knowledge/bin/python" -m unittest test_public_rfq_header -v
+#   2) "…/.venv-knowledge/bin/python" -m unittest test_first_launch_t5 -v
+#   3) "…/.venv-knowledge/bin/python" -m unittest test_v1_channels.ChannelPipelineTests -v
+# 隔离副本：/Users/jiahaoshang/.hermes/cache/scratch/b2b-t5-rfq-malformed-green
+#   （rsync 自修复后的源工作树；排除 .git/data/.venv*/node_modules/dist/__pycache__；不触碰原树 data/）
+# 源 HEAD：1d08b76af0f1e132a044716a6a67af275a6ccbdb（含本次未提交最小修复与新增测试）
+# 副本 app.py sha256：2b301849ed97569ceb189311ce3af0d79238f0bfda4578d3e6dd44d57144a24a
+# 副本 test_public_rfq_header.py sha256：fda7b53188cb8aadc4561add52f75b9a7d79597854484f30d59dc68db057297e
+# 判定：13 项全部通过、0 跳过，三个命令退出码均为 0（EXIT1=0 / EXIT2=0 / EXIT3=0）；
+#   无外部调用（rules 模式/本机 mock，不触网）；新增用例覆盖短(15)/空(带与不带尾斜杠)/非法字符/超长(97)
+#   形态的 GET 与 POST，并与「形态合法但未签发」响应逐字比对一致；非 /rfq 未知路径保持通用 404。
+
+===== 命令 1：test_public_rfq_header -v =====
+test_form_validation_failure_keeps_tenant_header (test_public_rfq_header.PublicRfqHeaderTests)
+填写页：未勾选联系确认 / 缺必填字段的 400 页仍显示所属企业。 ... ok
+test_invalid_revoked_and_nonchannel_links_are_neutral (test_public_rfq_header.PublicRfqHeaderTests)
+无效/已撤销/非渠道令牌：GET 与 POST 均 404 + 中性品牌，不泄露企业名。 ... ok
+test_malformed_token_paths_return_same_neutral_404 (test_public_rfq_header.PublicRfqHeaderTests)
+令牌形态不合法（空/过短/非法字符/过长）的 /rfq/ 路径：GET 与 POST 均与 ... ok
+test_submit_and_revision_pages_show_tenant_header (test_public_rfq_header.PublicRfqHeaderTests)
+提交成功页、再次打开（修订入口）与修订成功页均显示所属企业。 ... ok
+test_valid_links_show_own_tenant_current_name (test_public_rfq_header.PublicRfqHeaderTests)
+A/B 两条有效链接各自显示所属企业名称；改名后显示现名；请求参数不参与身份。 ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.632s
+
+OK
+EXIT1=0
+
+===== 命令 2：test_first_launch_t5 -v =====
+test_nonweb_sent_notice_objective_and_delivered_only_after_receipt (test_first_launch_t5.T5DeliveryNoticeTests) ... ok
+test_platform_reply_area_hint_objective (test_first_launch_t5.T5DeliveryNoticeTests) ... ok
+test_native_rfq_link_entry_sends_via_existing_bus (test_first_launch_t5.T5NativeRfqEntryTests) ... ok
+test_native_rfq_link_gates_unchanged (test_first_launch_t5.T5NativeRfqEntryTests) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 2.807s
+
+OK
+EXIT2=0
+
+===== 命令 3：test_v1_channels.ChannelPipelineTests -v =====
+test_requirement_confirm_and_match (test_v1_channels.ChannelPipelineTests) ... ok
+test_rfq_form_field_states_follow_settings (test_v1_channels.ChannelPipelineTests) ... ok
+test_rfq_link_and_form_roundtrip (test_v1_channels.ChannelPipelineTests) ... ok
+test_staff_reply_from_inbox_reaches_channel (test_v1_channels.ChannelPipelineTests) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 1.285s
+
+OK
+EXIT3=0
