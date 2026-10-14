@@ -44,4 +44,6 @@
 - [x] Codex independently compares tracked discovery IDs and all protected hashes.
 - [x] Run affected maintained model/knowledge/backup/browser regressions offline in an isolated path without spaces.
 - [x] Save results and append the actual state record; stage only this cleanup.
-- [ ] Commit, push `feat/mvp-foundation`, and verify GitHub/local branch SHA equality.
+- [x] Commit, push `feat/mvp-foundation`, and verify GitHub/local branch SHA equality.
+
+Verified cleanup commit: `05c3a9ff4d95ed2037e31da443414656a326efee`. The bookkeeping commit is pushed and its HEAD rechecked before final delivery.
