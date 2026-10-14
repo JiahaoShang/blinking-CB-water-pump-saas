@@ -1,0 +1,13 @@
+{
+  "date": "2026-10-14",
+  "source": "direct user replies in current chat",
+  "token_rotated": true,
+  "own_test_recipient_authorized": true,
+  "initial_connection_and_message_sent": true,
+  "grounded_answer_received": "T4/T5 synthetic service hours\nT4/T5 test service hours: Tuesday through Thursday, 10:00-16:00. This is synthetic acceptance data only.",
+  "rfq_link_received": true,
+  "pause_test_input_sent": true,
+  "reconnect_and_new_input_sent": true,
+  "manual_and_retry_receipt_reply": "收到了并且只有一条",
+  "post_backup_input_sent": true
+}

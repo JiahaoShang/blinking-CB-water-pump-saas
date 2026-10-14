@@ -1,0 +1,95 @@
+# hermes-start-green.log — T5 Telegram 首发阻断修复 GREEN（实现后，工作树内）
+# 修复：business_channel_ui.py connect 分支——创建（POST）返回有效 uuid 后，必须先 PUT /api/v1/platform/bots/{uuid} {'enable': True} 才落库为已连接；启用失败则 DELETE 清理上游、清空本地外部身份、界面只给统一安全提示。
+# 源 HEAD：1d08b76af0f1e132a044716a6a67af275a6ccbdb（本轮最小改动未提交；无关未提交改动保留）
+# 解释器：/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/.venv-knowledge/bin/python（Python 3.9.6）；不触外网：Telegram getMe 用假件拦截、LangBot 用本机 mock 端点。
+
+===== 命令 1：新增判别性测试（与红轮逐字相同；6 项）=====
+test_activation_failure_not_connected_cleanup_and_safe_error (test_first_launch_t5_telegram_start.TelegramConnectActivationTests)
+启用失败：不算已连接、清理上游残留、清空本地身份，界面只有统一安全提示。 ... ok
+test_cleanup_failure_still_safe_and_not_connected (test_first_launch_t5_telegram_start.TelegramConnectActivationTests)
+上游清理也失败时：界面仍安全、仍不算已连接；残留如实保留（不谎报已清理）。 ... ok
+test_connect_creates_then_activates_before_saving_connected (test_first_launch_t5_telegram_start.TelegramConnectActivationTests)
+成功路径：webhook → 创建 → 启用（PUT {'enable': True}）之后才落库为已连接。 ... ok
+test_disconnect_still_deletes_upstream_bot_and_resets_state (test_first_launch_t5_telegram_start.TelegramConnectActivationTests)
+断开语义不变：连接成功后断开仍 DELETE 上游机器人并复位本地状态。 ... ok
+test_permissions_cross_tenant_and_non_telegram_unchanged (test_first_launch_t5_telegram_start.TelegramConnectActivationTests)
+既有权限语义不变：非负责人 403、跨企业 403、非 Telegram 平台原提示；均不触达连接服务。 ... ok
+test_retry_after_failed_activation_connects_with_new_bot (test_first_launch_t5_telegram_start.TelegramConnectActivationTests)
+失败清理后本连接可重试；第二次创建的新机器人启用成功才算已连接。 ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 8.045s
+
+OK
+EXIT1=0
+
+===== 命令 2：受影响既有回归（企业渠道界面/权限 + LangBot 桥接连接器）=====
+test_ai_requires_explicit_knowledge_confirmation (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_cross_tenant_owner_rejected (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_identity_and_conversation_scoped_by_account (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_inbound_off_still_saved_and_dedup_scoped (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_independent_customer_transfer_keeps_followup_and_history (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_internal_knowledge_revokes_answer_and_remote_document_immediately (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_invalid_connection_leaves_no_orphan_conversation (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_knowledge_readable_without_module_and_write_still_blocked (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_legacy_reopen_preserves_connection_and_messages (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_member_cannot_read_or_post_to_other_account_history (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_member_only_own_connection_and_revocation (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_nested_reply_cannot_mutate_other_customers_draft (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_non_admin_transfer_rejected (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_reply_uses_original_account_configuration (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_transfer_atomic_and_preserves_history (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_transfer_moves_associated_rfq_and_followup (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_transferred_history_cannot_resume_original_account_ai (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_two_connections_do_not_replace_and_default_ai_off (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_ui_hides_components_and_requires_ai_confirmation (test_business_channels.BusinessChannelHTTPTests) ... ok
+test_ai_requires_explicit_knowledge_confirmation (test_business_channels.BusinessChannelTests) ... ok
+test_cross_tenant_owner_rejected (test_business_channels.BusinessChannelTests) ... ok
+test_identity_and_conversation_scoped_by_account (test_business_channels.BusinessChannelTests) ... ok
+test_inbound_off_still_saved_and_dedup_scoped (test_business_channels.BusinessChannelTests) ... ok
+test_independent_customer_transfer_keeps_followup_and_history (test_business_channels.BusinessChannelTests) ... ok
+test_internal_knowledge_revokes_answer_and_remote_document_immediately (test_business_channels.BusinessChannelTests) ... ok
+test_invalid_connection_leaves_no_orphan_conversation (test_business_channels.BusinessChannelTests) ... ok
+test_legacy_reopen_preserves_connection_and_messages (test_business_channels.BusinessChannelTests) ... ok
+test_member_only_own_connection_and_revocation (test_business_channels.BusinessChannelTests) ... ok
+test_non_admin_transfer_rejected (test_business_channels.BusinessChannelTests) ... ok
+test_reply_uses_original_account_configuration (test_business_channels.BusinessChannelTests) ... ok
+test_transfer_atomic_and_preserves_history (test_business_channels.BusinessChannelTests) ... ok
+test_transfer_moves_associated_rfq_and_followup (test_business_channels.BusinessChannelTests) ... ok
+test_two_connections_do_not_replace_and_default_ai_off (test_business_channels.BusinessChannelTests) ... ok
+test_bridge_keys_never_persisted_or_rendered (test_business_channels.EnterpriseBridgeRoutingTests) ... ok
+test_callback_token_and_session_routing_per_tenant (test_business_channels.EnterpriseBridgeRoutingTests) ... ok
+test_channel_page_start_uses_own_tenant_bridge_only (test_business_channels.EnterpriseBridgeRoutingTests) ... ok
+test_missing_mapping_fails_closed_without_global_fallback (test_business_channels.EnterpriseBridgeRoutingTests) ... ok
+test_outbound_routes_to_own_tenant_bridge_with_own_key_and_session (test_business_channels.EnterpriseBridgeRoutingTests) ... ok
+test_provision_rejects_account_tenant_mismatch (test_business_channels.EnterpriseBridgeRoutingTests) ... ok
+test_same_tenant_two_accounts_use_distinct_sessions (test_business_channels.EnterpriseBridgeRoutingTests) ... ok
+test_channel_save_generates_stable_token (test_langbot_bridge.LangBotBridgeTests)
+保存配置：首次生成 webhook_token，再次保存保持稳定。 ... ok
+test_duplicate_event_processed_once (test_langbot_bridge.LangBotBridgeTests) ... ok
+test_inbox_and_channel_page_show_platform_fields (test_langbot_bridge.LangBotBridgeTests)
+收件箱展示（含平台/用户ID）；渠道接入页展示 LangBot 卡片与收信地址。 ... ok
+test_inbox_platform_modules_connected_and_empty_state (test_langbot_bridge.LangBotBridgeTests)
+来源平台重构：LangBot 已接入（启用）的平台即使无消息也显示模块（空态指引）；未启用的不显示。 ... ok
+test_missing_api_key_fails_closed (test_langbot_bridge.LangBotBridgeTests) ... ok
+test_platform_label_normalization_and_name_fallback (test_langbot_bridge.LangBotBridgeTests)
+适配器名归一化（TelegramAdapter/telegram→Telegram）与无姓名回退（「Telegram 用户 <ID>」）。 ... ok
+test_platform_label_normalization_weixin (test_langbot_bridge.LangBotBridgeTests)
+微信系适配器名归一：openclaw-weixin / WeChatPad / 类名风格 → 「微信」。 ... ok
+test_question_asks_human_via_channel (test_langbot_bridge.LangBotBridgeTests)
+提问样文本（资料外）→ 转人工提示直达渠道。 ... ok
+test_staff_reply_failure_visible_and_retry (test_langbot_bridge.LangBotBridgeTests)
+卖家回复直达；发送失败可见（含原因）+ 一键重试成功。 ... ok
+test_webhook_receives_stores_and_skips_pipeline (test_langbot_bridge.LangBotBridgeTests)
+收信：落库 + 平台字段落档 + 自动分流回复经 LangBot 发送 + skip_pipeline=true。 ... ok
+test_wrong_token_and_disabled_channel_fail_closed (test_langbot_bridge.LangBotBridgeTests) ... ok
+
+----------------------------------------------------------------------
+Ran 51 tests in 24.562s
+
+OK
+EXIT2=0
+
+===== 命令 3：语法与空白检查 =====
+EXIT3=0
+EXIT4=0

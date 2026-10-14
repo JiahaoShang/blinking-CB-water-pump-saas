@@ -1,0 +1,43 @@
+# B2B 售前平台：pilot 受邀实例的 LangBot 4.10.11 传输栈（Telegram 渠道桥；事件经 nginx 443 回推本平台）。
+# 部署、自检、凭据轮换与备份细则见 deploy/langbot-pilot.md；本文件不含任何秘密。
+# 运行（root，在服务器上；秘密只经 --env-file 注入，不进 Git/镜像/命令行参数）：
+#   sudo docker compose --project-name b2b-langbot --env-file /var/lib/b2b/data/connection-runtime/langbot/transport.env -f /opt/b2b/app/deploy/langbot-compose.yaml up -d
+services:
+  b2b-langbot:
+    image: rockchin/langbot@sha256:ed8c7f19d7e44cda8b59a803be78c4cbecd294e7de1e53d114517f2c034e6e40
+    container_name: b2b-langbot
+    labels:
+      b2b.langbot: "1"          # 备份停写预检依赖（deploy/langbot_precheck.py）；值必须是字符串
+    volumes:
+      - ${B2B_DATA_DIR:-/var/lib/b2b/data}/connection-runtime/langbot/core:/app/data
+    ports:
+      - "127.0.0.1:5300:5300"   # 仅本机回环：nginx 与运维工具经 127.0.0.1 访问；公网入口仍是 nginx 443
+    restart: unless-stopped
+    environment:
+      # 与 b2b 应用共享同一把密钥：应用端（/etc/b2b/b2b.env）叫 LANGBOT_API_KEY，
+      # 这里映射为核心的 api.global_api_key；两处必须是同一个值（X-API-Key 校验）。
+      - "API__GLOBAL_API_KEY=${LANGBOT_API_KEY:?set LANGBOT_API_KEY in the secrets env-file}"
+      # 控制连接：按冻结镜像内 rt 的默认控制端口 5400（5401 是插件调试服务、鉴权头不同，勿混用）。
+      - "PLUGIN__RUNTIME_WS_URL=ws://b2b-langbot-plugin:5400/control/ws"
+      - "LANGBOT_PLUGIN_RUNTIME_CONTROL_TOKEN=${LANGBOT_PLUGIN_RUNTIME_CONTROL_TOKEN:?set LANGBOT_PLUGIN_RUNTIME_CONTROL_TOKEN in the secrets env-file}"
+      - "BOX__ENABLED=false"    # Box 沙箱关闭（不挂宿主 Docker socket；本任务不启用）
+    networks:
+      - b2b-langbot-net
+
+  b2b-langbot-plugin:
+    image: rockchin/langbot@sha256:ed8c7f19d7e44cda8b59a803be78c4cbecd294e7de1e53d114517f2c034e6e40
+    container_name: b2b-langbot-plugin
+    labels:
+      b2b.langbot: "1"
+    volumes:
+      - ${B2B_DATA_DIR:-/var/lib/b2b/data}/connection-runtime/langbot/plugin:/app/data/plugins
+    restart: unless-stopped
+    environment:
+      - "LANGBOT_PLUGIN_RUNTIME_CONTROL_TOKEN=${LANGBOT_PLUGIN_RUNTIME_CONTROL_TOKEN:?set LANGBOT_PLUGIN_RUNTIME_CONTROL_TOKEN in the secrets env-file}"
+    command: ["uv", "run", "--no-sync", "-m", "langbot_plugin.cli.__init__", "rt"]
+    networks:
+      - b2b-langbot-net
+
+networks:
+  b2b-langbot-net:
+    driver: bridge

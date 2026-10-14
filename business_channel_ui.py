@@ -205,6 +205,7 @@ class BusinessChannelUI:
             if not credential:
                 raise ValueError('请输入 Telegram 机器人授权令牌')
             import urllib.request
+            created_bot_uuid = ''
             try:
                 # 先验证外部身份；令牌只交给连接服务，不保存或回显到业务库。
                 req = urllib.request.Request('https://api.telegram.org/bot' + credential + '/getMe')
@@ -226,10 +227,21 @@ class BusinessChannelUI:
                 bot_id = str((result.get('data') or {}).get('uuid') or '')
                 if not bot_id:
                     raise ValueError('连接服务未返回账号标识')
+                # LangBot 4.10.11 的创建接口只载入机器人、不启动收发（load_bot 不 run）；
+                # 必须紧跟一次启用（PUT）才会真正开始轮询，否则界面显示已连接却收不到消息。
+                created_bot_uuid = bot_id
+                self.business_transport_request('PUT', '/api/v1/platform/bots/' + bot_id, {'enable': True})
                 config['bot_uuid'] = bot_id
                 config['account_name'] = '@' + str(identity['result'].get('username', ''))
             except Exception:
                 self.db.conn.rollback()
+                if created_bot_uuid:
+                    # 启用失败：尽力删除刚创建、未启用的上游机器人，不留无法管理的残留；
+                    # 清理本身失败也不向上透出（响应仍只有统一安全提示）。
+                    try:
+                        self.business_transport_request('DELETE', '/api/v1/platform/bots/' + created_bot_uuid)
+                    except Exception:
+                        pass
                 if not config.get('bot_uuid'):
                     self.db.conn.execute("UPDATE channel_accounts SET remote_account_id='' WHERE tenant_id=? AND id=?", (self.tenant_id, account_id))
                     self.db.conn.commit()

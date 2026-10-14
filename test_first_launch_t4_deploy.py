@@ -74,7 +74,7 @@ esac
 
 DOCKER_SHIM = """#!/bin/sh
 # 测试假件：FAKE_STATE_DIR/containers/<name>.exists / .running / .inspectfail / .stopfail /
-# .labels_json / .sessions_source / .media_source / .image 表示容器状态与核对输入。
+# .labels_json / .mounts_json / .sessions_source / .media_source / .image 表示容器状态与核对输入。
 cmd="$1"
 shift
 dir="${FAKE_STATE_DIR:-/tmp}/containers"
@@ -100,6 +100,10 @@ case "$cmd" in
           fi
           exit 0 ;;
         *Mounts*)
+          if [ -f "$dir/$name.mounts_json" ]; then
+            cat "$dir/$name.mounts_json"
+            exit 0
+          fi
           sessions=""
           media=""
           if [ -f "$dir/$name.sessions_source" ]; then sessions="$(cat "$dir/$name.sessions_source")"; fi
@@ -207,6 +211,10 @@ class DeployScriptTestBase(unittest.TestCase):
             (self.app_dir / "deploy").mkdir(parents=True, exist_ok=True)
             shutil.copy2(tool_source, self.app_dir / "deploy" / "provision_enterprise_bridge.py")
             shutil.copy2(REPO / "channel_runtime.py", self.app_dir / "channel_runtime.py")
+        langbot_tool = REPO / "deploy" / "langbot_precheck.py"
+        if langbot_tool.is_file():
+            (self.app_dir / "deploy").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(langbot_tool, self.app_dir / "deploy" / "langbot_precheck.py")
         self.data_dir = self.root / "data"
         self.uploads = self.data_dir / "uploads"
         self.uploads.mkdir(parents=True)
@@ -652,6 +660,28 @@ class NginxConfigTests(unittest.TestCase):
         blocks = conf.split("server {")
         self.assertNotIn("whatsapp-personal", blocks[1], "默认站点不得涉及该路径（保持 444 口径）")
         self.assertNotIn("whatsapp-personal", blocks[2], "80 跳转站点不得涉及该路径（保持整站跳转口径）")
+
+    def test_final_config_langbot_webhook_suppresses_access_log_and_keeps_proxy(self) -> None:
+        """LangBot 桥 webhook 令牌在路径里（app.py 路由与个人版同形：前缀 + 16~96 位 [A-Za-z0-9_-] 令牌）：
+        必须单独 `^~` location 关闭访问日志（b2b_nocreds 只记 `$uri`，令牌仍会写盘），且转发口径与
+        应用代理（`location /`）逐行一致——请求仍进应用，行为不变。
+        真实生效以服务器 nginx -t + 部署后日志核对为准（deploy/langbot-pilot.md）。
+        """
+        conf = FINAL_NGINX.read_text(encoding="utf-8")
+        named_block = conf.split("server {")[-1]  # 443 精确域名站点（与既有用例同取法）
+        marker = "location ^~ /api/v1/channels/langbot/webhook/"
+        self.assertEqual(named_block.count(marker), 1, "443 站点必须有且仅有一处 LangBot webhook location（^~ 前缀）")
+        body = nginx_directive_lines(nginx_location_block(named_block, marker))
+        self.assertIn("access_log off;", body, "webhook 令牌路径必须关闭访问日志（$uri 会把 /webhook/<token> 写盘）")
+        app_proxy = nginx_directive_lines(nginx_location_block(named_block, "location / {"))
+        self.assertEqual([line for line in body if line != "access_log off;"], app_proxy,
+                         "除 access_log off 外，LangBot webhook location 必须与既有应用代理逐行一致（同 proxy_pass/头/超时）")
+        app_source = (REPO / "app.py").read_text(encoding="utf-8")
+        self.assertIn('r"/api/v1/channels/langbot/webhook/([A-Za-z0-9_-]{16,96})"', app_source,
+                      "app.py 实际路由变化：nginx 前缀 location 须同步复核")
+        blocks = conf.split("server {")
+        self.assertNotIn("langbot", blocks[1], "默认站点不得涉及该路径（保持 444 口径）")
+        self.assertNotIn("langbot", blocks[2], "80 跳转站点不得涉及该路径（保持整站跳转口径）")
 
     def test_bootstrap_config_is_http_only_and_does_not_expose_app(self) -> None:
         conf = BOOTSTRAP_NGINX.read_text(encoding="utf-8")

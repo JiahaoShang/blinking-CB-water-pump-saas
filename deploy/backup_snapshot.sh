@@ -9,7 +9,7 @@
 # 配置），因此不进 b2b 用户可读范围，也不允许明文上传到云——异地方案必须先加密
 # （见 deploy/offsite-backup-r2-plan.md）。
 #
-# 受管桥（两类，均只处理本数据目录对应容器，绝不触碰其他容器）：
+# 受管桥（三类，均只处理本数据目录对应容器，绝不触碰其他容器）：
 # 1) 旧账号容器（WhatsApp 个人版，名称固定 b2b-account-<24 位账号 ID>）：
 #    只处理本库 <数据目录>/connection-runtime/ 下登记过账号对应的容器；
 # 2) 企业专属桥容器（运营预部署，b2b-enterprise-<租户哈希 24hex>）：
@@ -18,6 +18,11 @@
 #    核对标签与 sessions/media 卷属于本库数据目录、并区分运行状态——恢复副本/另一数据根
 #    的同名容器或被替换的容器一律失败退出（exit 3）；任何“无法确认”（含 docker inspect
 #    失败）同样失败，绝不宣称一致性成功。
+# 3) LangBot 传输栈（opt-in：仅当 <数据目录>/connection-runtime/langbot/managed 普通文件存在）：
+#    两个固定容器 b2b-langbot / b2b-langbot-plugin；停写前用本目录 langbot_precheck.py 核对
+#    b2b.langbot=1 标签与 connection-runtime/langbot/{core,plugin} 挂载属于本数据目录（解析后
+#    路径）并区分运行状态——缺失/被替换/挂载不符/docker 错误一律失败退出（exit 3）；标记
+#    不存在（未部署 LangBot）时行为与原来完全一致。
 # 旧账号容器：docker 不可用或容器不存在时告警跳过、不猜不停。本部署形态下应用没有 Docker 权限。
 #
 # 环境变量（由 /etc/b2b/b2b.env 或单元文件提供；均有默认值）：
@@ -131,6 +136,37 @@ if [ -e "$ENTERPRISE_REGISTRY" ]; then
   fi
 fi
 
+# ── LangBot 受管容器预检（opt-in：仅当标记存在；同样在停写之前完成）────────────────
+# 标记为普通文件时：两个固定容器必须存在、带 b2b.langbot=1 标签、挂载来自本数据目录
+# connection-runtime/langbot/{core,plugin}（解析后路径），且 docker 可核对；任何“无法确认”
+# （缺失、被替换、另一数据根/恢复副本的同名容器、docker 不可用或 inspect 失败）一律失败退出
+# （exit 3）——绝不把停不了的容器留在停写窗口之外。标记缺失时以下逻辑完全不参与。
+LANGBOT_STATES=""
+LANGBOT_MARKER="$RUNTIME_DIR/langbot/managed"
+LANGBOT_TOOL="$APP_DIR/deploy/langbot_precheck.py"
+if [ -e "$LANGBOT_MARKER" ]; then
+  if [ ! -f "$LANGBOT_MARKER" ]; then
+    echo "错误：LangBot 受管标记存在但不是普通文件，拒绝备份：$LANGBOT_MARKER" >&2
+    exit 3
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "错误：LangBot 受管标记存在（$LANGBOT_MARKER）但 Docker 不可用，无法停写 LangBot 容器——拒绝在可能半写状态下备份" >&2
+    exit 3
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    echo "错误：LangBot 受管标记存在但 Docker 守护进程不可用，无法停写 LangBot 容器——拒绝在可能半写状态下备份" >&2
+    exit 3
+  fi
+  if [ ! -f "$LANGBOT_TOOL" ]; then
+    echo "错误：缺少 LangBot 停写预检工具（$LANGBOT_TOOL），无法核对已部署容器的停写范围" >&2
+    exit 3
+  fi
+  if ! LANGBOT_STATES="$("$PY" "$LANGBOT_TOOL" --data-dir "$DATA_DIR")"; then
+    echo "错误：LangBot 容器归属/状态核对失败（fail-closed，未停写；缺失/被替换/挂载不符的容器不会被动）" >&2
+    exit 3
+  fi
+fi
+
 # ── 停写：应用 → 受管桥 ───────────────────────────────────────────────────
 if [ "$APP_WAS_ACTIVE" = "1" ]; then
   echo "停写窗口：停止 $APP_UNIT"
@@ -195,6 +231,42 @@ if [ -d "$RUNTIME_DIR" ] || [ -n "$ENTERPRISE_STATES" ]; then
     done <<EOF
 $ENTERPRISE_STATES
 EOF
+    # LangBot 容器（opt-in；预检已核对标签与挂载属于本数据目录；只停原本运行的，绝不启动原本未运行的）
+    if [ -n "$LANGBOT_STATES" ]; then
+      while IFS=' ' read -r state name; do
+        [ -n "${name:-}" ] || continue
+        case "$name" in
+          b2b-langbot|b2b-langbot-plugin)
+            ;;
+          *)
+            echo "错误：LangBot 预检返回了未登记容器名，拒绝停写：$name" >&2
+            exit 3
+            ;;
+        esac
+        case "$state" in
+          running)
+            case " $STOPPED_BRIDGES " in
+              *" $name "*) continue ;;
+            esac
+            echo "停写窗口：停止 LangBot 容器 $name"
+            if ! docker stop "$name" >/dev/null; then
+              echo "错误：LangBot 容器未能停止，终止本次备份（将恢复原状态）：$name" >&2
+              exit 3
+            fi
+            STOPPED_BRIDGES="$STOPPED_BRIDGES $name"
+            ;;
+          stopped)
+            echo "提示：LangBot 容器不在运行，无需停写：$name"
+            ;;
+          *)
+            echo "错误：LangBot 状态无法识别，拒绝停写：$state $name" >&2
+            exit 3
+            ;;
+        esac
+      done <<EOF
+$LANGBOT_STATES
+EOF
+    fi
   fi
 fi
 

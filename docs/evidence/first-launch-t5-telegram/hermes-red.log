@@ -1,0 +1,164 @@
+# hermes-red.log — T5 Telegram（LangBot 传输栈）部署侧最小回归 RED（隔离副本；实现回退，测试保持与绿轮逐字节一致）
+# 方法：把本工作树复制到 $TMPDIR/b2b-t5-telegram-red，仅将实现文件回退——deploy/backup_snapshot.sh 与
+#       deploy/nginx-b2b.conf.example 还原为 HEAD 版本，移除 deploy/langbot-compose.yaml 与
+#       deploy/langbot_precheck.py（deploy/langbot-pilot.md 为纯文档，一并移除）；两个测试文件的
+#       sha256 与工作树逐字节一致（见下）。
+# 命令（在隔离副本内，解释器=原工作树 .venv-knowledge/bin/python，Python 3.9.6）：
+#   python -m unittest -v test_first_launch_t5_telegram test_first_launch_t4_deploy.NginxConfigTests.test_final_config_langbot_webhook_suppresses_access_log_and_keeps_proxy
+# 判定：nginx 缺 LangBot 凭据路径 location、compose 文件缺失、backup_snapshot.sh 尚未识别
+#       connection-runtime/langbot/managed 标记——除「无标记不触碰」这一初始即成立的守卫外全部失败。
+# 源 HEAD：1d08b76af0f1e132a044716a6a67af275a6ccbdb（工作树原未提交改动保留；隔离副本不触碰原树）
+# 测试文件哈希（两处一致）：test_first_launch_t5_telegram.py=d33c87ede9f095d2db1dad00ee30fc1093a2380c4edb9b562f722b73550db64c
+#                        test_first_launch_t4_deploy.py=b2cee4fb3607de03709a40e76e1c7dd48eb66da2e686d9a5419fe5f01fb0bf1b
+
+test_backup_failure_restores_langbot_and_app (test_first_launch_t5_telegram.LangbotBackupScriptTests) ... FAIL
+test_marker_stops_only_running_and_keeps_inactive_untouched (test_first_launch_t5_telegram.LangbotBackupScriptTests) ... FAIL
+test_marker_stops_running_containers_before_snapshot_and_restores (test_first_launch_t5_telegram.LangbotBackupScriptTests) ... FAIL
+test_marker_with_docker_unavailable_fails_before_stop (test_first_launch_t5_telegram.LangbotBackupScriptTests) ... FAIL
+test_marker_with_foreign_mount_source_fails_before_stop (test_first_launch_t5_telegram.LangbotBackupScriptTests)
+恢复副本/另一数据根的同名容器：挂载不属于本数据目录，必须拒绝（绝不误停生产容器）。 ... FAIL
+test_marker_with_inspect_failure_fails_before_stop (test_first_launch_t5_telegram.LangbotBackupScriptTests)
+docker inspect 失败不能当作“不在运行”继续宣称已一致停写。 ... FAIL
+test_marker_with_label_mismatch_fails_before_stop (test_first_launch_t5_telegram.LangbotBackupScriptTests) ... FAIL
+test_marker_with_missing_container_fails_before_stop (test_first_launch_t5_telegram.LangbotBackupScriptTests) ... FAIL
+test_without_marker_langbot_is_never_touched (test_first_launch_t5_telegram.LangbotBackupScriptTests) ... ok
+test_core_loopback_only_and_plugin_never_published (test_first_launch_t5_telegram.LangbotComposeTests) ... FAIL
+test_env_contract_shared_secrets_without_literals (test_first_launch_t5_telegram.LangbotComposeTests) ... FAIL
+test_image_frozen_by_digest_on_both_containers (test_first_launch_t5_telegram.LangbotComposeTests) ... FAIL
+test_labels_mounts_command_and_restart_policy (test_first_launch_t5_telegram.LangbotComposeTests) ... FAIL
+test_final_config_langbot_webhook_suppresses_access_log_and_keeps_proxy (test_first_launch_t4_deploy.NginxConfigTests)
+LangBot 桥 webhook 令牌在路径里（app.py 路由与个人版同形：前缀 + 16~96 位 [A-Za-z0-9_-] 令牌）： ... FAIL
+
+======================================================================
+FAIL: test_backup_failure_restores_langbot_and_app (test_first_launch_t5_telegram.LangbotBackupScriptTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 225, in test_backup_failure_restores_langbot_and_app
+    self.assertIn(f"docker stop {CORE}", lines)
+AssertionError: 'docker stop b2b-langbot' not found in ['systemctl stop b2b-app', 'backup-fail', 'systemctl start b2b-app']
+
+======================================================================
+FAIL: test_marker_stops_only_running_and_keeps_inactive_untouched (test_first_launch_t5_telegram.LangbotBackupScriptTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 172, in test_marker_stops_only_running_and_keeps_inactive_untouched
+    self.assertIn(f"docker stop {CORE}", lines)
+AssertionError: 'docker stop b2b-langbot' not found in ['systemctl stop b2b-app', 'backup-start', 'backup-ok', 'systemctl start b2b-app']
+
+======================================================================
+FAIL: test_marker_stops_running_containers_before_snapshot_and_restores (test_first_launch_t5_telegram.LangbotBackupScriptTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 141, in test_marker_stops_running_containers_before_snapshot_and_restores
+    self.assert_order(lines, [
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t4_deploy.py", line 311, in assert_order
+    self.assertIn(item, lines, msg=f"缺少调用记录: {item}（实际: {lines}）")
+AssertionError: 'docker inspect-labels b2b-langbot' not found in ['systemctl stop b2b-app', 'backup-start', 'backup-ok', 'systemctl start b2b-app'] : 缺少调用记录: docker inspect-labels b2b-langbot（实际: ['systemctl stop b2b-app', 'backup-start', 'backup-ok', 'systemctl start b2b-app']）
+
+======================================================================
+FAIL: test_marker_with_docker_unavailable_fails_before_stop (test_first_launch_t5_telegram.LangbotBackupScriptTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 214, in test_marker_with_docker_unavailable_fails_before_stop
+    self.assert_no_stops_and_no_bundle(self.run_script(with_docker=False))
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 124, in assert_no_stops_and_no_bundle
+    self.assertNotEqual(result.returncode, 0, "标记存在而预检不通过时必须失败")
+AssertionError: 0 == 0 : 标记存在而预检不通过时必须失败
+
+======================================================================
+FAIL: test_marker_with_foreign_mount_source_fails_before_stop (test_first_launch_t5_telegram.LangbotBackupScriptTests)
+恢复副本/另一数据根的同名容器：挂载不属于本数据目录，必须拒绝（绝不误停生产容器）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 198, in test_marker_with_foreign_mount_source_fails_before_stop
+    self.assert_no_stops_and_no_bundle(self.run_script())
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 124, in assert_no_stops_and_no_bundle
+    self.assertNotEqual(result.returncode, 0, "标记存在而预检不通过时必须失败")
+AssertionError: 0 == 0 : 标记存在而预检不通过时必须失败
+
+======================================================================
+FAIL: test_marker_with_inspect_failure_fails_before_stop (test_first_launch_t5_telegram.LangbotBackupScriptTests)
+docker inspect 失败不能当作“不在运行”继续宣称已一致停写。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 207, in test_marker_with_inspect_failure_fails_before_stop
+    self.assert_no_stops_and_no_bundle(self.run_script())
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 124, in assert_no_stops_and_no_bundle
+    self.assertNotEqual(result.returncode, 0, "标记存在而预检不通过时必须失败")
+AssertionError: 0 == 0 : 标记存在而预检不通过时必须失败
+
+======================================================================
+FAIL: test_marker_with_label_mismatch_fails_before_stop (test_first_launch_t5_telegram.LangbotBackupScriptTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 189, in test_marker_with_label_mismatch_fails_before_stop
+    self.assert_no_stops_and_no_bundle(self.run_script())
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 124, in assert_no_stops_and_no_bundle
+    self.assertNotEqual(result.returncode, 0, "标记存在而预检不通过时必须失败")
+AssertionError: 0 == 0 : 标记存在而预检不通过时必须失败
+
+======================================================================
+FAIL: test_marker_with_missing_container_fails_before_stop (test_first_launch_t5_telegram.LangbotBackupScriptTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 182, in test_marker_with_missing_container_fails_before_stop
+    self.assert_no_stops_and_no_bundle(self.run_script())
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 124, in assert_no_stops_and_no_bundle
+    self.assertNotEqual(result.returncode, 0, "标记存在而预检不通过时必须失败")
+AssertionError: 0 == 0 : 标记存在而预检不通过时必须失败
+
+======================================================================
+FAIL: test_core_loopback_only_and_plugin_never_published (test_first_launch_t5_telegram.LangbotComposeTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 59, in test_core_loopback_only_and_plugin_never_published
+    text = self.compose_text()
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 48, in compose_text
+    self.assertTrue(COMPOSE.is_file(), "必须存在 deploy/langbot-compose.yaml（LangBot pilot 传输栈冻结定义）")
+AssertionError: False is not true : 必须存在 deploy/langbot-compose.yaml（LangBot pilot 传输栈冻结定义）
+
+======================================================================
+FAIL: test_env_contract_shared_secrets_without_literals (test_first_launch_t5_telegram.LangbotComposeTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 84, in test_env_contract_shared_secrets_without_literals
+    text = self.compose_text()
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 48, in compose_text
+    self.assertTrue(COMPOSE.is_file(), "必须存在 deploy/langbot-compose.yaml（LangBot pilot 传输栈冻结定义）")
+AssertionError: False is not true : 必须存在 deploy/langbot-compose.yaml（LangBot pilot 传输栈冻结定义）
+
+======================================================================
+FAIL: test_image_frozen_by_digest_on_both_containers (test_first_launch_t5_telegram.LangbotComposeTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 52, in test_image_frozen_by_digest_on_both_containers
+    text = self.compose_text()
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 48, in compose_text
+    self.assertTrue(COMPOSE.is_file(), "必须存在 deploy/langbot-compose.yaml（LangBot pilot 传输栈冻结定义）")
+AssertionError: False is not true : 必须存在 deploy/langbot-compose.yaml（LangBot pilot 传输栈冻结定义）
+
+======================================================================
+FAIL: test_labels_mounts_command_and_restart_policy (test_first_launch_t5_telegram.LangbotComposeTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 74, in test_labels_mounts_command_and_restart_policy
+    text = self.compose_text()
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t5_telegram.py", line 48, in compose_text
+    self.assertTrue(COMPOSE.is_file(), "必须存在 deploy/langbot-compose.yaml（LangBot pilot 传输栈冻结定义）")
+AssertionError: False is not true : 必须存在 deploy/langbot-compose.yaml（LangBot pilot 传输栈冻结定义）
+
+======================================================================
+FAIL: test_final_config_langbot_webhook_suppresses_access_log_and_keeps_proxy (test_first_launch_t4_deploy.NginxConfigTests)
+LangBot 桥 webhook 令牌在路径里（app.py 路由与个人版同形：前缀 + 16~96 位 [A-Za-z0-9_-] 令牌）：
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private/var/folders/1c/_sqn3hfx0q33pjwx_jc4v3nm0000gn/T/b2b-t5-telegram-red/test_first_launch_t4_deploy.py", line 673, in test_final_config_langbot_webhook_suppresses_access_log_and_keeps_proxy
+    self.assertEqual(named_block.count(marker), 1, "443 站点必须有且仅有一处 LangBot webhook location（^~ 前缀）")
+AssertionError: 0 != 1 : 443 站点必须有且仅有一处 LangBot webhook location（^~ 前缀）
+
+----------------------------------------------------------------------
+Ran 14 tests in 7.739s
+
+FAILED (failures=13)
+
+EXIT=1
