@@ -1,1 +1,0 @@
-{"outcome": "rejected before writes", "rejected": "不能保存该批次的发布设置：「old」不是当前内容的原件（属于历史版本，或原件身份尚未确认），保存设置会改写当前草稿的用途 / AI / 到期。请到当前草稿所在批次设置。", "draft_unchanged": true, "draft_usage_after": "external", "draft_ai_after": 1, "draft_expires_after": "2030-01-01T23:59:59+00:00", "published_version": 2}

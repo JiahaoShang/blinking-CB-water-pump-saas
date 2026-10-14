@@ -1,3 +1,0 @@
-Error: unknown shorthand flag: 's' in -s
-
-0.000269(s) elapsed

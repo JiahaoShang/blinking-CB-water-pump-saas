@@ -1,8 +1,0 @@
-{
-  "cloud_copy_local_restore": "PASS",
-  "rfqs": 0,
-  "sources": 0,
-  "ops_config_present": true,
-  "elapsed_seconds": 0.021,
-  "restored_database_mode": "0o600"
-}

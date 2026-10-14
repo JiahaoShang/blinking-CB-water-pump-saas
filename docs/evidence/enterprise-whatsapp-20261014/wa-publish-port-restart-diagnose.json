@@ -1,5 +1,0 @@
-{
-  "status": "Success",
-  "exit_code": 0,
-  "output": "{\"container_status\": \"running\", \"registered_api_base\": \"http://127.0.0.1:32768\", \"actual_published_port\": \"127.0.0.1:32769\", \"address_matches\": false}\n[{\"session\": \"business-0aeb613589f381d2ccabea7f\", \"status\": \"WORKING\", \"identity_hash\": \"7a4f99d3d09d\"}, {\"session\": \"business-a03f8c1a059c5e1a924b83ea\", \"status\": \"WORKING\", \"identity_hash\": \"a6ee495b58b8\"}]\n"
-}

@@ -9,3 +9,39 @@ data/
 # 企业知识第二批隔离运行环境（requirements-knowledge.txt；不入库）
 .venv-knowledge/
 dist/
+
+# ============================================================================
+# 本地测试与开发资料（仅本机保存，不同步 GitHub）—— 2026-10-14 用户决定
+# GitHub 只含：项目运行代码、静态资源、部署/运维/建号/资料核准工具、依赖清单与项目文档；
+# 测试程序、测试驱动/模拟器、测试夹具、本地演示与原型、测试证据/日志/截图只留本机。
+# 详见 docs/GitHub同步与本地测试规则.md。.gitignore 只防普通误加入，非强制权限控制。
+# ============================================================================
+test_*.py
+test*.py
+*_test.py
+*_test.js
+*.test.js
+*.test.ts
+*.spec.js
+*.spec.ts
+/tests/
+/test/
+/fixtures/
+/docs/evidence/
+/design/
+/B2B_Pump_Demo_Research/
+/tools/browser_tests/
+/tools/demo/
+/tools/channels/mock_*.py
+/tools/pilot_checks/check_cors.py
+/tools/pilot_checks/check_deepseek_live.py
+/tools/pilot_checks/check_first_launch_t2.py
+/tools/pilot_checks/check_first_launch_t4.py
+/tools/pilot_checks/restore_drill.py
+/showcase.py
+/full_gateway.py
+/.local-development/
+/.pytest_cache/
+/.coverage
+/htmlcov/
+/coverage/

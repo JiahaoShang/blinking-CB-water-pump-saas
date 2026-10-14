@@ -1,3 +1,0 @@
-status=Success exit=0
-CONVERSATIONS [{'id': '85c4a936fab51b8efbdcbdcd', 'ai_paused': 0, 'owner_user_id': '6c45dccd792193a387ad93cf'}]
-MESSAGE_COUNTS 85c4a936fab51b8efbdcbdcd [('buyer', 1)]

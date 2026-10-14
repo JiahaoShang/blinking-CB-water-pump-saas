@@ -1,1 +1,0 @@
-{"draft_before_old_batch_publish": "Power supply 240V", "published_after_old_batch_publish": "Power supply 240V", "outcome": {"published": [], "archived": [], "failed": [{"source_id": "51cd912c95f3be121b523bab", "error": "该来源属于历史原件：当前草稿来自更新版本（文件更新 / 采用模板后的新草稿），不能发布这份属于其他原件的草稿。如需这份历史内容，请从版本记录显式恢复为新草稿；本批次发布不会覆盖当前草稿。"}], "skipped": []}}

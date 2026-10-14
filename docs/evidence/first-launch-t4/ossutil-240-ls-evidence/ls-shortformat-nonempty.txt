@@ -1,5 +1,0 @@
-oss://mock-bucket/backups/20990101-000000/20261013-190829.export.tar.gz.age
-oss://mock-bucket/backups/20990101-000000/20261013-190829.export.tar.gz.age.sha256
-Object Number is: 2
-
-0.014078(s) elapsed

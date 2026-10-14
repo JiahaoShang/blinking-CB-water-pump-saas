@@ -1,8 +1,0 @@
-status=Failed exit=5
-running b2b-langbot
-running b2b-langbot-plugin
-b2b-langbot running True host_bindings {'5300/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '5300'}]} mount_ownership True
-b2b-langbot-plugin running True host_bindings {} mount_ownership True
-invalid_callback_status 404
-callback_marker_in_access_log False
-Failed to start b2b-backup.service: Unit b2b-backup.service not found.

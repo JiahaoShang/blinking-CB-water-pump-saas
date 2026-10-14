@@ -1,8 +1,0 @@
-Traceback (most recent call last):
-  File "/tmp/b2b-phase2-old-settings-review.py", line 17, in <module>
-    d.kb2_save_batch_settings(t,u,b1,usage='internal',ai_authorized=False)
-  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/enterprise_knowledge_phase2.py", line 2814, in kb2_save_batch_settings
-    self._kb2_require_batch_settings_ownership(tenant_id, batch_id)
-  File "/Users/jiahaoshang/.codex/worktrees/196c/b2b 售前客户管理平台/enterprise_knowledge_phase2.py", line 2147, in _kb2_require_batch_settings_ownership
-    raise ValueError(
-ValueError: 不能保存该批次的发布设置：「old」不是当前内容的原件（属于历史版本，或原件身份尚未确认），保存设置会改写当前草稿的用途 / AI / 到期。请到当前草稿所在批次设置。

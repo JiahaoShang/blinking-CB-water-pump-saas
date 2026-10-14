@@ -1,5 +1,0 @@
-{
-  "status": "Success",
-  "exit_code": 0,
-  "output": "{\"release\": \"/opt/b2b/releases/b2b-release-20261014-enterprise-wa-r2\", \"source_head\": \"0f70494\", \"port_before_restart\": \"127.0.0.1:33631\", \"port_after_restart\": \"127.0.0.1:33631\", \"two_identities_preserved\": true, \"identity_hashes\": {\"business-0aeb613589f381d2ccabea7f\": \"7a4f99d3d09d\", \"business-a03f8c1a059c5e1a924b83ea\": \"a6ee495b58b8\"}, \"https_login\": 200, \"elapsed_seconds\": 33.182}\n"
-}

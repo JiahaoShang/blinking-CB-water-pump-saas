@@ -374,3 +374,9 @@ sudo /opt/b2b/venv/bin/python3 /opt/b2b/app/deploy/provision_enterprise_bridge.p
 - 恢复后的会话启动（2026-10-14实机核对）：活动会话列表可能为空；运营核对须用 `GET /api/sessions?all=true` 查找已保存的 `STOPPED` 会话，再启动这些已有会话。也可在已指向恢复库、上传根和注册表的产品界面点击“开始连接”。本次两个账号均直接恢复原身份，无需重新扫码；不要用删除会话或退出登录替代恢复。鉴权只从恢复后的私有注册表读取，不在命令参数或日志中回显。
 - 真机验收（独立执行；未通过前不得视为已上线）：`--check-registered` 与 docker 实际一致；企业扫码后收发链路可用；两企业互不串桥；备份停写与恢复重建各跑一轮；网络暴露面复查（仅 `127.0.0.1`）。
 
+## 13. GitHub 同步与发布包范围（2026-10-14 追加）
+
+- GitHub 仓库与发布包只保留正式运行与运维工具。本轮起发布包内 `tools/pilot_checks/` 只含三个正式运维/核准工具：`check_db_migrations.py`、`check_public_permissions.py`、`generate_threshold_review.py`；其余检查/演练脚本（`check_cors.py`、`check_deepseek_live.py`、`check_first_launch_t2.py`、`check_first_launch_t4.py`、`restore_drill.py`）只保存在本机开发环境——不进 GitHub，也不进发布包。
+- 本文中的本地验收命令需要本机已保存测试套件（如 `test_first_launch_t4_deploy.py` 等），它们是本地开发/验收资料，不是服务器上的运行依赖；服务器部署无需、也不应携带测试文件。
+- 本文旧验收命令和证据链接（如 `docs/evidence/`）属本地开发记录：在没有本地证据的开发环境或 GitHub 克隆中不可用；**clone 没有测试不表示验收通过**，验收以本机与真机的实际执行结果为准。
+- 本次不重新部署（仅为同步范围整理）。

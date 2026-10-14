@@ -1,3 +1,0 @@
-Object Number is: 0
-
-0.001101(s) elapsed

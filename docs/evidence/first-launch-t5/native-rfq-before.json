@@ -1,8 +1,0 @@
-{
-  "get_status": 200,
-  "rfq_button_present": false,
-  "post_status": 400,
-  "native_rfq_rejected": true,
-  "tokens_created": 0,
-  "layer": "isolated real HTTP + mock bridge"
-}

@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 250" role="img" aria-labelledby="title desc">
-<title id="title">Editorial pump dimension reference</title>
-<desc id="desc">Simplified vertical pump silhouette with arrows marking height and width as values to verify. Not a manufacturing drawing.</desc>
-<rect width="600" height="250" fill="#f7faf9"/>
-<g fill="none" stroke="#356f72" stroke-width="2.2" stroke-linejoin="round"><rect x="260" y="30" width="65" height="55" rx="10"/><path d="M280 30V15h25v15M248 85h89v10h-89zM270 95h45v95h-45zM248 111h89v11h-89zM250 149h85v12h-85zM241 190h103v15H241zM256 205v12m73-12v12M240 217h105"/><path d="M247 119h-43v26h43m90-26h43v26h-43"/></g>
-<g stroke="#a06e52" stroke-width="1.5"><path d="M393 15v202m-8-202h16m-16 202h16M393 15l-5 8m5-8 5 8m-5 194-5-8m5 8 5-8M204 229h176m-176-7v14m176-14v14m-176-7 8-5m-8 5 8 5m168-5-8-5m8 5-8 5"/></g>
-<g fill="#6d7d80" font-family="Arial,sans-serif" font-size="12"><text x="408" y="121">H: VERIFY</text><text x="255" y="248">W: VERIFY</text><text x="28" y="36">EDITORIAL SCHEMATIC</text><text x="28" y="54">NOT TO SCALE</text></g>
-</svg>

@@ -72,7 +72,10 @@ INCLUDE_PATTERNS = (
     "deploy/provision_enterprise_bridge.py",
     "tools/backup_restore.py",
     "tools/create_admin.py",
-    "tools/pilot_checks/*",
+    # 正式运维/核准工具（精确清单）：测试程序与本地演练脚本一律不进发布包
+    "tools/pilot_checks/check_db_migrations.py",
+    "tools/pilot_checks/check_public_permissions.py",
+    "tools/pilot_checks/generate_threshold_review.py",
     "tools/channels/outbound_worker.py",
 )
 
@@ -85,7 +88,9 @@ REQUIRED_GLOBS = (
     "deploy/*",
     "deploy/systemd/*",
     "deploy/provision_enterprise_bridge.py",
-    "tools/pilot_checks/*",
+    "tools/pilot_checks/check_db_migrations.py",
+    "tools/pilot_checks/check_public_permissions.py",
+    "tools/pilot_checks/generate_threshold_review.py",
 )
 
 # ── 修补包白名单（--patch）：只含本任务相关文件；全部必须存在（fail-closed）────────

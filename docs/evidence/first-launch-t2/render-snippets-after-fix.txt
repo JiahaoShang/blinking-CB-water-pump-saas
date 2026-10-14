@@ -1,7 +1,0 @@
-首次上线 T2 修复后：/admin/knowledge/qa 引用卡真实渲染片段（隔离副本 b2b-t2-green-0btg148h 内实测，cookie=管理员；非入侵业务库）
-
-主题引用卡片：
-<div class='kb-cite'><span><b>客服响应</b> <small>主题段落 · 主题 v1</small></span><a class='button secondary' href='/admin/knowledge/topic/422663f2bbce1a7a7bf46cda'>查看资料</a></div>
-
-灵活字段引用卡片：
-<div class='kb-cite'><span><b>service</b> <small>资料字段 · 支持定制 · v1</small></span><a class='button secondary' href='/admin/knowledge/item/eb582f83e92bb89980bd2c58'>查看资料</a></div>

@@ -1,5 +1,0 @@
-{
-  "status": "Success",
-  "exit_code": 0,
-  "output": "{\"session\": \"business-0aeb613589f381d2ccabea7f\", \"status\": \"WORKING\", \"identity_present\": true, \"identity_hash\": \"7a4f99d3d09d\"}\n{\"session\": \"business-a03f8c1a059c5e1a924b83ea\", \"status\": \"WORKING\", \"identity_present\": true, \"identity_hash\": \"a6ee495b58b8\"}\n{\"callback_token_present_in_nginx_access_log\": true}\n"
-}

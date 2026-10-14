@@ -1,5 +1,0 @@
-{
-  "status": "Success",
-  "exit_code": 0,
-  "output": "{\"test_marker\": \"T4/T5测试-20261014-1791911768\", \"evidence_layer\": \"real WhatsApp network + production application outbound bus + HTTPS callbacks + database, no simulated callbacks\", \"messages\": [{\"id\": \"4c65711f68fedd7d3075669d\", \"role\": \"buyer\", \"account_id\": \"a03f8c1a059c5e1a924b83ea\", \"status\": \"\", \"vendor_id_present\": true}, {\"id\": \"b422c129f32edbd7f39854bb\", \"role\": \"assistant\", \"account_id\": \"a03f8c1a059c5e1a924b83ea\", \"status\": \"sent\", \"vendor_id_present\": true}, {\"id\": \"def6736df8db493c59698909\", \"role\": \"buyer\", \"account_id\": \"0aeb613589f381d2ccabea7f\", \"status\": \"\", \"vendor_id_present\": true}, {\"id\": \"6f008e15aabf3160ab4b2cec\", \"role\": \"assistant\", \"account_id\": \"0aeb613589f381d2ccabea7f\", \"status\": \"sent\", \"vendor_id_present\": true}, {\"id\": \"4a6ad54ec9fdd9b07b87fd66\", \"role\": \"buyer\", \"account_id\": \"a03f8c1a059c5e1a924b83ea\", \"status\": \"\", \"vendor_id_present\": true}], \"ai_enabled\": false, \"two_distinct_identities\": true, \"all_three_received_on_correct_account\": true}\n"
-}

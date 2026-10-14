@@ -1,1 +1,0 @@
-{"replacement_status": "failed", "publication_result": {"published": [], "archived": [], "failed": [{"source_id": "e1a779acdbdb123c2736edab", "error": "该来源还没有可核对的原件身份（识别失败或未完成）：不能发布或归档；请先重试识别，或补充人工正文并逐段核对后再发布（失败的原件与草稿会保留，旧线上版本不变）。"}], "skipped": []}, "published_version": 1, "published_content": {"title": "old", "body": "Power supply 220V"}}

@@ -1,7 +1,0 @@
-{
-  "InvocationStatus": "Success",
-  "ExitCode": 0,
-  "StartTime": "2026-10-13T16:11:19Z",
-  "FinishedTime": "2026-10-13T16:11:20Z",
-  "output": "tenants [{'id': 'pilot-t4', 'name': 'T4部署验收测试企业'}]\nconnections [{'id': '0aeb613589f381d2ccabea7f', 'tenant_id': 'pilot-t4', 'label': '测试', 'channel': 'whatsapp_personal', 'legacy': 0, 'ai_enabled': 0}]\n{\"command\": [\"id\", \"b2b\"], \"exit\": 0, \"output\": \"uid=999(b2b) gid=987(b2b) groups=987(b2b)\\n\"}\n{\"command\": [\"docker\", \"ps\", \"--format\", \"{{.Names}}\"], \"exit\": 0, \"output\": \"\"}\n{\"command\": [\"free\", \"-m\"], \"exit\": 0, \"output\": \"               total        used        free      shared  buff/cache   available\\nMem:            3499         684         156           2        2950        2814\\nSwap:              0           0           0\\n\"}\n{\"command\": [\"systemctl\", \"show\", \"b2b-app\", \"-p\", \"MemoryCurrent\"], \"exit\": 0, \"output\": \"MemoryCurrent=60739584\\n\"}\n{\"command\": [\"systemctl\", \"show\", \"b2b-offsite-backup\", \"-p\", \"Result\", \"-p\", \"ExecMainStatus\", \"-p\", \"ActiveEnterTimestamp\"], \"exit\": 0, \"output\": \"Result=success\\nExecMainStatus=0\\nActiveEnterTimestamp=\\n\"}\n{\"command\": [\"systemctl\", \"list-timers\", \"--all\", \"b2b-offsite-backup.timer\"], \"exit\": 0, \"output\": \"NEXT                            LEFT LAST PASSED UNIT                     ACTIVATES\\nWed 2026-10-14 04:32:35 CST 4h 21min -         - b2b-offsite-backup.timer b2b-offsite-backup.service\\n\\n1 timers listed.\\n\"}\n"
-}
